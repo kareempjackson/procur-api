@@ -101,7 +101,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, description, logo_url),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
         product_images(image_url, is_primary, display_order)
       `,
       )
@@ -188,7 +188,7 @@ export class BuyersService {
           seller: {
             id: product.seller_organization.id,
             name: product.seller_organization.name,
-            description: product.seller_organization.description,
+            description: undefined,
             logo_url: product.seller_organization.logo_url,
             average_rating: undefined, // TODO: Calculate seller rating
             review_count: 0, // TODO: Count seller reviews
@@ -219,7 +219,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, description, logo_url),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
         product_images(image_url, alt_text, is_primary, display_order)
       `,
       )
@@ -286,7 +286,7 @@ export class BuyersService {
       seller: {
         id: product.seller_organization.id,
         name: product.seller_organization.name,
-        description: product.seller_organization.description,
+        description: undefined,
         logo_url: product.seller_organization.logo_url,
         average_rating: undefined, // TODO: Calculate seller rating
         review_count: 0, // TODO: Count seller reviews
@@ -362,10 +362,10 @@ export class BuyersService {
       .from('organizations')
       .select(
         `
-        id, name, description, logo_url, created_at, business_type, country,
+        id, name, logo_url, created_at, business_type, country,
         products(id)
       `,
-        { count: 'exact' }
+        { count: 'exact' },
       )
       .eq('account_type', 'seller')
       .eq('status', 'active');
@@ -387,7 +387,9 @@ export class BuyersService {
 
     // Apply sorting
     const sortField = sort_by === 'product_count' ? 'created_at' : sort_by; // We'll sort by product count in memory
-    queryBuilder = queryBuilder.order(sortField, { ascending: sort_order === 'asc' });
+    queryBuilder = queryBuilder.order(sortField, {
+      ascending: sort_order === 'asc',
+    });
 
     // Apply pagination
     queryBuilder = queryBuilder.range(offset, offset + limit - 1);
@@ -399,21 +401,22 @@ export class BuyersService {
         `Failed to fetch sellers: ${error.message}`,
       );
 
-    let mappedSellers = sellers?.map((seller) => ({
-      id: seller.id,
-      name: seller.name,
-      description: seller.description,
-      business_type: seller.business_type,
-      logo_url: seller.logo_url,
-      location: seller.country,
-      average_rating: undefined, // TODO: Calculate from reviews
-      review_count: 0, // TODO: Count reviews
-      product_count: seller.products?.length || 0,
-      years_in_business:
-        new Date().getFullYear() - new Date(seller.created_at).getFullYear(),
-      is_verified: true, // TODO: Add verification logic
-      specialties: [], // TODO: Add specialties
-    })) || [];
+    let mappedSellers =
+      sellers?.map((seller) => ({
+        id: seller.id,
+        name: seller.name,
+        description: undefined,
+        business_type: seller.business_type,
+        logo_url: seller.logo_url,
+        location: seller.country,
+        average_rating: undefined, // TODO: Calculate from reviews
+        review_count: 0, // TODO: Count reviews
+        product_count: seller.products?.length || 0,
+        years_in_business:
+          new Date().getFullYear() - new Date(seller.created_at).getFullYear(),
+        is_verified: true, // TODO: Add verification logic
+        specialties: [], // TODO: Add specialties
+      })) || [];
 
     // Sort by product count if requested (since we can't do this in the database query easily)
     if (sort_by === 'product_count') {

@@ -23,4 +23,21 @@ export default () => ({
     apiPrefix: process.env.API_PREFIX || 'api',
     apiVersion: process.env.API_VERSION || 'v1',
   },
+
+  redis: {
+    url: process.env.REDIS_URL,
+  },
+
+  push: {
+    vapid: {
+      publicKey: process.env.VAPID_PUBLIC_KEY,
+      privateKey: process.env.VAPID_PRIVATE_KEY,
+      subject: process.env.VAPID_SUBJECT,
+    },
+    firebase: {
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    },
+  },
 });

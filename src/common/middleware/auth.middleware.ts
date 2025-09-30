@@ -45,9 +45,11 @@ export class AuthMiddleware implements NestMiddleware {
         throw new UnauthorizedException('User not found or inactive');
       }
 
-      // Get user permissions if they belong to an organization
+      // Get user permissions
       let permissions: string[] = [];
-      if (payload.organizationId) {
+      if (payload.devPermissions && payload.devPermissions.length > 0) {
+        permissions = payload.devPermissions;
+      } else if (payload.organizationId) {
         const userPermissions = await this.supabaseService.getUserPermissions(
           payload.sub,
           payload.organizationId,

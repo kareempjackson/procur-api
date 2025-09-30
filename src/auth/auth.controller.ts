@@ -20,6 +20,7 @@ import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { DevSigninDto } from './dto/dev-signin.dto';
 import {
   AuthResponseDto,
   SignupResponseDto,
@@ -188,5 +189,25 @@ export class AuthController {
     @Query('email') email: string,
   ): Promise<{ message: string }> {
     return this.authService.resendVerificationEmail(email);
+  }
+
+  @Public()
+  @Post('dev-signin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Dev-only Sign In by Account Type',
+    description:
+      'Authenticate as a seeded user by account type. Available only in non-production environments.',
+  })
+  @ApiBody({ type: DevSigninDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Dev user authenticated successfully',
+    type: AuthResponseDto,
+  })
+  async devSignin(
+    @Body(ValidationPipe) devSigninDto: DevSigninDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.devSignin(devSigninDto);
   }
 }

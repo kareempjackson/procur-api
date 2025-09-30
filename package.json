@@ -17,7 +17,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "start:worker": "ts-node src/notification-worker.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
@@ -27,6 +28,8 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
     "@nestjs/swagger": "^11.2.0",
+    "@nestjs/platform-socket.io": "^11.0.1",
+    "@nestjs/websockets": "^11.0.1",
     "@supabase/supabase-js": "^2.58.0",
     "bcryptjs": "^3.0.2",
     "class-transformer": "^0.5.1",
@@ -36,7 +39,11 @@
     "postmark": "^4.0.5",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "bullmq": "^5.12.2",
+    "firebase-admin": "^12.6.0",
+    "ioredis": "^5.4.1",
+    "web-push": "^3.6.6"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

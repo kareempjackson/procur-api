@@ -9,6 +9,8 @@ export interface JwtPayload {
   organizationId?: string; // for organization members
   organizationRole?: string; // role within organization
   emailVerified: boolean;
+  // Dev-only override: if present, bypass DB permission lookup
+  devPermissions?: string[];
   iat?: number;
   exp?: number;
 }

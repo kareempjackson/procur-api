@@ -15,6 +15,7 @@ import { newId } from '../common/utils/id.utils';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { DevSigninDto } from './dto/dev-signin.dto';
 import {
   AuthResponseDto,
   SignupResponseDto,
@@ -184,6 +185,125 @@ export class AuthService {
         fullname: user.fullname,
         role: user.role,
         accountType,
+        emailVerified: user.email_verified,
+        organizationId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
+
+  async devSignin(devSigninDto: DevSigninDto): Promise<AuthResponseDto> {
+    const nodeEnv = this.configService.get<string>('nodeEnv') || 'development';
+    if (nodeEnv === 'production') {
+      throw new UnauthorizedException(
+        'Dev sign-in is not allowed in production',
+      );
+    }
+
+    const { accountType } = devSigninDto;
+
+    // Choose a seeded user email for each account type
+    const seedEmailByType: Record<string, string> = {
+      seller: 'john@greenfarms.com',
+      buyer: 'chef@finedining.com',
+      government: 'admin@agriculture.gov',
+    };
+
+    const email = seedEmailByType[accountType];
+    if (!email) {
+      throw new BadRequestException('Unsupported account type');
+    }
+
+    const user = await this.supabaseService.findUserByEmail(email);
+    if (!user) {
+      throw new UnauthorizedException('Seed user not found for dev sign-in');
+    }
+
+    if (!user.is_active) {
+      throw new UnauthorizedException('Account is deactivated');
+    }
+
+    // Update last login
+    await this.supabaseService.updateUserLastLogin(user.id);
+
+    // Enrich with organization info to determine effective account type
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(
+      user.id,
+    );
+
+    const {
+      organizationId,
+      organizationName,
+      organizationRole,
+      accountType: effectiveAccountType,
+    } = this.extractOrganizationInfo(user, userWithOrg);
+
+    // In dev, attach a comprehensive permission set for the chosen account type
+    const devPermissionSets: Record<string, string[]> = {
+      seller: [
+        'view_products',
+        'manage_products',
+        'view_orders',
+        'accept_orders',
+        'manage_orders',
+        'view_transactions',
+        'manage_posts',
+        'manage_seller_analytics',
+        'manage_inventory',
+        'view_posts',
+      ],
+      buyer: [
+        'browse_marketplace',
+        'manage_cart',
+        'create_product_requests',
+        'manage_product_requests',
+        'place_orders',
+        'view_buyer_orders',
+        'cancel_orders',
+        'review_orders',
+        'manage_buyer_profile',
+        'manage_addresses',
+        'manage_favorites',
+        'view_buyer_transactions',
+      ],
+      government: [
+        'manage_role_permissions',
+        'view_government_data',
+        'manage_government_tables',
+        'edit_seller_data',
+        'create_government_charts',
+        'manage_government_reports',
+        'view_reports',
+      ],
+    };
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType: effectiveAccountType,
+      organizationId,
+      organizationRole,
+      emailVerified: user.email_verified,
+      devPermissions: devPermissionSets[accountType] || [],
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    this.logger.log(`Dev sign-in successful for ${email} as ${accountType}`);
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType: effectiveAccountType,
         emailVerified: user.email_verified,
         organizationId,
         organizationName,

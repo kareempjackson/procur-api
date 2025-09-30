@@ -12,6 +12,7 @@ import { HomeModule } from './home/home.module';
 import { MessagesModule } from './messages/messages.module';
 import { DatabaseModule } from './database/database.module';
 import { EmailModule } from './email/email.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { AuthMiddleware } from './common/middleware/auth.middleware';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
@@ -29,6 +30,7 @@ import { validate } from './config/validation';
     }),
     DatabaseModule,
     EmailModule,
+    NotificationsModule,
     AuthModule,
     UsersModule,
     SellersModule,
