@@ -1,0 +1,337 @@
+import {
+  Injectable,
+  ConflictException,
+  UnauthorizedException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcryptjs';
+import { SupabaseService } from '../database/supabase.service';
+import { EmailService } from '../email/email.service';
+import { DatabaseUser } from '../database/types/database.types';
+import { newId } from '../common/utils/id.utils';
+import { SignupDto } from './dto/signup.dto';
+import { SigninDto } from './dto/signin.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
+import {
+  AuthResponseDto,
+  SignupResponseDto,
+  VerifyEmailResponseDto,
+} from './dto/auth-response.dto';
+import { JwtPayload } from '../common/interfaces/jwt-payload.interface';
+import { AccountType } from '../common/enums/account-type.enum';
+import { BusinessType } from '../common/enums/business-types.enum';
+
+@Injectable()
+export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
+  constructor(
+    private supabaseService: SupabaseService,
+    private emailService: EmailService,
+    private jwtService: JwtService,
+    private configService: ConfigService,
+  ) {}
+
+  async signup(signupDto: SignupDto): Promise<SignupResponseDto> {
+    const { email, password, fullname, accountType, country } = signupDto;
+
+    // Check if user already exists
+    const existingUser = await this.supabaseService.findUserByEmail(email);
+    if (existingUser) {
+      throw new ConflictException('User with this email already exists');
+    }
+
+    // Hash password
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Generate email verification token
+    const verificationToken = newId();
+    const verificationExpires = new Date();
+    verificationExpires.setHours(verificationExpires.getHours() + 24); // 24 hours
+
+    try {
+      // Create user in database
+      const userData = {
+        email,
+        password: hashedPassword,
+        fullname,
+        individual_account_type: accountType,
+        country,
+        email_verification_token: verificationToken,
+        email_verification_expires: verificationExpires,
+      };
+
+      const user = await this.supabaseService.createUser(userData);
+
+      // For buyer and seller accounts, create an organization
+      if (
+        accountType === AccountType.BUYER ||
+        accountType === AccountType.SELLER
+      ) {
+        const organizationData = {
+          name: `${fullname}'s ${accountType === AccountType.BUYER ? 'Business' : 'Company'}`,
+          account_type: accountType,
+          business_type: 'general' as BusinessType,
+          country,
+        };
+
+        const organization =
+          await this.supabaseService.createOrganization(organizationData);
+
+        // Add user to organization with admin role
+        // Note: We need to get the admin role ID for the organization
+        // This will be handled by the database trigger that creates default roles
+        // We'll need to query for the admin role and add the user
+        const { data: adminRole } = await this.supabaseService
+          .getClient()
+          .from('organization_roles')
+          .select('id')
+          .eq('organization_id', organization.id)
+          .eq('name', 'admin')
+          .single();
+
+        if (adminRole) {
+          await this.supabaseService.addUserToOrganization(
+            user.id,
+            organization.id,
+            adminRole.id,
+          );
+        }
+
+        this.logger.log(
+          `Organization created for user: ${email}, org: ${organization.id}`,
+        );
+      }
+
+      // Send verification email
+      await this.emailService.sendVerificationEmail(
+        email,
+        fullname,
+        verificationToken,
+      );
+
+      this.logger.log(`User created successfully: ${email}`);
+
+      return {
+        message:
+          'User created successfully. Please check your email for verification.',
+        email,
+      };
+    } catch (error) {
+      this.logger.error('Error during signup:', error);
+      throw new BadRequestException('Failed to create user account');
+    }
+  }
+
+  async signin(signinDto: SigninDto): Promise<AuthResponseDto> {
+    const { email, password } = signinDto;
+
+    // Find user by email
+    const user = await this.supabaseService.findUserByEmail(email);
+    if (!user) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Check if user is active
+    if (!user.is_active) {
+      throw new UnauthorizedException('Account is deactivated');
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    // Update last login
+    await this.supabaseService.updateUserLastLogin(user.id);
+
+    // Get user with organization info if applicable
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(
+      user.id,
+    );
+
+    const { organizationId, organizationName, organizationRole, accountType } =
+      this.extractOrganizationInfo(user, userWithOrg);
+
+    // Generate JWT token
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType,
+      organizationId,
+      organizationRole,
+      emailVerified: user.email_verified,
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    this.logger.log(`User signed in successfully: ${email}`);
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType,
+        emailVerified: user.email_verified,
+        organizationId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
+
+  async verifyEmail(
+    verifyEmailDto: VerifyEmailDto,
+  ): Promise<VerifyEmailResponseDto> {
+    const { token } = verifyEmailDto;
+
+    try {
+      // Verify email using token
+      const user = await this.supabaseService.verifyUserEmail(token);
+
+      if (!user) {
+        throw new BadRequestException('Invalid or expired verification token');
+      }
+
+      // Send welcome email
+      await this.emailService.sendWelcomeEmail(user.email, user.fullname);
+
+      // Generate JWT token for the verified user
+      const userWithOrg = await this.supabaseService.getUserWithOrganization(
+        user.id,
+      );
+
+      const {
+        organizationId,
+        organizationName,
+        organizationRole,
+        accountType,
+      } = this.extractOrganizationInfo(user, userWithOrg);
+
+      const payload: JwtPayload = {
+        sub: user.id,
+        email: user.email,
+        role: user.role,
+        accountType,
+        organizationId,
+        organizationRole,
+        emailVerified: true,
+      };
+
+      const accessToken = this.jwtService.sign(payload);
+      const expiresIn = this.getTokenExpirationSeconds();
+
+      this.logger.log(`Email verified successfully: ${user.email}`);
+
+      return {
+        message: 'Email verified successfully. Welcome to Procur!',
+        auth: {
+          accessToken,
+          tokenType: 'Bearer',
+          expiresIn,
+          user: {
+            id: user.id,
+            email: user.email,
+            fullname: user.fullname,
+            role: user.role,
+            accountType,
+            emailVerified: true,
+            organizationId,
+            organizationName,
+            organizationRole,
+          },
+        },
+      };
+    } catch (error) {
+      this.logger.error('Error during email verification:', error);
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new BadRequestException('Failed to verify email');
+    }
+  }
+
+  async resendVerificationEmail(email: string): Promise<{ message: string }> {
+    const user = await this.supabaseService.findUserByEmail(email);
+
+    if (!user) {
+      throw new BadRequestException('User not found');
+    }
+
+    if (user.email_verified) {
+      throw new BadRequestException('Email is already verified');
+    }
+
+    // Generate new verification token
+    const verificationToken = newId();
+    const verificationExpires = new Date();
+    verificationExpires.setHours(verificationExpires.getHours() + 24);
+
+    // Update user with new token
+    await this.supabaseService.updateUser(user.id, {
+      email_verification_token: verificationToken,
+      email_verification_expires: verificationExpires.toISOString(),
+    });
+
+    // Send new verification email
+    await this.emailService.sendVerificationEmail(
+      user.email,
+      user.fullname,
+      verificationToken,
+    );
+
+    this.logger.log(`Verification email resent to: ${email}`);
+
+    return {
+      message: 'Verification email sent. Please check your inbox.',
+    };
+  }
+
+  private getTokenExpirationSeconds(): number {
+    const expiresIn = this.configService.get<string>('jwt.expiresIn') || '7d';
+
+    // Convert to seconds (assuming format like '7d', '24h', '3600s')
+    if (expiresIn.endsWith('d')) {
+      return parseInt(expiresIn) * 24 * 60 * 60;
+    } else if (expiresIn.endsWith('h')) {
+      return parseInt(expiresIn) * 60 * 60;
+    } else if (expiresIn.endsWith('m')) {
+      return parseInt(expiresIn) * 60;
+    } else if (expiresIn.endsWith('s')) {
+      return parseInt(expiresIn);
+    }
+
+    // Default to 7 days
+    return 7 * 24 * 60 * 60;
+  }
+
+  private extractOrganizationInfo(user: DatabaseUser, userWithOrg: any) {
+    let organizationId: string | undefined;
+    let organizationName: string | undefined;
+    let organizationRole: string | undefined;
+    let accountType: AccountType | undefined =
+      user.individual_account_type as AccountType;
+
+    if (userWithOrg?.organization_users?.[0]) {
+      const orgUser = userWithOrg.organization_users[0];
+      organizationId = orgUser.organization_id;
+      organizationName = orgUser.organizations.name;
+      organizationRole = orgUser.organization_roles.name;
+      accountType = orgUser.organizations.account_type as AccountType;
+    }
+
+    return { organizationId, organizationName, organizationRole, accountType };
+  }
+}
