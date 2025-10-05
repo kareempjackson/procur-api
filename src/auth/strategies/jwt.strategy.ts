@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -10,6 +10,8 @@ import { SupabaseService } from '../../database/supabase.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
+  private readonly logger = new Logger(JwtStrategy.name);
+
   constructor(
     private configService: ConfigService,
     private supabaseService: SupabaseService,
@@ -39,12 +41,18 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       let permissions: string[] = [];
       if (payload.devPermissions && payload.devPermissions.length > 0) {
         permissions = payload.devPermissions;
+        this.logger.debug(
+          `Using dev permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
+        );
       } else if (payload.organizationId) {
         const userPermissions = await this.supabaseService.getUserPermissions(
           payload.sub,
           payload.organizationId,
         );
         permissions = userPermissions.map((p) => p.permission_name);
+        this.logger.debug(
+          `Loaded ${permissions.length} permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
+        );
       }
 
       return {

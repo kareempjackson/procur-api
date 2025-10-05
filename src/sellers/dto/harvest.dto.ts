@@ -8,7 +8,7 @@ import {
   MaxLength,
 } from 'class-validator';
 
-export class CreateHarvestRequestDto {
+export class CreateSellerHarvestDto {
   @ApiProperty({ description: 'Primary crop being harvested' })
   @IsString()
   @IsNotEmpty()
@@ -95,7 +95,7 @@ export class HarvestRequestResponseDto {
   created_by?: string | null;
 }
 
-export class HarvestCommentDto {
+export class SellerHarvestCommentDto {
   @ApiProperty()
   id!: string;
 
@@ -115,7 +115,7 @@ export class HarvestCommentDto {
   created_at!: string;
 }
 
-export class CreateHarvestCommentDto {
+export class CreateSellerHarvestCommentDto {
   @ApiProperty({ description: 'Comment text' })
   @IsString()
   @IsNotEmpty()
@@ -228,8 +228,8 @@ export class HarvestFeedItemDto {
   @ApiProperty({ description: 'Number of buyer requests' })
   requests_count!: number;
 
-  @ApiProperty({ type: [HarvestCommentDto] })
-  comments!: HarvestCommentDto[];
+  @ApiProperty({ type: [SellerHarvestCommentDto] })
+  comments!: SellerHarvestCommentDto[];
 
   @ApiProperty({ type: [HarvestBuyerRequestDto] })
   requests!: HarvestBuyerRequestDto[];

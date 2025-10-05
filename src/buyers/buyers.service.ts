@@ -64,10 +64,10 @@ import {
   HarvestUpdatesQueryDto,
   HarvestUpdateDto,
   HarvestUpdateDetailDto,
-  HarvestCommentDto,
-  CreateHarvestCommentDto,
+  BuyerHarvestCommentDto,
+  CreateBuyerHarvestCommentDto,
   ToggleHarvestLikeDto,
-  CreateHarvestRequestDto,
+  CreateBuyerHarvestRequestDto,
 } from './dto';
 
 @Injectable()
@@ -2045,6 +2045,83 @@ export class BuyersService {
       );
   }
 
+  async getFavoriteSellers(buyerOrgId: string): Promise<FavoriteSellerDto[]> {
+    const { data: favorites, error } = await this.supabase
+      .getClient()
+      .from('buyer_favorite_sellers')
+      .select(
+        `
+        seller_org_id, created_at,
+        seller:organizations!seller_org_id(
+          id, name, logo_url, business_type, country,
+          products(count)
+        )
+      `,
+      )
+      .eq('buyer_org_id', buyerOrgId)
+      .order('created_at', { ascending: false });
+
+    if (error)
+      throw new BadRequestException(
+        `Failed to fetch favorite sellers: ${error.message}`,
+      );
+
+    return (
+      favorites?.map((fav) => {
+        const seller = Array.isArray(fav.seller) ? fav.seller[0] : fav.seller;
+        return {
+          seller_org_id: fav.seller_org_id,
+          seller_name: seller?.name || 'Unknown Seller',
+          logo_url: seller?.logo_url,
+          description: seller?.business_type,
+          average_rating: undefined, // TODO: Calculate from reviews
+          product_count: seller?.products?.[0]?.count || 0,
+          created_at: fav.created_at,
+        };
+      }) || []
+    );
+  }
+
+  async addSellerToFavorites(
+    buyerOrgId: string,
+    sellerId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .getClient()
+      .from('buyer_favorite_sellers')
+      .insert({
+        buyer_org_id: buyerOrgId,
+        seller_org_id: sellerId,
+      });
+
+    if (error) {
+      if (error.code === '23505') {
+        // Already exists
+        return;
+      }
+      throw new BadRequestException(
+        `Failed to add seller to favorites: ${error.message}`,
+      );
+    }
+  }
+
+  async removeSellerFromFavorites(
+    buyerOrgId: string,
+    sellerId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .getClient()
+      .from('buyer_favorite_sellers')
+      .delete()
+      .eq('buyer_org_id', buyerOrgId)
+      .eq('seller_org_id', sellerId);
+
+    if (error)
+      throw new BadRequestException(
+        `Failed to remove seller from favorites: ${error.message}`,
+      );
+  }
+
   // ==================== TRANSACTION METHODS ====================
 
   async getTransactions(
@@ -2375,7 +2452,7 @@ export class BuyersService {
       .order('created_at', { ascending: false })
       .limit(10);
 
-    const recentComments: HarvestCommentDto[] =
+    const recentComments: BuyerHarvestCommentDto[] =
       comments?.map((comment) => ({
         id: comment.id,
         buyer_org_id: comment.buyer_org_id,
@@ -2474,8 +2551,8 @@ export class BuyersService {
     buyerOrgId: string,
     buyerUserId: string,
     harvestId: string,
-    commentDto: CreateHarvestCommentDto,
-  ): Promise<HarvestCommentDto> {
+    commentDto: CreateBuyerHarvestCommentDto,
+  ): Promise<BuyerHarvestCommentDto> {
     // Verify harvest exists
     const { data: harvest } = await this.supabase
       .getClient()
@@ -2524,7 +2601,9 @@ export class BuyersService {
     };
   }
 
-  async getHarvestComments(harvestId: string): Promise<HarvestCommentDto[]> {
+  async getHarvestComments(
+    harvestId: string,
+  ): Promise<BuyerHarvestCommentDto[]> {
     const { data: comments, error } = await this.supabase
       .getClient()
       .from('harvest_comments')
@@ -2562,7 +2641,7 @@ export class BuyersService {
     buyerOrgId: string,
     buyerUserId: string,
     harvestId: string,
-    requestDto: CreateHarvestRequestDto,
+    requestDto: CreateBuyerHarvestRequestDto,
   ): Promise<void> {
     // Verify harvest exists
     const { data: harvest } = await this.supabase

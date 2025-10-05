@@ -3,12 +3,15 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { UserContext } from '../../common/interfaces/jwt-payload.interface';
 
 @Injectable()
 export class PermissionsGuard implements CanActivate {
+  private readonly logger = new Logger(PermissionsGuard.name);
+
   constructor(private reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
@@ -45,6 +48,11 @@ export class PermissionsGuard implements CanActivate {
 
     const userPermissions = user.permissions || [];
 
+    // Log for debugging
+    this.logger.debug(
+      `Permission Check - Required: ${JSON.stringify(requiredPermissions)}, User has: ${JSON.stringify(userPermissions)}, User: ${user.email}`,
+    );
+
     // Check if user has ALL required permissions
     if (requiredPermissions) {
       const hasAllPermissions = requiredPermissions.every((permission) =>
@@ -52,6 +60,12 @@ export class PermissionsGuard implements CanActivate {
       );
 
       if (!hasAllPermissions) {
+        const missingPermissions = requiredPermissions.filter(
+          (permission) => !userPermissions.includes(permission),
+        );
+        this.logger.warn(
+          `User ${user.email} missing permissions: ${JSON.stringify(missingPermissions)}`,
+        );
         throw new ForbiddenException('Insufficient permissions');
       }
     }

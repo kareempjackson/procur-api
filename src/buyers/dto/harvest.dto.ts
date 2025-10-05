@@ -142,7 +142,7 @@ export class HarvestUpdateDto {
 
 export class HarvestUpdateDetailDto extends HarvestUpdateDto {
   @ApiProperty({ description: 'Recent comments', type: [Object] })
-  recent_comments: HarvestCommentDto[];
+  recent_comments: BuyerHarvestCommentDto[];
 
   @ApiPropertyOptional({ description: 'Seller contact info' })
   seller_contact?: {
@@ -151,7 +151,7 @@ export class HarvestUpdateDetailDto extends HarvestUpdateDto {
   };
 }
 
-export class HarvestCommentDto {
+export class BuyerHarvestCommentDto {
   @ApiProperty({ description: 'Comment ID' })
   id: string;
 
@@ -178,7 +178,7 @@ export class HarvestCommentDto {
 }
 
 // Create/Update DTOs
-export class CreateHarvestCommentDto {
+export class CreateBuyerHarvestCommentDto {
   @ApiProperty({ description: 'Comment content' })
   @IsString()
   content: string;
@@ -190,7 +190,7 @@ export class ToggleHarvestLikeDto {
   is_like: boolean;
 }
 
-export class CreateHarvestRequestDto {
+export class CreateBuyerHarvestRequestDto {
   @ApiProperty({ description: 'Requested quantity' })
   @IsNumber()
   @Min(0)

@@ -31,11 +31,11 @@ import {
 } from './dto';
 import { SellerHomeResponseDto, BuyerRequestSummaryDto } from './dto/home.dto';
 import {
-  CreateHarvestRequestDto,
+  CreateSellerHarvestDto,
   HarvestRequestResponseDto,
   HarvestFeedItemDto,
-  HarvestCommentDto,
-  CreateHarvestCommentDto,
+  SellerHarvestCommentDto,
+  CreateSellerHarvestCommentDto,
   CreateHarvestBuyerRequestDto,
   HarvestBuyerRequestDto,
   AcknowledgeHarvestBuyerRequestDto,
@@ -1449,7 +1449,7 @@ export class SellersService {
 
   async createHarvestRequest(
     sellerOrgId: string,
-    dto: CreateHarvestRequestDto,
+    dto: CreateSellerHarvestDto,
     userId: string,
   ): Promise<HarvestRequestResponseDto> {
     const client = this.supabaseService.getClient();
@@ -1551,7 +1551,7 @@ export class SellersService {
       comments_count: h.comments_count || 0,
       requests_count: h.requests_count || 0,
       comments: (commentsByHarvest.get(h.id) || []).map(
-        (c: any): HarvestCommentDto => ({
+        (c: any): SellerHarvestCommentDto => ({
           id: c.id,
           harvest_id: c.harvest_id,
           buyer_org_id: c.buyer_org_id,
@@ -1585,8 +1585,8 @@ export class SellersService {
     buyerOrgId: string,
     buyerUserId: string,
     harvestId: string,
-    dto: CreateHarvestCommentDto,
-  ): Promise<HarvestCommentDto> {
+    dto: CreateSellerHarvestCommentDto,
+  ): Promise<SellerHarvestCommentDto> {
     const client = this.supabaseService.getClient();
 
     // Ensure harvest exists
@@ -1729,6 +1729,232 @@ export class SellersService {
       acknowledged_by: data.acknowledged_by,
       seller_message: data.seller_message,
       created_at: data.created_at,
+    };
+  }
+
+  // ==================== PRODUCT REQUESTS (SELLER VIEW) ====================
+
+  async getProductRequests(
+    sellerOrgId: string,
+    query: any,
+  ): Promise<{
+    requests: any[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const { page = 1, limit = 20, status, search, category } = query;
+    const offset = (page - 1) * limit;
+
+    const client = this.supabaseService.getClient();
+
+    // Build query - get requests that are either targeted at this seller or open to all
+    let queryBuilder = client
+      .from('product_requests')
+      .select(
+        `
+        *,
+        buyer_org:organizations!buyer_org_id(name),
+        quotes:request_quotes!request_id(id, seller_org_id, status)
+      `,
+        { count: 'exact' },
+      )
+      .or(`target_seller_id.eq.${sellerOrgId},target_seller_id.is.null`);
+
+    // Apply filters
+    if (status) queryBuilder = queryBuilder.eq('status', status);
+    if (category) queryBuilder = queryBuilder.eq('category', category);
+    if (search) {
+      queryBuilder = queryBuilder.or(
+        `product_name.ilike.%${search}%,description.ilike.%${search}%`,
+      );
+    }
+
+    // Pagination and sorting
+    queryBuilder = queryBuilder
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    const { data: requests, error, count } = await queryBuilder;
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch product requests: ${error.message}`,
+      );
+    }
+
+    // Map to response DTO
+    const mapped = (requests || []).map((req) => {
+      const myQuote = req.quotes?.find(
+        (q: any) => q.seller_org_id === sellerOrgId,
+      );
+
+      return {
+        id: req.id,
+        request_number: req.request_number,
+        buyer_org_id: req.buyer_org_id,
+        buyer_name: req.buyer_org?.name || 'Unknown Buyer',
+        product_name: req.product_name,
+        description: req.description,
+        category: req.category,
+        quantity: req.quantity,
+        unit_of_measurement: req.unit_of_measurement,
+        budget_range: req.budget_range,
+        date_needed: req.date_needed,
+        delivery_location: req.delivery_location,
+        status: req.status,
+        expires_at: req.expires_at,
+        quote_count: req.quotes?.length || 0,
+        my_quote: myQuote
+          ? {
+              id: myQuote.id,
+              status: myQuote.status,
+            }
+          : undefined,
+        created_at: req.created_at,
+      };
+    });
+
+    return {
+      requests: mapped,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  async getProductRequestDetail(
+    sellerOrgId: string,
+    requestId: string,
+  ): Promise<any> {
+    const client = this.supabaseService.getClient();
+
+    const { data: request, error } = await client
+      .from('product_requests')
+      .select(
+        `
+        *,
+        buyer_org:organizations!buyer_org_id(name, country, logo_url),
+        quotes:request_quotes!request_id(
+          id, seller_org_id, unit_price, total_price, currency,
+          available_quantity, delivery_date, notes, status, created_at
+        )
+      `,
+      )
+      .eq('id', requestId)
+      .single();
+
+    if (error || !request) {
+      throw new NotFoundException('Product request not found');
+    }
+
+    // Check if seller has access to this request
+    if (request.target_seller_id && request.target_seller_id !== sellerOrgId) {
+      throw new ForbiddenException('Access denied to this request');
+    }
+
+    const myQuote = request.quotes?.find(
+      (q: any) => q.seller_org_id === sellerOrgId,
+    );
+
+    return {
+      id: request.id,
+      request_number: request.request_number,
+      buyer_org_id: request.buyer_org_id,
+      buyer_name: request.buyer_org?.name || 'Unknown Buyer',
+      buyer_country: request.buyer_org?.country,
+      buyer_logo_url: request.buyer_org?.logo_url,
+      product_name: request.product_name,
+      description: request.description,
+      category: request.category,
+      quantity: request.quantity,
+      unit_of_measurement: request.unit_of_measurement,
+      budget_range: request.budget_range,
+      date_needed: request.date_needed,
+      delivery_location: request.delivery_location,
+      specifications: request.specifications,
+      certifications_required: request.certifications_required,
+      status: request.status,
+      expires_at: request.expires_at,
+      quote_count: request.quotes?.length || 0,
+      my_quote: myQuote,
+      created_at: request.created_at,
+    };
+  }
+
+  async createQuote(
+    sellerOrgId: string,
+    requestId: string,
+    createDto: any,
+  ): Promise<any> {
+    const client = this.supabaseService.getClient();
+
+    // Check if request exists and is still open
+    const { data: request, error: requestError } = await client
+      .from('product_requests')
+      .select('id, status, target_seller_id')
+      .eq('id', requestId)
+      .single();
+
+    if (requestError || !request) {
+      throw new NotFoundException('Product request not found');
+    }
+
+    if (request.status !== 'open') {
+      throw new BadRequestException(
+        'This request is no longer accepting quotes',
+      );
+    }
+
+    // Check if seller has access
+    if (request.target_seller_id && request.target_seller_id !== sellerOrgId) {
+      throw new ForbiddenException('Access denied to this request');
+    }
+
+    // Check if seller already submitted a quote
+    const { data: existingQuote } = await client
+      .from('request_quotes')
+      .select('id')
+      .eq('request_id', requestId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (existingQuote) {
+      throw new BadRequestException(
+        'You have already submitted a quote for this request',
+      );
+    }
+
+    // Calculate total price
+    const totalPrice = createDto.unit_price * createDto.available_quantity;
+
+    // Create quote
+    const { data: quote, error: createError } = await client
+      .from('request_quotes')
+      .insert({
+        request_id: requestId,
+        seller_org_id: sellerOrgId,
+        unit_price: createDto.unit_price,
+        total_price: totalPrice,
+        currency: createDto.currency,
+        available_quantity: createDto.available_quantity,
+        delivery_date: createDto.delivery_date,
+        notes: createDto.notes,
+        offered_product_id: createDto.offered_product_id,
+        status: 'pending',
+      })
+      .select('id')
+      .single();
+
+    if (createError) {
+      throw new BadRequestException(
+        `Failed to create quote: ${createError.message}`,
+      );
+    }
+
+    return {
+      id: quote.id,
+      message: 'Quote submitted successfully',
     };
   }
 }

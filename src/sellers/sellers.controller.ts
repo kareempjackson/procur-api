@@ -61,11 +61,11 @@ import {
   ReportGenerationDto,
   ReportResponseDto,
   SellerHomeResponseDto,
-  CreateHarvestRequestDto,
+  CreateSellerHarvestDto,
   HarvestRequestResponseDto,
   HarvestFeedItemDto,
-  HarvestCommentDto,
-  CreateHarvestCommentDto,
+  SellerHarvestCommentDto,
+  CreateSellerHarvestCommentDto,
   CreateHarvestBuyerRequestDto,
   HarvestBuyerRequestDto,
   AcknowledgeHarvestBuyerRequestDto,
@@ -769,7 +769,7 @@ export class SellersController {
   })
   async createHarvestRequest(
     @CurrentUser() user: UserContext,
-    @Body() dto: CreateHarvestRequestDto,
+    @Body() dto: CreateSellerHarvestDto,
   ): Promise<HarvestRequestResponseDto> {
     return this.sellersService.createHarvestRequest(
       user.organizationId!,
@@ -799,12 +799,12 @@ export class SellersController {
     description: 'Buyer comments on a harvest update',
   })
   @ApiParam({ name: 'harvestId', description: 'Harvest ID' })
-  @ApiResponse({ status: 201, type: HarvestCommentDto })
+  @ApiResponse({ status: 201, type: SellerHarvestCommentDto })
   async addHarvestComment(
     @CurrentUser() user: UserContext,
     @Param('harvestId', ParseUUIDPipe) harvestId: string,
-    @Body() dto: CreateHarvestCommentDto,
-  ): Promise<HarvestCommentDto> {
+    @Body() dto: CreateSellerHarvestCommentDto,
+  ): Promise<SellerHarvestCommentDto> {
     // NOTE: Route is under sellers but permission is buyer-side; guard ensures account type
     return this.sellersService.addHarvestComment(
       user.organizationId!,
@@ -854,6 +854,82 @@ export class SellersController {
       requestId,
       user.id,
       dto,
+    );
+  }
+
+  // ==================== PRODUCT REQUESTS ENDPOINTS ====================
+
+  @Get('product-requests')
+  @RequirePermissions('view_product_requests')
+  @ApiOperation({
+    summary: 'Get Product Requests',
+    description: 'Get all product requests (RFQs) visible to this seller',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'status', required: false, type: String })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'category', required: false, type: String })
+  @ApiResponse({
+    status: 200,
+    description: 'Product requests retrieved successfully',
+  })
+  async getProductRequests(
+    @CurrentUser() user: UserContext,
+    @Query() query: any,
+  ) {
+    return this.sellersService.getProductRequests(user.organizationId!, query);
+  }
+
+  @Get('product-requests/:id')
+  @RequirePermissions('view_product_requests')
+  @ApiOperation({
+    summary: 'Get Product Request Detail',
+    description: 'Get detailed information about a specific product request',
+  })
+  @ApiParam({ name: 'id', description: 'Request ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Product request retrieved successfully',
+  })
+  @ApiNotFoundResponse({ description: 'Product request not found' })
+  @ApiForbiddenResponse({ description: 'Access denied to this request' })
+  async getProductRequestDetail(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) requestId: string,
+  ) {
+    return this.sellersService.getProductRequestDetail(
+      user.organizationId!,
+      requestId,
+    );
+  }
+
+  @Post('product-requests/:id/quotes')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('submit_quotes')
+  @ApiOperation({
+    summary: 'Submit Quote',
+    description: 'Submit a quote/response to a product request',
+  })
+  @ApiParam({ name: 'id', description: 'Request ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Quote submitted successfully',
+  })
+  @ApiBadRequestResponse({
+    description: 'Invalid quote data or request no longer accepting quotes',
+  })
+  @ApiNotFoundResponse({ description: 'Product request not found' })
+  @ApiForbiddenResponse({ description: 'Access denied to this request' })
+  async createQuote(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) requestId: string,
+    @Body() createDto: any,
+  ) {
+    return this.sellersService.createQuote(
+      user.organizationId!,
+      requestId,
+      createDto,
     );
   }
 }

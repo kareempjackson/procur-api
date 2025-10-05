@@ -88,10 +88,10 @@ import {
   HarvestUpdatesQueryDto,
   HarvestUpdateDto,
   HarvestUpdateDetailDto,
-  HarvestCommentDto,
-  CreateHarvestCommentDto,
+  BuyerHarvestCommentDto,
+  CreateBuyerHarvestCommentDto,
   ToggleHarvestLikeDto,
-  CreateHarvestRequestDto,
+  CreateBuyerHarvestRequestDto,
 } from './dto';
 
 @ApiTags('Buyers')
@@ -158,7 +158,8 @@ export class BuyersController {
   @RequirePermissions('browse_marketplace')
   @ApiOperation({
     summary: 'Browse Sellers',
-    description: 'Get list of available sellers/vendors with filtering and pagination',
+    description:
+      'Get list of available sellers/vendors with filtering and pagination',
   })
   @ApiResponse({
     status: 200,
@@ -166,7 +167,10 @@ export class BuyersController {
     schema: {
       type: 'object',
       properties: {
-        sellers: { type: 'array', items: { $ref: '#/components/schemas/MarketplaceSellerDto' } },
+        sellers: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/MarketplaceSellerDto' },
+        },
         total: { type: 'number' },
         page: { type: 'number' },
         limit: { type: 'number' },
@@ -925,8 +929,7 @@ export class BuyersController {
   async getFavoriteSellers(
     @CurrentUser() user: UserContext,
   ): Promise<FavoriteSellerDto[]> {
-    // TODO: Implement getFavoriteSellers in service
-    throw new Error('Not implemented');
+    return this.buyersService.getFavoriteSellers(user.organizationId!);
   }
 
   @Post('favorites/sellers/:id')
@@ -946,8 +949,10 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) sellerId: string,
   ): Promise<void> {
-    // TODO: Implement addSellerToFavorites in service
-    throw new Error('Not implemented');
+    return this.buyersService.addSellerToFavorites(
+      user.organizationId!,
+      sellerId,
+    );
   }
 
   @Delete('favorites/sellers/:id')
@@ -966,8 +971,10 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) sellerId: string,
   ): Promise<void> {
-    // TODO: Implement removeSellerFromFavorites in service
-    throw new Error('Not implemented');
+    return this.buyersService.removeSellerFromFavorites(
+      user.organizationId!,
+      sellerId,
+    );
   }
 
   // ==================== TRANSACTION ENDPOINTS ====================
@@ -1154,11 +1161,11 @@ export class BuyersController {
   @ApiResponse({
     status: 200,
     description: 'Comments retrieved successfully',
-    type: [HarvestCommentDto],
+    type: [BuyerHarvestCommentDto],
   })
   async getHarvestComments(
     @Param('id', ParseUUIDPipe) harvestId: string,
-  ): Promise<HarvestCommentDto[]> {
+  ): Promise<BuyerHarvestCommentDto[]> {
     return this.buyersService.getHarvestComments(harvestId);
   }
 
@@ -1173,14 +1180,14 @@ export class BuyersController {
   @ApiResponse({
     status: 201,
     description: 'Comment created successfully',
-    type: HarvestCommentDto,
+    type: BuyerHarvestCommentDto,
   })
   @ApiNotFoundResponse({ description: 'Harvest update not found' })
   async createHarvestComment(
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) harvestId: string,
-    @Body() commentDto: CreateHarvestCommentDto,
-  ): Promise<HarvestCommentDto> {
+    @Body() commentDto: CreateBuyerHarvestCommentDto,
+  ): Promise<BuyerHarvestCommentDto> {
     return this.buyersService.createHarvestComment(
       user.organizationId!,
       user.id,
@@ -1205,7 +1212,7 @@ export class BuyersController {
   async createHarvestRequest(
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) harvestId: string,
-    @Body() requestDto: CreateHarvestRequestDto,
+    @Body() requestDto: CreateBuyerHarvestRequestDto,
   ): Promise<void> {
     return this.buyersService.createHarvestRequest(
       user.organizationId!,
