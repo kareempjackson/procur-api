@@ -15,3 +15,6 @@ export * from './profile.dto';
 
 // Transaction DTOs
 export * from './transaction.dto';
+
+// Harvest Updates DTOs
+export * from './harvest.dto';

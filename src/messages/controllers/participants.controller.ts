@@ -6,10 +6,14 @@ import {
   Param,
   Patch,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 import { ParticipantsService } from '../services/participants.service';
+import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { ConversationAccessGuard } from '../guards/conversation-access.guard';
 
 @Controller('conversations/:conversationId/participants')
+@UseGuards(JwtAuthGuard, ConversationAccessGuard)
 export class ParticipantsController {
   constructor(private readonly participantsService: ParticipantsService) {}
 

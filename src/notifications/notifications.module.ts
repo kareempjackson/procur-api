@@ -43,6 +43,6 @@ import { Queue } from 'bullmq';
     },
   ],
   controllers: [NotificationsController],
-  exports: [NotificationsService],
+  exports: [NotificationsService, NotificationsGateway, NotificationQueue],
 })
 export class NotificationsModule {}

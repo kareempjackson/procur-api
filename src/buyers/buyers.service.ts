@@ -5,6 +5,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
+import { ConversationsService } from '../messages/services/conversations.service';
 import {
   // Cart DTOs
   AddToCartDto,
@@ -58,11 +59,23 @@ import {
   BuyerTransactionSummaryDto,
   CreateDisputeDto,
   DisputeResponseDto,
+
+  // Harvest Updates DTOs
+  HarvestUpdatesQueryDto,
+  HarvestUpdateDto,
+  HarvestUpdateDetailDto,
+  HarvestCommentDto,
+  CreateHarvestCommentDto,
+  ToggleHarvestLikeDto,
+  CreateHarvestRequestDto,
 } from './dto';
 
 @Injectable()
 export class BuyersService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly conversationsService: ConversationsService,
+  ) {}
 
   // ==================== MARKETPLACE METHODS ====================
 
@@ -1547,6 +1560,22 @@ export class BuyersService {
           created_by: buyerUserId,
         });
 
+      // Auto-create conversation for this order
+      try {
+        await this.conversationsService.createOrGetConversation({
+          type: 'contextual',
+          contextType: 'order',
+          contextId: order.id,
+          currentUserId: buyerUserId,
+          currentOrgId: buyerOrgId,
+          otherUserId: undefined, // We don't have seller user ID, just org
+          title: `Order ${orderNumber}`,
+        });
+      } catch (convError) {
+        // Log but don't fail the order creation
+        console.error('Failed to create conversation for order:', convError);
+      }
+
       createdOrders.push(order);
     }
 
@@ -2190,6 +2219,385 @@ export class BuyersService {
     };
   }
 
+  // ==================== HARVEST UPDATES METHODS ====================
+
+  async getHarvestUpdates(
+    query: HarvestUpdatesQueryDto,
+    buyerOrgId?: string,
+  ): Promise<{
+    updates: HarvestUpdateDto[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const {
+      page = 1,
+      limit = 20,
+      crop,
+      seller_org_id,
+      category,
+      sort_by = 'created_at',
+      sort_order = 'desc',
+    } = query;
+
+    const offset = (page - 1) * limit;
+
+    let queryBuilder = this.supabase
+      .getClient()
+      .from('harvest_requests')
+      .select(
+        `
+        *,
+        seller_organization:organizations!seller_org_id(
+          id, name, logo_url, location, country, is_verified
+        )
+      `,
+        { count: 'exact' },
+      )
+      .eq('status', 'active')
+      .eq('visibility', 'public');
+
+    // Apply filters
+    if (crop) {
+      queryBuilder = queryBuilder.ilike('crop', `%${crop}%`);
+    }
+    if (seller_org_id) {
+      queryBuilder = queryBuilder.eq('seller_org_id', seller_org_id);
+    }
+
+    // Apply sorting
+    queryBuilder = queryBuilder.order(sort_by, {
+      ascending: sort_order === 'asc',
+    });
+
+    // Apply pagination
+    queryBuilder = queryBuilder.range(offset, offset + limit - 1);
+
+    const { data: updates, error, count } = await queryBuilder;
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch harvest updates: ${error.message}`,
+      );
+    }
+
+    // Transform data and check if user has liked each update
+    const transformedUpdates: HarvestUpdateDto[] = await Promise.all(
+      updates?.map(async (update) => {
+        const seller = Array.isArray(update.seller_organization)
+          ? update.seller_organization[0]
+          : update.seller_organization;
+
+        const isLiked = buyerOrgId
+          ? await this.isHarvestLiked(buyerOrgId, update.id)
+          : false;
+
+        return {
+          id: update.id,
+          seller_org_id: update.seller_org_id,
+          farm_name: seller?.name || 'Unknown Farm',
+          farm_avatar: seller?.logo_url,
+          location: seller?.location
+            ? `${seller.location}${seller.country ? `, ${seller.country}` : ''}`
+            : undefined,
+          crop: update.crop,
+          content: update.content,
+          expected_harvest_window: update.expected_harvest_window,
+          quantity: update.quantity,
+          unit: update.unit,
+          notes: update.notes,
+          images: update.images || [],
+          likes_count: update.likes_count || 0,
+          comments_count: update.comments_count || 0,
+          requests_count: update.requests_count || 0,
+          is_verified: seller?.is_verified || false,
+          is_liked: isLiked,
+          created_at: update.created_at,
+          time_ago: this.getTimeAgo(update.created_at),
+          next_planting_crop: update.next_planting_crop,
+          next_planting_date: update.next_planting_date,
+          next_planting_area: update.next_planting_area,
+        };
+      }) || [],
+    );
+
+    return {
+      updates: transformedUpdates,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  async getHarvestUpdateDetail(
+    harvestId: string,
+    buyerOrgId?: string,
+  ): Promise<HarvestUpdateDetailDto> {
+    const { data: update, error } = await this.supabase
+      .getClient()
+      .from('harvest_requests')
+      .select(
+        `
+        *,
+        seller_organization:organizations!seller_org_id(
+          id, name, logo_url, location, country, is_verified, contact_email, contact_phone
+        )
+      `,
+      )
+      .eq('id', harvestId)
+      .eq('status', 'active')
+      .single();
+
+    if (error || !update) {
+      throw new NotFoundException('Harvest update not found');
+    }
+
+    const seller = Array.isArray(update.seller_organization)
+      ? update.seller_organization[0]
+      : update.seller_organization;
+
+    const isLiked = buyerOrgId
+      ? await this.isHarvestLiked(buyerOrgId, update.id)
+      : false;
+
+    // Get recent comments
+    const { data: comments } = await this.supabase
+      .getClient()
+      .from('harvest_comments')
+      .select(
+        `
+        *,
+        buyer_organization:organizations!buyer_org_id(name, logo_url),
+        buyer_user:users!buyer_user_id(id)
+      `,
+      )
+      .eq('harvest_id', harvestId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    const recentComments: HarvestCommentDto[] =
+      comments?.map((comment) => ({
+        id: comment.id,
+        buyer_org_id: comment.buyer_org_id,
+        buyer_user_id: comment.buyer_user_id,
+        commenter_name:
+          (comment.buyer_organization as any)?.name || 'Anonymous',
+        commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+        content: comment.content,
+        created_at: comment.created_at,
+        time_ago: this.getTimeAgo(comment.created_at),
+      })) || [];
+
+    return {
+      id: update.id,
+      seller_org_id: update.seller_org_id,
+      farm_name: seller?.name || 'Unknown Farm',
+      farm_avatar: seller?.logo_url,
+      location: seller?.location
+        ? `${seller.location}${seller.country ? `, ${seller.country}` : ''}`
+        : undefined,
+      crop: update.crop,
+      content: update.content,
+      expected_harvest_window: update.expected_harvest_window,
+      quantity: update.quantity,
+      unit: update.unit,
+      notes: update.notes,
+      images: update.images || [],
+      likes_count: update.likes_count || 0,
+      comments_count: update.comments_count || 0,
+      requests_count: update.requests_count || 0,
+      is_verified: seller?.is_verified || false,
+      is_liked: isLiked,
+      created_at: update.created_at,
+      time_ago: this.getTimeAgo(update.created_at),
+      next_planting_crop: update.next_planting_crop,
+      next_planting_date: update.next_planting_date,
+      next_planting_area: update.next_planting_area,
+      recent_comments: recentComments,
+      seller_contact: {
+        email: seller?.contact_email,
+        phone: seller?.contact_phone,
+      },
+    };
+  }
+
+  async toggleHarvestLike(
+    buyerOrgId: string,
+    buyerUserId: string,
+    harvestId: string,
+    isLike: boolean,
+  ): Promise<void> {
+    // Verify harvest exists
+    const { data: harvest } = await this.supabase
+      .getClient()
+      .from('harvest_requests')
+      .select('id')
+      .eq('id', harvestId)
+      .eq('status', 'active')
+      .single();
+
+    if (!harvest) {
+      throw new NotFoundException('Harvest update not found');
+    }
+
+    if (isLike) {
+      // Add like
+      const { error } = await this.supabase
+        .getClient()
+        .from('harvest_likes')
+        .insert({
+          harvest_id: harvestId,
+          buyer_org_id: buyerOrgId,
+          buyer_user_id: buyerUserId,
+        });
+
+      if (error && error.code !== '23505') {
+        // Ignore duplicate key error
+        throw new BadRequestException(`Failed to like: ${error.message}`);
+      }
+    } else {
+      // Remove like
+      const { error } = await this.supabase
+        .getClient()
+        .from('harvest_likes')
+        .delete()
+        .eq('harvest_id', harvestId)
+        .eq('buyer_org_id', buyerOrgId);
+
+      if (error) {
+        throw new BadRequestException(`Failed to unlike: ${error.message}`);
+      }
+    }
+  }
+
+  async createHarvestComment(
+    buyerOrgId: string,
+    buyerUserId: string,
+    harvestId: string,
+    commentDto: CreateHarvestCommentDto,
+  ): Promise<HarvestCommentDto> {
+    // Verify harvest exists
+    const { data: harvest } = await this.supabase
+      .getClient()
+      .from('harvest_requests')
+      .select('id')
+      .eq('id', harvestId)
+      .eq('status', 'active')
+      .single();
+
+    if (!harvest) {
+      throw new NotFoundException('Harvest update not found');
+    }
+
+    const { data: comment, error } = await this.supabase
+      .getClient()
+      .from('harvest_comments')
+      .insert({
+        harvest_id: harvestId,
+        buyer_org_id: buyerOrgId,
+        buyer_user_id: buyerUserId,
+        content: commentDto.content,
+      })
+      .select(
+        `
+        *,
+        buyer_organization:organizations!buyer_org_id(name, logo_url)
+      `,
+      )
+      .single();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create comment: ${error.message}`,
+      );
+    }
+
+    return {
+      id: comment.id,
+      buyer_org_id: comment.buyer_org_id,
+      buyer_user_id: comment.buyer_user_id,
+      commenter_name: (comment.buyer_organization as any)?.name || 'Anonymous',
+      commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+      content: comment.content,
+      created_at: comment.created_at,
+      time_ago: this.getTimeAgo(comment.created_at),
+    };
+  }
+
+  async getHarvestComments(harvestId: string): Promise<HarvestCommentDto[]> {
+    const { data: comments, error } = await this.supabase
+      .getClient()
+      .from('harvest_comments')
+      .select(
+        `
+        *,
+        buyer_organization:organizations!buyer_org_id(name, logo_url)
+      `,
+      )
+      .eq('harvest_id', harvestId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch comments: ${error.message}`,
+      );
+    }
+
+    return (
+      comments?.map((comment) => ({
+        id: comment.id,
+        buyer_org_id: comment.buyer_org_id,
+        buyer_user_id: comment.buyer_user_id,
+        commenter_name:
+          (comment.buyer_organization as any)?.name || 'Anonymous',
+        commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+        content: comment.content,
+        created_at: comment.created_at,
+        time_ago: this.getTimeAgo(comment.created_at),
+      })) || []
+    );
+  }
+
+  async createHarvestRequest(
+    buyerOrgId: string,
+    buyerUserId: string,
+    harvestId: string,
+    requestDto: CreateHarvestRequestDto,
+  ): Promise<void> {
+    // Verify harvest exists
+    const { data: harvest } = await this.supabase
+      .getClient()
+      .from('harvest_requests')
+      .select('seller_org_id')
+      .eq('id', harvestId)
+      .eq('status', 'active')
+      .single();
+
+    if (!harvest) {
+      throw new NotFoundException('Harvest update not found');
+    }
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('harvest_buyer_requests')
+      .insert({
+        harvest_id: harvestId,
+        seller_org_id: harvest.seller_org_id,
+        buyer_org_id: buyerOrgId,
+        buyer_user_id: buyerUserId,
+        requested_quantity: requestDto.requested_quantity,
+        unit: requestDto.unit,
+        requested_date: requestDto.requested_date,
+        notes: requestDto.notes,
+      });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create harvest request: ${error.message}`,
+      );
+    }
+  }
+
   // ==================== HELPER METHODS ====================
 
   private async isProductFavorited(
@@ -2205,5 +2613,46 @@ export class BuyersService {
       .single();
 
     return !!data;
+  }
+
+  private async isHarvestLiked(
+    buyerOrgId: string,
+    harvestId: string,
+  ): Promise<boolean> {
+    const { data } = await this.supabase
+      .getClient()
+      .from('harvest_likes')
+      .select('buyer_org_id')
+      .eq('buyer_org_id', buyerOrgId)
+      .eq('harvest_id', harvestId)
+      .single();
+
+    return !!data;
+  }
+
+  private getTimeAgo(dateString: string): string {
+    const now = new Date();
+    const date = new Date(dateString);
+    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) {
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ago`;
+    }
+    if (seconds < 86400) {
+      const hours = Math.floor(seconds / 3600);
+      return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+    }
+    if (seconds < 604800) {
+      const days = Math.floor(seconds / 86400);
+      return `${days} ${days === 1 ? 'day' : 'days'} ago`;
+    }
+    if (seconds < 2592000) {
+      const weeks = Math.floor(seconds / 604800);
+      return `${weeks} ${weeks === 1 ? 'week' : 'weeks'} ago`;
+    }
+    const months = Math.floor(seconds / 2592000);
+    return `${months} ${months === 1 ? 'month' : 'months'} ago`;
   }
 }

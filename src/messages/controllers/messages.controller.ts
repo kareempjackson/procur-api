@@ -7,11 +7,17 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { MessagesService } from '../services/messages.service';
 import { SendMessageDto } from '../dto/send-message.dto';
+import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { ConversationAccessGuard } from '../guards/conversation-access.guard';
+import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import { UserContext } from '../../common/interfaces/jwt-payload.interface';
 
 @Controller('conversations/:conversationId/messages')
+@UseGuards(JwtAuthGuard, ConversationAccessGuard)
 export class MessagesController {
   constructor(private readonly messagesService: MessagesService) {}
 
@@ -19,8 +25,9 @@ export class MessagesController {
   async sendMessage(
     @Param('conversationId') conversationId: string,
     @Body() dto: SendMessageDto,
+    @CurrentUser() user: UserContext,
   ) {
-    return this.messagesService.sendMessage(conversationId, dto);
+    return this.messagesService.sendMessage(conversationId, dto, user.id);
   }
 
   @Get()

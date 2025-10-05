@@ -1,18 +1,22 @@
 import { Injectable } from '@nestjs/common';
 import { SupabaseService } from '../../database/supabase.service';
+import { NotificationsGateway } from '../../notifications/notifications.gateway';
 
 @Injectable()
 export class MessagesService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly notificationsGateway: NotificationsGateway,
+  ) {}
 
-  async sendMessage(conversationId: string, body: any) {
+  async sendMessage(conversationId: string, body: any, userId: string) {
     const client = this.supabase.getClient();
     const { data, error } = await client
       .from('messages')
       .insert([
         {
           conversation_id: conversationId,
-          sender_user_id: body.senderUserId,
+          sender_user_id: body.senderUserId || userId,
           sender_org_id: body.senderOrgId ?? null,
           parent_message_id: body.parent_message_id ?? null,
           content_type: body.content_type ?? 'text',
@@ -24,7 +28,41 @@ export class MessagesService {
       .select()
       .single();
     if (error) throw error;
+
+    // Emit real-time notification to other participants
+    try {
+      const participants =
+        await this.getConversationParticipants(conversationId);
+      participants.forEach((p) => {
+        if (p.user_id !== userId) {
+          this.notificationsGateway.emitToUser(p.user_id, 'new_message', {
+            conversationId,
+            message: data,
+          });
+        }
+      });
+    } catch (e) {
+      // Don't fail message send if notification fails
+      console.error('Failed to emit message notification:', e);
+    }
+
     return data;
+  }
+
+  async getConversationParticipants(conversationId: string) {
+    const client = this.supabase.getClient();
+    const { data, error } = await client
+      .from('conversation_participants')
+      .select('user_id, org_id, role')
+      .eq('conversation_id', conversationId)
+      .eq('is_removed', false);
+    if (error) throw error;
+    return data || [];
+  }
+
+  async getOtherParticipants(conversationId: string, currentUserId: string) {
+    const participants = await this.getConversationParticipants(conversationId);
+    return participants.filter((p) => p.user_id !== currentUserId);
   }
 
   async listMessages(

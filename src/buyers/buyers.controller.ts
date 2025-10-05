@@ -83,6 +83,15 @@ import {
   BuyerTransactionSummaryDto,
   CreateDisputeDto,
   DisputeResponseDto,
+
+  // Harvest Updates DTOs
+  HarvestUpdatesQueryDto,
+  HarvestUpdateDto,
+  HarvestUpdateDetailDto,
+  HarvestCommentDto,
+  CreateHarvestCommentDto,
+  ToggleHarvestLikeDto,
+  CreateHarvestRequestDto,
 } from './dto';
 
 @ApiTags('Buyers')
@@ -1053,5 +1062,156 @@ export class BuyersController {
   ): Promise<DisputeResponseDto> {
     // TODO: Implement createDispute in service
     throw new Error('Not implemented');
+  }
+
+  // ==================== HARVEST UPDATES ENDPOINTS ====================
+
+  @Get('harvest-updates')
+  @RequirePermissions('browse_marketplace')
+  @ApiOperation({
+    summary: 'Get Harvest Updates Feed',
+    description:
+      'Get social feed of harvest updates from sellers with likes, comments, and engagement',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Harvest updates retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        updates: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/HarvestUpdateDto' },
+        },
+        total: { type: 'number' },
+        page: { type: 'number' },
+        limit: { type: 'number' },
+      },
+    },
+  })
+  async getHarvestUpdates(
+    @CurrentUser() user: UserContext,
+    @Query() query: HarvestUpdatesQueryDto,
+  ) {
+    return this.buyersService.getHarvestUpdates(query, user.organizationId);
+  }
+
+  @Get('harvest-updates/:id')
+  @RequirePermissions('browse_marketplace')
+  @ApiOperation({
+    summary: 'Get Harvest Update Detail',
+    description: 'Get detailed information about a specific harvest update',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Update ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Harvest update details retrieved successfully',
+    type: HarvestUpdateDetailDto,
+  })
+  @ApiNotFoundResponse({ description: 'Harvest update not found' })
+  async getHarvestUpdateDetail(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) harvestId: string,
+  ): Promise<HarvestUpdateDetailDto> {
+    return this.buyersService.getHarvestUpdateDetail(
+      harvestId,
+      user.organizationId,
+    );
+  }
+
+  @Post('harvest-updates/:id/like')
+  @RequirePermissions('browse_marketplace')
+  @ApiOperation({
+    summary: 'Toggle Like on Harvest Update',
+    description: 'Like or unlike a harvest update',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Update ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Like toggled successfully',
+  })
+  @ApiNotFoundResponse({ description: 'Harvest update not found' })
+  async toggleHarvestLike(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) harvestId: string,
+    @Body() toggleDto: ToggleHarvestLikeDto,
+  ): Promise<void> {
+    return this.buyersService.toggleHarvestLike(
+      user.organizationId!,
+      user.id,
+      harvestId,
+      toggleDto.is_like,
+    );
+  }
+
+  @Get('harvest-updates/:id/comments')
+  @RequirePermissions('browse_marketplace')
+  @ApiOperation({
+    summary: 'Get Harvest Update Comments',
+    description: 'Get all comments for a specific harvest update',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Update ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Comments retrieved successfully',
+    type: [HarvestCommentDto],
+  })
+  async getHarvestComments(
+    @Param('id', ParseUUIDPipe) harvestId: string,
+  ): Promise<HarvestCommentDto[]> {
+    return this.buyersService.getHarvestComments(harvestId);
+  }
+
+  @Post('harvest-updates/:id/comments')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('browse_marketplace')
+  @ApiOperation({
+    summary: 'Comment on Harvest Update',
+    description: 'Add a comment to a harvest update',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Update ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Comment created successfully',
+    type: HarvestCommentDto,
+  })
+  @ApiNotFoundResponse({ description: 'Harvest update not found' })
+  async createHarvestComment(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) harvestId: string,
+    @Body() commentDto: CreateHarvestCommentDto,
+  ): Promise<HarvestCommentDto> {
+    return this.buyersService.createHarvestComment(
+      user.organizationId!,
+      user.id,
+      harvestId,
+      commentDto,
+    );
+  }
+
+  @Post('harvest-updates/:id/request')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('create_product_requests')
+  @ApiOperation({
+    summary: 'Request Product from Harvest',
+    description: 'Create a product request against a specific harvest update',
+  })
+  @ApiParam({ name: 'id', description: 'Harvest Update ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Harvest request created successfully',
+  })
+  @ApiNotFoundResponse({ description: 'Harvest update not found' })
+  async createHarvestRequest(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) harvestId: string,
+    @Body() requestDto: CreateHarvestRequestDto,
+  ): Promise<void> {
+    return this.buyersService.createHarvestRequest(
+      user.organizationId!,
+      user.id,
+      harvestId,
+      requestDto,
+    );
   }
 }
