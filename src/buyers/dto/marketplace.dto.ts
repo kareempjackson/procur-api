@@ -158,7 +158,9 @@ export class MarketplaceSellerQueryDto {
   @Max(100)
   limit?: number = 20;
 
-  @ApiPropertyOptional({ description: 'Search term for seller name/description' })
+  @ApiPropertyOptional({
+    description: 'Search term for seller name/description',
+  })
   @IsOptional()
   @IsString()
   search?: string;

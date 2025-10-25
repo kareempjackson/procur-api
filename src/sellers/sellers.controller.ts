@@ -860,7 +860,6 @@ export class SellersController {
   // ==================== PRODUCT REQUESTS ENDPOINTS ====================
 
   @Get('product-requests')
-  @RequirePermissions('view_product_requests')
   @ApiOperation({
     summary: 'Get Product Requests',
     description: 'Get all product requests (RFQs) visible to this seller',
@@ -882,7 +881,6 @@ export class SellersController {
   }
 
   @Get('product-requests/:id')
-  @RequirePermissions('view_product_requests')
   @ApiOperation({
     summary: 'Get Product Request Detail',
     description: 'Get detailed information about a specific product request',

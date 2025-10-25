@@ -637,6 +637,50 @@ export class GovernmentController {
     return this.governmentService.getFarmers(user.organizationId);
   }
 
+  @Post('farmers')
+  @ApiOperation({
+    summary: 'Create/register a new farmer',
+    description: 'Register a new farmer in the government jurisdiction',
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'Farmer created successfully',
+  })
+  @RequirePermissions('edit_seller_data')
+  async createFarmer(
+    @Body() data: any,
+    @CurrentUser() user: UserContext,
+  ): Promise<any> {
+    return this.governmentService.createFarmer(data, user.organizationId);
+  }
+
+  @Get('products')
+  @ApiOperation({
+    summary: 'Get all products from farmers',
+    description:
+      'Get all products from farmers in the government jurisdiction with pagination',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Products retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getAllProducts(
+    @CurrentUser() user: UserContext,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('status') status?: string,
+    @Query('vendor_id') vendorId?: string,
+  ): Promise<any> {
+    return this.governmentService.getAllProducts(
+      user.organizationId,
+      page,
+      limit,
+      status,
+      vendorId,
+    );
+  }
+
   @Get('farmers/:id/products')
   @ApiOperation({
     summary: 'Get products for a specific farmer',
@@ -654,6 +698,28 @@ export class GovernmentController {
     return this.governmentService.getFarmerProducts(
       farmerId,
       user.organizationId,
+    );
+  }
+
+  @Post('farmers/:farmerId/products')
+  @ApiOperation({
+    summary: 'Create a product for a farmer',
+    description: 'Government user creates a product on behalf of a farmer',
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'Farmer product created successfully',
+  })
+  @RequirePermissions('edit_seller_data')
+  async createFarmerProduct(
+    @Param('farmerId') farmerId: string,
+    @Body() createData: any,
+    @CurrentUser() user: UserContext,
+  ): Promise<any> {
+    return this.governmentService.createFarmerProduct(
+      farmerId,
+      createData,
+      user,
     );
   }
 
@@ -677,6 +743,351 @@ export class GovernmentController {
       farmerId,
       productId,
       updateData,
+      user,
+    );
+  }
+
+  // ==================== DASHBOARD ====================
+
+  @Get('dashboard/stats')
+  @ApiOperation({
+    summary: 'Get dashboard statistics',
+    description: 'Optimized endpoint for dashboard overview stats',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Dashboard stats retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getDashboardStats(@CurrentUser() user: UserContext): Promise<any> {
+    return this.governmentService.getDashboardStats(user.organizationId);
+  }
+
+  @Get('activity')
+  @ApiOperation({
+    summary: 'Get recent activity',
+    description: 'Recent activity feed for dashboard',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Activity retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getRecentActivity(
+    @CurrentUser() user: UserContext,
+    @Query('limit') limit?: number,
+  ): Promise<any[]> {
+    return this.governmentService.getRecentActivity(user.organizationId, limit);
+  }
+
+  // ==================== PRODUCTION TRACKING ====================
+
+  @Get('production/stats')
+  @ApiOperation({
+    summary: 'Get production statistics',
+    description: 'Production statistics by crop',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Production stats retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getProductionStats(
+    @CurrentUser() user: UserContext,
+    @Query('period') period?: string,
+    @Query('crop') crop?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getProductionStats(
+      user.organizationId,
+      period,
+      crop,
+    );
+  }
+
+  @Get('production/by-vendor')
+  @ApiOperation({
+    summary: 'Get production by vendor',
+    description: 'Production data grouped by vendor',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Vendor production retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getProductionByVendor(
+    @CurrentUser() user: UserContext,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('crop') crop?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getProductionByVendor(
+      user.organizationId,
+      page,
+      limit,
+      crop,
+    );
+  }
+
+  @Get('production/harvest-schedule')
+  @ApiOperation({
+    summary: 'Get harvest schedule',
+    description: 'Scheduled and completed harvests',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Harvest schedule retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getHarvestSchedule(
+    @CurrentUser() user: UserContext,
+    @Query('start_date') startDate?: string,
+    @Query('end_date') endDate?: string,
+    @Query('status') status?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getHarvestSchedule(
+      user.organizationId,
+      startDate,
+      endDate,
+      status,
+    );
+  }
+
+  @Get('production/summary')
+  @ApiOperation({
+    summary: 'Get production summary',
+    description: 'Overall production summary and trends',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Production summary retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getProductionSummary(
+    @CurrentUser() user: UserContext,
+    @Query('period') period?: string,
+  ): Promise<any> {
+    return this.governmentService.getProductionSummary(
+      user.organizationId,
+      period,
+    );
+  }
+
+  // ==================== MARKET INTELLIGENCE ====================
+
+  @Get('market/supply-demand')
+  @ApiOperation({
+    summary: 'Get supply and demand analysis',
+    description: 'Aggregate supply and demand data by crop',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Supply and demand data retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getSupplyDemand(
+    @CurrentUser() user: UserContext,
+    @Query('period') period?: string,
+    @Query('crop') crop?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getSupplyDemand(
+      user.organizationId,
+      period,
+      crop,
+    );
+  }
+
+  @Get('market/transactions')
+  @ApiOperation({
+    summary: 'Get market transactions',
+    description: 'List of market transactions with pagination',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Transactions retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getTransactions(
+    @CurrentUser() user: UserContext,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('status') status?: string,
+    @Query('start_date') startDate?: string,
+    @Query('end_date') endDate?: string,
+  ): Promise<any> {
+    return this.governmentService.getTransactions(
+      user.organizationId,
+      page,
+      limit,
+      status,
+      startDate,
+      endDate,
+    );
+  }
+
+  @Get('market/stats')
+  @ApiOperation({
+    summary: 'Get market statistics',
+    description: 'Aggregate market statistics for a period',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Market stats retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getMarketStats(
+    @CurrentUser() user: UserContext,
+    @Query('period') period?: string,
+  ): Promise<any> {
+    return this.governmentService.getMarketStats(user.organizationId, period);
+  }
+
+  @Get('market/price-trends')
+  @ApiOperation({
+    summary: 'Get price trends',
+    description: 'Historical price trends for crops',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Price trends retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getPriceTrends(
+    @CurrentUser() user: UserContext,
+    @Query('crop') crop?: string,
+    @Query('period') period?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getPriceTrends(
+      user.organizationId,
+      crop,
+      period,
+    );
+  }
+
+  // ==================== COMPLIANCE ====================
+
+  @Get('compliance/alerts')
+  @ApiOperation({
+    summary: 'Get compliance alerts',
+    description: 'List of compliance alerts with filters',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Compliance alerts retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getComplianceAlerts(
+    @CurrentUser() user: UserContext,
+    @Query('status') status?: string,
+    @Query('severity') severity?: string,
+    @Query('type') type?: string,
+  ): Promise<any[]> {
+    return this.governmentService.getComplianceAlerts(
+      user.organizationId,
+      status,
+      severity,
+      type,
+    );
+  }
+
+  @Get('compliance/records')
+  @ApiOperation({
+    summary: 'Get compliance records',
+    description: 'List of vendor compliance records',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Compliance records retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getComplianceRecords(
+    @CurrentUser() user: UserContext,
+    @Query('status') status?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<any[]> {
+    return this.governmentService.getComplianceRecords(
+      user.organizationId,
+      status,
+      page,
+      limit,
+    );
+  }
+
+  @Get('compliance/stats')
+  @ApiOperation({
+    summary: 'Get compliance statistics',
+    description: 'Aggregate compliance statistics',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Compliance stats retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getComplianceStats(@CurrentUser() user: UserContext): Promise<any> {
+    return this.governmentService.getComplianceStats(user.organizationId);
+  }
+
+  @Get('compliance/vendors/:vendorId')
+  @ApiOperation({
+    summary: 'Get vendor compliance details',
+    description: 'Detailed compliance information for a vendor',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Vendor compliance retrieved successfully',
+  })
+  @RequirePermissions('view_government_data')
+  async getVendorCompliance(
+    @Param('vendorId') vendorId: string,
+    @CurrentUser() user: UserContext,
+  ): Promise<any> {
+    return this.governmentService.getVendorCompliance(
+      vendorId,
+      user.organizationId,
+    );
+  }
+
+  @Put('compliance/alerts/:alertId/resolve')
+  @ApiOperation({
+    summary: 'Resolve a compliance alert',
+    description: 'Mark a compliance alert as resolved',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Alert resolved successfully',
+  })
+  @RequirePermissions('edit_seller_data')
+  async resolveComplianceAlert(
+    @Param('alertId') alertId: string,
+    @Body() body: { notes?: string },
+    @CurrentUser() user: UserContext,
+  ): Promise<any> {
+    return this.governmentService.resolveComplianceAlert(
+      alertId,
+      body.notes,
+      user,
+    );
+  }
+
+  @Put('compliance/records/:recordId/status')
+  @ApiOperation({
+    summary: 'Update compliance status',
+    description: 'Update the compliance status of a record',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Compliance status updated successfully',
+  })
+  @RequirePermissions('edit_seller_data')
+  async updateComplianceStatus(
+    @Param('recordId') recordId: string,
+    @Body() body: { status: string; notes?: string },
+    @CurrentUser() user: UserContext,
+  ): Promise<any> {
+    return this.governmentService.updateComplianceStatus(
+      recordId,
+      body.status,
+      body.notes,
       user,
     );
   }

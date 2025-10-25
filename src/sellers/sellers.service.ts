@@ -72,7 +72,7 @@ export class SellersService {
 
     const productData: CreateProductData = {
       seller_org_id: sellerOrgId,
-      ...(productCore as any),
+      ...productCore,
       created_by: userId,
       slug,
     };
@@ -1006,7 +1006,7 @@ export class SellersService {
     const client = this.supabaseService.getClient();
 
     // Create base slug from name
-    let baseSlug = name
+    const baseSlug = name
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, '')
       .replace(/\s+/g, '-')
@@ -1090,6 +1090,12 @@ export class SellersService {
       buyer_org_id: order.buyer_org_id,
       seller_org_id: order.seller_org_id,
       buyer_user_id: order.buyer_user_id,
+      buyer_info: order.organizations
+        ? {
+            organization_name: order.organizations.name,
+            business_name: order.organizations.business_name,
+          }
+        : undefined,
       status: order.status,
       payment_status: order.payment_status,
       subtotal: parseFloat(order.subtotal),
@@ -1402,7 +1408,7 @@ export class SellersService {
       .from('product_requests')
       .select(
         `
-        id, request_number, product_name, quantity, unit_of_measurement, date_needed, budget_range, status, buyer_org_id, expires_at,
+        id, request_number, product_name, quantity, unit_of_measurement, date_needed, budget_min, budget_max, currency, status, buyer_org_id, expires_at,
         organizations!buyer_org_id(name)
       `,
       )
@@ -1427,9 +1433,10 @@ export class SellersService {
         quantity: r.quantity,
         unit_of_measurement: r.unit_of_measurement,
         date_needed: r.date_needed,
-        budget_range_text: r.budget_range
-          ? `${r.budget_range.min}-${r.budget_range.max} ${r.budget_range.currency || 'USD'}`
-          : undefined,
+        budget_range_text:
+          r.budget_min != null && r.budget_max != null
+            ? `${Number(r.budget_min)}-${Number(r.budget_max)} ${r.currency || 'USD'}`
+            : undefined,
         buyer_name: r.organizations?.name || 'Buyer',
         location: undefined,
         priority: r.status === 'open' ? 'high' : 'normal',
@@ -1748,19 +1755,16 @@ export class SellersService {
 
     const client = this.supabaseService.getClient();
 
-    // Build query - get requests that are either targeted at this seller or open to all
-    let queryBuilder = client
-      .from('product_requests')
-      .select(
-        `
+    // Build query - get all buyer product requests (open marketplace view)
+    let queryBuilder = client.from('product_requests').select(
+      `
         *,
         buyer_org:organizations!buyer_org_id(name),
         quotes:request_quotes!request_id(id, seller_org_id, status)
       `,
-        { count: 'exact' },
-      )
-      .or(`target_seller_id.eq.${sellerOrgId},target_seller_id.is.null`);
-
+      { count: 'exact' },
+    );
+    // all sellers should see all requests, regardless of targeting
     // Apply filters
     if (status) queryBuilder = queryBuilder.eq('status', status);
     if (category) queryBuilder = queryBuilder.eq('category', category);
@@ -1793,13 +1797,21 @@ export class SellersService {
         id: req.id,
         request_number: req.request_number,
         buyer_org_id: req.buyer_org_id,
+        buyer_user_id: req.buyer_user_id,
         buyer_name: req.buyer_org?.name || 'Unknown Buyer',
         product_name: req.product_name,
         description: req.description,
         category: req.category,
         quantity: req.quantity,
         unit_of_measurement: req.unit_of_measurement,
-        budget_range: req.budget_range,
+        budget_range:
+          req.budget_min != null && req.budget_max != null
+            ? {
+                min_price: Number(req.budget_min),
+                max_price: Number(req.budget_max),
+                currency: req.currency,
+              }
+            : undefined,
         date_needed: req.date_needed,
         delivery_location: req.delivery_location,
         status: req.status,
@@ -1848,10 +1860,7 @@ export class SellersService {
       throw new NotFoundException('Product request not found');
     }
 
-    // Check if seller has access to this request
-    if (request.target_seller_id && request.target_seller_id !== sellerOrgId) {
-      throw new ForbiddenException('Access denied to this request');
-    }
+    // All sellers are allowed to view any request details
 
     const myQuote = request.quotes?.find(
       (q: any) => q.seller_org_id === sellerOrgId,
@@ -1861,6 +1870,7 @@ export class SellersService {
       id: request.id,
       request_number: request.request_number,
       buyer_org_id: request.buyer_org_id,
+      buyer_user_id: request.buyer_user_id,
       buyer_name: request.buyer_org?.name || 'Unknown Buyer',
       buyer_country: request.buyer_org?.country,
       buyer_logo_url: request.buyer_org?.logo_url,
@@ -1869,7 +1879,14 @@ export class SellersService {
       category: request.category,
       quantity: request.quantity,
       unit_of_measurement: request.unit_of_measurement,
-      budget_range: request.budget_range,
+      budget_range:
+        request.budget_min != null && request.budget_max != null
+          ? {
+              min_price: Number(request.budget_min),
+              max_price: Number(request.budget_max),
+              currency: request.currency,
+            }
+          : undefined,
       date_needed: request.date_needed,
       delivery_location: request.delivery_location,
       specifications: request.specifications,

@@ -203,6 +203,7 @@ export class BuyersService {
             name: product.seller_organization.name,
             description: undefined,
             logo_url: product.seller_organization.logo_url,
+            location: product.seller_organization.country,
             average_rating: undefined, // TODO: Calculate seller rating
             review_count: 0, // TODO: Count seller reviews
             product_count: 0, // TODO: Count seller products
@@ -301,6 +302,7 @@ export class BuyersService {
         name: product.seller_organization.name,
         description: undefined,
         logo_url: product.seller_organization.logo_url,
+        location: product.seller_organization.country,
         average_rating: undefined, // TODO: Calculate seller rating
         review_count: 0, // TODO: Count seller reviews
         product_count: 0, // TODO: Count seller products
@@ -414,7 +416,7 @@ export class BuyersService {
         `Failed to fetch sellers: ${error.message}`,
       );
 
-    let mappedSellers =
+    const mappedSellers =
       sellers?.map((seller) => ({
         id: seller.id,
         name: seller.name,
@@ -889,15 +891,31 @@ export class BuyersService {
     buyerUserId: string,
     createDto: CreateProductRequestDto,
   ): Promise<ProductRequestResponseDto> {
+    const insertPayload: any = {
+      buyer_org_id: buyerOrgId,
+      buyer_user_id: buyerUserId,
+      product_name: createDto.product_name,
+      product_type: createDto.product_type,
+      category: createDto.category,
+      description: createDto.description,
+      quantity: createDto.quantity,
+      unit_of_measurement: createDto.unit_of_measurement,
+      date_needed: createDto.date_needed,
+      target_seller_id: createDto.target_seller_id,
+      expires_at: createDto.expires_at,
+      status: 'draft',
+    };
+
+    if (createDto.budget_range) {
+      insertPayload.budget_min = createDto.budget_range.min;
+      insertPayload.budget_max = createDto.budget_range.max;
+      insertPayload.currency = createDto.budget_range.currency;
+    }
+
     const { error, data } = await this.supabase
       .getClient()
       .from('product_requests')
-      .insert({
-        buyer_org_id: buyerOrgId,
-        buyer_user_id: buyerUserId,
-        ...createDto,
-        status: 'draft',
-      })
+      .insert(insertPayload)
       .select(
         `
         *,
@@ -921,7 +939,14 @@ export class BuyersService {
       quantity: data.quantity,
       unit_of_measurement: data.unit_of_measurement,
       date_needed: data.date_needed,
-      budget_range: data.budget_range,
+      budget_range:
+        data.budget_min != null && data.budget_max != null
+          ? {
+              min: Number(data.budget_min),
+              max: Number(data.budget_max),
+              currency: data.currency,
+            }
+          : undefined,
       target_seller_id: data.target_seller_id,
       target_seller_name: data.target_seller?.name,
       status: data.status,
@@ -993,7 +1018,14 @@ export class BuyersService {
         quantity: request.quantity,
         unit_of_measurement: request.unit_of_measurement,
         date_needed: request.date_needed,
-        budget_range: request.budget_range,
+        budget_range:
+          request.budget_min != null && request.budget_max != null
+            ? {
+                min: Number(request.budget_min),
+                max: Number(request.budget_max),
+                currency: request.currency,
+              }
+            : undefined,
         target_seller_id: request.target_seller_id,
         target_seller_name: request.target_seller?.name,
         status: request.status,
@@ -1042,7 +1074,14 @@ export class BuyersService {
       quantity: request.quantity,
       unit_of_measurement: request.unit_of_measurement,
       date_needed: request.date_needed,
-      budget_range: request.budget_range,
+      budget_range:
+        request.budget_min != null && request.budget_max != null
+          ? {
+              min: Number(request.budget_min),
+              max: Number(request.budget_max),
+              currency: request.currency,
+            }
+          : undefined,
       target_seller_id: request.target_seller_id,
       target_seller_name: request.target_seller?.name,
       status: request.status,
@@ -1077,10 +1116,19 @@ export class BuyersService {
       );
     }
 
+    const updatePayload: any = { ...updateDto };
+
+    if (updateDto.budget_range) {
+      updatePayload.budget_min = updateDto.budget_range.min;
+      updatePayload.budget_max = updateDto.budget_range.max;
+      updatePayload.currency = updateDto.budget_range.currency;
+      delete updatePayload.budget_range;
+    }
+
     const { data: request, error } = await this.supabase
       .getClient()
       .from('product_requests')
-      .update(updateDto)
+      .update(updatePayload)
       .eq('id', requestId)
       .select(
         `
@@ -1105,7 +1153,14 @@ export class BuyersService {
       quantity: request.quantity,
       unit_of_measurement: request.unit_of_measurement,
       date_needed: request.date_needed,
-      budget_range: request.budget_range,
+      budget_range:
+        request.budget_min != null && request.budget_max != null
+          ? {
+              min: Number(request.budget_min),
+              max: Number(request.budget_max),
+              currency: request.currency,
+            }
+          : undefined,
       target_seller_id: request.target_seller_id,
       target_seller_name: request.target_seller?.name,
       status: request.status,
@@ -1790,7 +1845,7 @@ export class BuyersService {
       status: order.status,
       payment_status: order.payment_status,
       seller_org_id: order.seller_org_id,
-      seller_name: (order.seller_organization as any)?.name || 'Unknown Seller',
+      seller_name: order.seller_organization?.name || 'Unknown Seller',
       subtotal: order.subtotal,
       tax_amount: order.tax_amount,
       shipping_amount: order.shipping_amount,
@@ -2268,8 +2323,7 @@ export class BuyersService {
         order_id: transaction.order_id,
         order_number: transaction.order?.order_number,
         seller_org_id: transaction.seller_org_id,
-        seller_name:
-          (transaction.seller_organization as any)?.name || 'Unknown Seller',
+        seller_name: transaction.seller_organization?.name || 'Unknown Seller',
         type: transaction.transaction_type,
         status: transaction.status,
         amount: transaction.amount,
@@ -2457,9 +2511,8 @@ export class BuyersService {
         id: comment.id,
         buyer_org_id: comment.buyer_org_id,
         buyer_user_id: comment.buyer_user_id,
-        commenter_name:
-          (comment.buyer_organization as any)?.name || 'Anonymous',
-        commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+        commenter_name: comment.buyer_organization?.name || 'Anonymous',
+        commenter_avatar: comment.buyer_organization?.logo_url,
         content: comment.content,
         created_at: comment.created_at,
         time_ago: this.getTimeAgo(comment.created_at),
@@ -2593,8 +2646,8 @@ export class BuyersService {
       id: comment.id,
       buyer_org_id: comment.buyer_org_id,
       buyer_user_id: comment.buyer_user_id,
-      commenter_name: (comment.buyer_organization as any)?.name || 'Anonymous',
-      commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+      commenter_name: comment.buyer_organization?.name || 'Anonymous',
+      commenter_avatar: comment.buyer_organization?.logo_url,
       content: comment.content,
       created_at: comment.created_at,
       time_ago: this.getTimeAgo(comment.created_at),
@@ -2627,9 +2680,8 @@ export class BuyersService {
         id: comment.id,
         buyer_org_id: comment.buyer_org_id,
         buyer_user_id: comment.buyer_user_id,
-        commenter_name:
-          (comment.buyer_organization as any)?.name || 'Anonymous',
-        commenter_avatar: (comment.buyer_organization as any)?.logo_url,
+        commenter_name: comment.buyer_organization?.name || 'Anonymous',
+        commenter_avatar: comment.buyer_organization?.logo_url,
         content: comment.content,
         created_at: comment.created_at,
         time_ago: this.getTimeAgo(comment.created_at),

@@ -212,7 +212,7 @@ export class HomeService {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    let baseQuery = supabase
+    const baseQuery = supabase
       .from('order_items')
       .select(
         `
@@ -300,7 +300,9 @@ export class HomeService {
         category,
         quantity,
         unit_of_measurement,
-        budget_range,
+        budget_min,
+        budget_max,
+        currency,
         created_at
       `,
       )
@@ -338,8 +340,12 @@ export class HomeService {
       demand.request_count += 1;
       demand.total_quantity_requested += request.quantity;
 
-      if (request.budget_range) {
-        demand.budget_ranges.push(request.budget_range);
+      if (request.budget_min != null && request.budget_max != null) {
+        demand.budget_ranges.push({
+          min: Number(request.budget_min),
+          max: Number(request.budget_max),
+          currency: request.currency || 'USD',
+        });
       }
 
       // Count unit occurrences
@@ -433,7 +439,9 @@ export class HomeService {
         category,
         quantity,
         unit_of_measurement,
-        budget_range,
+        budget_min,
+        budget_max,
+        currency,
         date_needed,
         response_count,
         status,
@@ -473,7 +481,14 @@ export class HomeService {
           category: request.category,
           quantity: request.quantity,
           unit_of_measurement: request.unit_of_measurement,
-          budget_range: request.budget_range,
+          budget_range:
+            request.budget_min != null && request.budget_max != null
+              ? {
+                  min: Number(request.budget_min),
+                  max: Number(request.budget_max),
+                  currency: request.currency,
+                }
+              : undefined,
           date_needed: request.date_needed,
           response_count: request.response_count,
           buyer_name: request.organizations?.name,

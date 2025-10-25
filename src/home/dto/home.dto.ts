@@ -14,7 +14,10 @@ export class RecommendedProductDto {
   @ApiProperty({ description: 'Category' })
   category: string;
 
-  @ApiProperty({ description: 'Current price (sale price if available, otherwise base price)' })
+  @ApiProperty({
+    description:
+      'Current price (sale price if available, otherwise base price)',
+  })
   current_price: number;
 
   @ApiProperty({ description: 'Original price (base price)' })
@@ -155,7 +158,9 @@ export class InDemandProductDto {
   @ApiProperty({ description: 'Most common unit of measurement' })
   common_unit: string;
 
-  @ApiProperty({ description: 'Trend percentage (increase/decrease from last period)' })
+  @ApiProperty({
+    description: 'Trend percentage (increase/decrease from last period)',
+  })
   trend_percentage: number;
 }
 
@@ -207,33 +212,33 @@ export class PopularRequestDto {
 
 // Main Home Page Response DTO
 export class HomePageResponseDto {
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Recommended products based on user preferences and trends',
-    type: [RecommendedProductDto]
+    type: [RecommendedProductDto],
   })
   recommended_products: RecommendedProductDto[];
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Popular sellers with high ratings and sales',
-    type: [PopularSellerDto]
+    type: [PopularSellerDto],
   })
   popular_sellers: PopularSellerDto[];
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Best selling products in the last 30 days',
-    type: [BestSellingProductDto]
+    type: [BestSellingProductDto],
   })
   best_selling_products: BestSellingProductDto[];
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Products currently in high demand based on requests',
-    type: [InDemandProductDto]
+    type: [InDemandProductDto],
   })
   in_demand_products: InDemandProductDto[];
 
-  @ApiProperty({ 
+  @ApiProperty({
     description: 'Popular/trending product requests',
-    type: [PopularRequestDto]
+    type: [PopularRequestDto],
   })
   popular_requests: PopularRequestDto[];
 
@@ -252,53 +257,53 @@ export class HomePageResponseDto {
 
 // Query parameters for customizing home page data
 export class HomePageQueryDto {
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Number of recommended products to return',
     default: 8,
     minimum: 1,
-    maximum: 20
+    maximum: 20,
   })
   recommended_limit?: number = 8;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Number of popular sellers to return',
     default: 6,
     minimum: 1,
-    maximum: 15
+    maximum: 15,
   })
   sellers_limit?: number = 6;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Number of best selling products to return',
     default: 8,
     minimum: 1,
-    maximum: 20
+    maximum: 20,
   })
   best_selling_limit?: number = 8;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Number of in-demand products to return',
     default: 6,
     minimum: 1,
-    maximum: 15
+    maximum: 15,
   })
   in_demand_limit?: number = 6;
 
-  @ApiPropertyOptional({ 
+  @ApiPropertyOptional({
     description: 'Number of popular requests to return',
     default: 10,
     minimum: 1,
-    maximum: 20
+    maximum: 20,
   })
   requests_limit?: number = 10;
 
-  @ApiPropertyOptional({ 
-    description: 'Filter by specific category'
+  @ApiPropertyOptional({
+    description: 'Filter by specific category',
   })
   category?: string;
 
-  @ApiPropertyOptional({ 
-    description: 'User location for local recommendations (lat,lng)'
+  @ApiPropertyOptional({
+    description: 'User location for local recommendations (lat,lng)',
   })
   user_location?: string;
 }

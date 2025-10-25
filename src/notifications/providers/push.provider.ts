@@ -7,11 +7,11 @@ export class PushProvider {
 
   static configure(config: ConfigService) {
     if (this.configured) return;
-    const vapid = config.get('push.vapid') as any;
+    const vapid = config.get('push.vapid');
     if (vapid?.publicKey && vapid?.privateKey) {
       webPush.setVapidDetails(vapid.subject, vapid.publicKey, vapid.privateKey);
     }
-    const firebase = config.get('push.firebase') as any;
+    const firebase = config.get('push.firebase');
     if (firebase?.projectId && !admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.cert({

@@ -23,6 +23,7 @@ async function bootstrap() {
       configService.get<string>('app.frontendUrl'),
       'http://localhost:3001',
       'http://localhost:3000',
+      'https://procur-ui-eight.vercel.app',
     ],
     credentials: true,
   });

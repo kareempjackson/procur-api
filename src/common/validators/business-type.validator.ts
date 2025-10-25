@@ -14,11 +14,11 @@ export class IsValidBusinessTypeForAccountConstraint
   validate(businessType: string, args: ValidationArguments) {
     const [accountTypeProperty] = args.constraints;
     const accountType = (args.object as any)[accountTypeProperty];
-    
+
     if (!businessType || !accountType) {
       return true; // Let other validators handle required validation
     }
-    
+
     return isValidBusinessType(accountType, businessType);
   }
 
@@ -33,7 +33,7 @@ export function IsValidBusinessTypeForAccount(
   accountTypeProperty: string,
   validationOptions?: ValidationOptions,
 ) {
-  return function (object: Object, propertyName: string) {
+  return function (object: object, propertyName: string) {
     registerDecorator({
       target: object.constructor,
       propertyName: propertyName,

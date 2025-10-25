@@ -11,9 +11,10 @@ export class HomeController {
 
   @Get()
   @Public() // Make this endpoint public so it can be accessed without authentication
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Get home page aggregate data',
-    description: 'Returns recommended products, popular sellers, best selling products, in-demand products, and popular requests for the home page'
+    description:
+      'Returns recommended products, popular sellers, best selling products, in-demand products, and popular requests for the home page',
   })
   @ApiResponse({
     status: 200,
@@ -62,15 +63,17 @@ export class HomeController {
     type: String,
     description: 'User location for local recommendations (format: "lat,lng")',
   })
-  async getHomePageData(@Query() query: HomePageQueryDto): Promise<HomePageResponseDto> {
+  async getHomePageData(
+    @Query() query: HomePageQueryDto,
+  ): Promise<HomePageResponseDto> {
     return this.homeService.getHomePageData(query);
   }
 
   @Get('stats')
   @Public()
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Get platform statistics',
-    description: 'Returns basic platform statistics for the home page'
+    description: 'Returns basic platform statistics for the home page',
   })
   @ApiResponse({
     status: 200,
@@ -78,10 +81,23 @@ export class HomeController {
     schema: {
       type: 'object',
       properties: {
-        total_active_products: { type: 'number', description: 'Total number of active products' },
-        total_verified_sellers: { type: 'number', description: 'Total number of verified sellers' },
-        total_open_requests: { type: 'number', description: 'Total number of open requests' },
-        last_updated: { type: 'string', format: 'date-time', description: 'Last updated timestamp' },
+        total_active_products: {
+          type: 'number',
+          description: 'Total number of active products',
+        },
+        total_verified_sellers: {
+          type: 'number',
+          description: 'Total number of verified sellers',
+        },
+        total_open_requests: {
+          type: 'number',
+          description: 'Total number of open requests',
+        },
+        last_updated: {
+          type: 'string',
+          format: 'date-time',
+          description: 'Last updated timestamp',
+        },
       },
     },
   })
@@ -120,9 +136,10 @@ export class HomeController {
 
   @Get('categories')
   @Public()
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Get popular product categories',
-    description: 'Returns the most popular product categories based on active products and requests'
+    description:
+      'Returns the most popular product categories based on active products and requests',
   })
   @ApiResponse({
     status: 200,
@@ -136,9 +153,18 @@ export class HomeController {
             type: 'object',
             properties: {
               name: { type: 'string', description: 'Category name' },
-              product_count: { type: 'number', description: 'Number of active products in this category' },
-              request_count: { type: 'number', description: 'Number of open requests in this category' },
-              total_activity: { type: 'number', description: 'Combined activity score' },
+              product_count: {
+                type: 'number',
+                description: 'Number of active products in this category',
+              },
+              request_count: {
+                type: 'number',
+                description: 'Number of open requests in this category',
+              },
+              total_activity: {
+                type: 'number',
+                description: 'Combined activity score',
+              },
             },
           },
         },
@@ -169,7 +195,11 @@ export class HomeController {
     productCategories?.forEach((item: any) => {
       const category = item.category;
       if (!categoryStats.has(category)) {
-        categoryStats.set(category, { name: category, product_count: 0, request_count: 0 });
+        categoryStats.set(category, {
+          name: category,
+          product_count: 0,
+          request_count: 0,
+        });
       }
       categoryStats.get(category).product_count += 1;
     });
@@ -177,7 +207,11 @@ export class HomeController {
     requestCategories?.forEach((item: any) => {
       const category = item.category;
       if (!categoryStats.has(category)) {
-        categoryStats.set(category, { name: category, product_count: 0, request_count: 0 });
+        categoryStats.set(category, {
+          name: category,
+          product_count: 0,
+          request_count: 0,
+        });
       }
       categoryStats.get(category).request_count += 1;
     });
