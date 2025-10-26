@@ -42,6 +42,40 @@ export class SupabaseService {
     return this.supabase;
   }
 
+  // Storage helpers
+  async createSignedUploadUrl(
+    bucket: string,
+    path: string,
+  ): Promise<{ signedUrl: string; token: string; path: string }> {
+    const { data, error } = await this.supabase.storage
+      .from(bucket)
+      .createSignedUploadUrl(path);
+
+    if (error) {
+      this.logger.error('Error creating signed upload URL:', error);
+      throw error;
+    }
+
+    return data as { signedUrl: string; token: string; path: string };
+  }
+
+  async createSignedDownloadUrl(
+    bucket: string,
+    path: string,
+    expiresInSeconds: number,
+  ): Promise<{ signedUrl: string }> {
+    const { data, error } = await this.supabase.storage
+      .from(bucket)
+      .createSignedUrl(path, expiresInSeconds);
+
+    if (error) {
+      this.logger.error('Error creating signed download URL:', error);
+      throw error;
+    }
+
+    return data as { signedUrl: string };
+  }
+
   // User operations
   async createUser(userData: CreateUserData): Promise<DatabaseUser> {
     const { data, error } = await this.supabase
@@ -277,5 +311,24 @@ export class SupabaseService {
     }
 
     return data as DatabaseOrganization | null;
+  }
+
+  async updateOrganization(
+    organizationId: string,
+    updates: Partial<DatabaseOrganization>,
+  ): Promise<DatabaseOrganization> {
+    const { data, error } = await this.supabase
+      .from('organizations')
+      .update(updates)
+      .eq('id', organizationId)
+      .select('*')
+      .single();
+
+    if (error) {
+      this.logger.error('Error updating organization:', error);
+      throw error;
+    }
+
+    return data as DatabaseOrganization;
   }
 }

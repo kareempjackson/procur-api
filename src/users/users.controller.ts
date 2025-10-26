@@ -17,12 +17,19 @@ import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { UserContext } from '../common/interfaces/jwt-payload.interface';
 import { UserRole } from '../common/enums/user-role.enum';
 import { SystemPermission } from '../common/enums/system-permission.enum';
+import { UsersService } from './users.service';
+import { UpdateUserProfileDto } from './dto/update-user-profile.dto';
+import {
+  CreateFarmersIdUploadUrlDto,
+  FarmersIdUploadUrlResponseDto,
+} from './dto/farmers-id-upload.dto';
 
 @ApiTags('Users')
 @ApiBearerAuth('JWT-auth')
 @Controller('users')
 @UseGuards(JwtAuthGuard, EmailVerifiedGuard)
 export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
   @Get('profile')
   @ApiOperation({
     summary: 'Get User Profile',
@@ -48,7 +55,7 @@ export class UsersController {
   @ApiUnauthorizedResponse({ description: 'User not authenticated' })
   @ApiForbiddenResponse({ description: 'Email verification required' })
   async getProfile(@CurrentUser() user: UserContext) {
-    return user;
+    return this.usersService.getProfile(user);
   }
 
   @Patch('profile')
@@ -61,13 +68,9 @@ export class UsersController {
   @ApiForbiddenResponse({ description: 'Email verification required' })
   async updateProfile(
     @CurrentUser() user: UserContext,
-    @Body() updateData: any,
+    @Body() updateData: UpdateUserProfileDto,
   ) {
-    return {
-      message: 'Profile update functionality to be implemented',
-      userId: user.id,
-      updateData,
-    };
+    return this.usersService.updateProfile(user, updateData);
   }
 
   @Get('admin-only')
@@ -80,11 +83,7 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'Admin data retrieved' })
   @ApiForbiddenResponse({ description: 'Insufficient permissions' })
   async adminOnly(@CurrentUser() user: UserContext) {
-    return {
-      message: 'This is admin-only data',
-      user: user.email,
-      role: user.role,
-    };
+    return this.usersService.adminOnly(user);
   }
 
   @Get('users-list')
@@ -97,9 +96,35 @@ export class UsersController {
   @ApiResponse({ status: 200, description: 'Users list retrieved' })
   @ApiForbiddenResponse({ description: 'Insufficient permissions' })
   async getUsersList(@CurrentUser() user: UserContext) {
+    return this.usersService.getUsersList(user);
+  }
+
+  @Patch('farmers-id/signed-upload')
+  @ApiOperation({
+    summary: 'Create signed upload URL for Farmer ID (private storage)',
+  })
+  @ApiResponse({ status: 200, description: 'Signed URL created' })
+  async createFarmersIdSignedUpload(
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateFarmersIdUploadUrlDto,
+  ): Promise<FarmersIdUploadUrlResponseDto> {
+    const service: {
+      createFarmersIdSignedUpload: (
+        user: UserContext,
+        dto: CreateFarmersIdUploadUrlDto,
+      ) => Promise<FarmersIdUploadUrlResponseDto>;
+    } = this.usersService as unknown as {
+      createFarmersIdSignedUpload: (
+        user: UserContext,
+        dto: CreateFarmersIdUploadUrlDto,
+      ) => Promise<FarmersIdUploadUrlResponseDto>;
+    };
+    const upload = await service.createFarmersIdSignedUpload(user, dto);
     return {
-      message: 'Users list functionality to be implemented',
-      requesterPermissions: user.permissions,
+      bucket: upload.bucket,
+      path: upload.path,
+      signedUrl: upload.signedUrl,
+      token: upload.token,
     };
   }
 }

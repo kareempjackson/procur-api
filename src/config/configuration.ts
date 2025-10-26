@@ -8,6 +8,10 @@ export default () => ({
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   },
 
+  storage: {
+    privateBucket: process.env.SUPABASE_PRIVATE_BUCKET || 'private',
+  },
+
   jwt: {
     secret: process.env.JWT_SECRET,
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
