@@ -149,7 +149,6 @@ export class EmailService {
             <div class="header">
               <span class="brand">
                 <img src="${logoUrl}" alt="Procur" />
-                Procur
               </span>
             </div>
             <div class="content">`;
