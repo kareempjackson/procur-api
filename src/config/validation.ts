@@ -47,7 +47,15 @@ export class EnvironmentVariables {
 
   @IsUrl()
   @IsOptional()
+  LOGO_URL?: string;
+
+  @IsUrl()
+  @IsOptional()
   FRONTEND_URL?: string = 'http://localhost:3001';
+
+  @IsUrl()
+  @IsOptional()
+  EMAIL_ASSETS_URL?: string;
 
   @IsString()
   @IsOptional()

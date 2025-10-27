@@ -20,10 +20,15 @@ export default () => ({
   email: {
     postmarkApiKey: process.env.POSTMARK_API_KEY,
     fromEmail: process.env.POSTMARK_FROM_EMAIL || 'noreply@procur.com',
+    logoUrl: process.env.LOGO_URL,
   },
 
   app: {
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3001',
+    assetsUrl:
+      process.env.EMAIL_ASSETS_URL ||
+      process.env.FRONTEND_URL ||
+      'http://localhost:3001',
     apiPrefix: process.env.API_PREFIX || 'api',
     apiVersion: process.env.API_VERSION || 'v1',
   },

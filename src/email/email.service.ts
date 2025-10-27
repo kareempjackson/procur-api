@@ -104,8 +104,16 @@ export class EmailService {
   }
 
   private getLogoUrl(): string {
-    const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
-    return `${frontendUrl}/images/logos/procur-logo.svg`;
+    const explicitLogoUrl = this.configService.get<string>('email.logoUrl');
+    if (explicitLogoUrl) {
+      return explicitLogoUrl;
+    }
+    const assetsBaseUrl =
+      this.configService.get<string>('app.assetsUrl') ||
+      this.configService.get<string>('app.frontendUrl') ||
+      '';
+    // Default to PNG under assets if not explicitly set
+    return `${assetsBaseUrl}/images/logos/procur_logo.png`;
   }
 
   private getBrandHead(title: string): string {
