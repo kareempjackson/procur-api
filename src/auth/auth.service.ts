@@ -37,7 +37,15 @@ export class AuthService {
   ) {}
 
   async signup(signupDto: SignupDto): Promise<SignupResponseDto> {
-    const { email, password, fullname, accountType, country } = signupDto;
+    const {
+      email,
+      password,
+      fullname,
+      accountType,
+      country,
+      businessType,
+      businessName,
+    } = signupDto;
 
     // Check if user already exists
     const existingUser = await this.supabaseService.findUserByEmail(email);
@@ -74,9 +82,12 @@ export class AuthService {
         accountType === AccountType.SELLER
       ) {
         const organizationData = {
-          name: `${fullname}'s ${accountType === AccountType.BUYER ? 'Business' : 'Company'}`,
+          name:
+            businessName ||
+            `${fullname}'s ${accountType === AccountType.BUYER ? 'Business' : 'Company'}`,
+          business_name: businessName || undefined,
           account_type: accountType,
-          business_type: 'general' as BusinessType,
+          business_type: (businessType || 'general') as BusinessType,
           country,
         };
 

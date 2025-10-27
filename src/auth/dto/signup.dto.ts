@@ -5,8 +5,13 @@ import {
   MinLength,
   IsEnum,
   IsOptional,
+  IsNotEmpty,
+  ValidateIf,
 } from 'class-validator';
 import { AccountType } from '../../common/enums/account-type.enum';
+import { BuyerBusinessType } from '../../common/enums/buyer-business-type.enum';
+import { SellerBusinessType } from '../../common/enums/seller-business-type.enum';
+import { IsValidBusinessTypeForAccount } from '../../common/validators/business-type.validator';
 
 export class SignupDto {
   @ApiProperty({
@@ -33,6 +38,20 @@ export class SignupDto {
   fullname: string;
 
   @ApiProperty({
+    example: 'Acme Imports Ltd.',
+    description: 'Business legal name (required for buyer/seller accounts)',
+    required: false,
+  })
+  @ValidateIf(
+    (o) =>
+      o.accountType === AccountType.BUYER ||
+      o.accountType === AccountType.SELLER,
+  )
+  @IsString()
+  @IsNotEmpty()
+  businessName?: string;
+
+  @ApiProperty({
     enum: AccountType,
     example: AccountType.BUYER,
     description: 'Type of account being created',
@@ -48,4 +67,21 @@ export class SignupDto {
   @IsOptional()
   @IsString()
   country?: string;
+
+  @ApiProperty({
+    description: 'Business type (required for buyer/seller accounts)',
+    enum: { BuyerBusinessType, SellerBusinessType },
+    required: false,
+  })
+  @ValidateIf(
+    (o) =>
+      o.accountType === AccountType.BUYER ||
+      o.accountType === AccountType.SELLER,
+  )
+  @IsString()
+  @IsNotEmpty()
+  @IsValidBusinessTypeForAccount('accountType', {
+    message: 'Business type must be valid for the selected account type',
+  })
+  businessType?: string;
 }

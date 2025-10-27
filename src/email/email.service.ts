@@ -103,108 +103,98 @@ export class EmailService {
     }
   }
 
+  private getLogoUrl(): string {
+    const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
+    return `${frontendUrl}/images/logos/procur-logo.svg`;
+  }
+
+  private getBrandHead(title: string): string {
+    const logoUrl = this.getLogoUrl();
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>${title}</title>
+        <style>
+          /* Base and brand styles */
+          body { margin: 0; padding: 0; background-color: #f6f6f6; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+          .container { max-width: 640px; margin: 0 auto; padding: 24px; }
+          .card { background: #ffffff; border: 1px solid #ececec; border-radius: 16px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+          .header { padding: 20px 24px; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid #f1f1f1; }
+          .brand { display: inline-flex; align-items: center; gap: 12px; color: #0f172a; font-weight: 700; font-size: 18px; }
+          .brand img { display: block; height: 28px; width: auto; }
+          .content { padding: 28px 24px; color: #1f2937; font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji'; }
+          h1, h2, h3 { margin: 0 0 12px; color: #0f172a; }
+          h2 { font-size: 20px; font-weight: 700; }
+          p { margin: 0 0 12px; }
+          ul { margin: 0 0 12px 18px; }
+          .button { display: inline-block; background-color: #0f172a; color: #ffffff !important; padding: 12px 22px; text-decoration: none; border-radius: 9999px; font-weight: 600; }
+          .muted { color: #6b7280; font-size: 12px; }
+          .footer { padding: 18px 24px; text-align: center; color: #6b7280; font-size: 12px; background: #fafafa; border-top: 1px solid #f1f1f1; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="card">
+            <div class="header">
+              <span class="brand">
+                <img src="${logoUrl}" alt="Procur" />
+                Procur
+              </span>
+            </div>
+            <div class="content">`;
+  }
+
+  private getBrandFoot(): string {
+    return `
+            </div>
+            <div class="footer">
+              <p>© ${new Date().getFullYear()} Procur. All rights reserved.</p>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>`;
+  }
+
   private getVerificationEmailTemplate(
     fullname: string,
     verificationUrl: string,
   ): string {
     return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Verify Your Procur Account</title>
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background-color: #2563eb; color: white; padding: 20px; text-align: center; }
-          .content { padding: 30px 20px; }
-          .button { 
-            display: inline-block; 
-            background-color: #2563eb; 
-            color: white; 
-            padding: 12px 30px; 
-            text-decoration: none; 
-            border-radius: 5px; 
-            margin: 20px 0;
-          }
-          .footer { background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #666; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>Procur</h1>
-          </div>
-          <div class="content">
-            <h2>Hi ${fullname},</h2>
-            <p>Thank you for signing up for Procur! Please verify your email address to complete your account setup.</p>
-            <p>Click the button below to verify your email:</p>
-            <a href="${verificationUrl}" class="button">Verify Email Address</a>
-            <p>Or copy and paste this link into your browser:</p>
-            <p><a href="${verificationUrl}">${verificationUrl}</a></p>
-            <p><strong>This link will expire in 24 hours.</strong></p>
-            <p>If you didn't create an account with Procur, you can safely ignore this email.</p>
-          </div>
-          <div class="footer">
-            <p>© 2024 Procur. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      ${this.getBrandHead('Verify Your Procur Account')}
+        <h2>Hi ${fullname},</h2>
+        <p>Thanks for joining Procur. Please verify your email address to complete your account setup.</p>
+        <p style="margin-top: 16px;">
+          <a href="${verificationUrl}" class="button">Verify Email Address</a>
+        </p>
+        <p class="muted">Or copy and paste this link into your browser:</p>
+        <p><a href="${verificationUrl}">${verificationUrl}</a></p>
+        <p class="muted"><strong>This link will expire in 24 hours.</strong></p>
+        <p class="muted">If you didn't create an account with Procur, you can safely ignore this email.</p>
+      ${this.getBrandFoot()}
     `;
   }
 
   private getWelcomeEmailTemplate(fullname: string): string {
+    const dashboardUrl = `${this.configService.get('app.frontendUrl')}/dashboard`;
     return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Welcome to Procur!</title>
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background-color: #16a34a; color: white; padding: 20px; text-align: center; }
-          .content { padding: 30px 20px; }
-          .button { 
-            display: inline-block; 
-            background-color: #16a34a; 
-            color: white; 
-            padding: 12px 30px; 
-            text-decoration: none; 
-            border-radius: 5px; 
-            margin: 20px 0;
-          }
-          .footer { background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #666; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>Welcome to Procur!</h1>
-          </div>
-          <div class="content">
-            <h2>Hi ${fullname},</h2>
-            <p>🎉 Your account has been successfully verified! Welcome to the Procur platform.</p>
-            <p>You can now:</p>
-            <ul>
-              <li>Complete your profile setup</li>
-              <li>Explore procurement opportunities</li>
-              <li>Connect with buyers and sellers</li>
-              <li>Access our full suite of tools</li>
-            </ul>
-            <p>Ready to get started?</p>
-            <a href="${this.configService.get('app.frontendUrl')}/dashboard" class="button">Go to Dashboard</a>
-            <p>If you have any questions, our support team is here to help!</p>
-          </div>
-          <div class="footer">
-            <p>© 2024 Procur. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      ${this.getBrandHead('Welcome to Procur!')}
+        <h2>Hi ${fullname},</h2>
+        <p>🎉 Your account has been verified. Welcome to Procur.</p>
+        <p>Here’s what you can do next:</p>
+        <ul>
+          <li>Complete your profile setup</li>
+          <li>Explore opportunities and suppliers</li>
+          <li>Connect with buyers and sellers</li>
+        </ul>
+        <p style="margin-top: 16px;">
+          <a href="${dashboardUrl}" class="button">Go to Dashboard</a>
+        </p>
+        <p class="muted">Need help? Just reply to this email.</p>
+      ${this.getBrandFoot()}
     `;
   }
 
@@ -214,57 +204,17 @@ export class EmailService {
     invitationUrl: string,
   ): string {
     return `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Invitation to join ${organizationName}</title>
-        <style>
-          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-          .header { background-color: #7c3aed; color: white; padding: 20px; text-align: center; }
-          .content { padding: 30px 20px; }
-          .button { 
-            display: inline-block; 
-            background-color: #7c3aed; 
-            color: white; 
-            padding: 12px 30px; 
-            text-decoration: none; 
-            border-radius: 5px; 
-            margin: 20px 0;
-          }
-          .footer { background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #666; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>You're Invited!</h1>
-          </div>
-          <div class="content">
-            <h2>Join ${organizationName} on Procur</h2>
-            <p><strong>${inviterName}</strong> has invited you to join <strong>${organizationName}</strong> on the Procur platform.</p>
-            <p>By accepting this invitation, you'll be able to:</p>
-            <ul>
-              <li>Collaborate with your team</li>
-              <li>Access organization resources</li>
-              <li>Participate in procurement activities</li>
-              <li>Use advanced platform features</li>
-            </ul>
-            <p>Click the button below to accept the invitation:</p>
-            <a href="${invitationUrl}" class="button">Accept Invitation</a>
-            <p>Or copy and paste this link into your browser:</p>
-            <p><a href="${invitationUrl}">${invitationUrl}</a></p>
-            <p><strong>This invitation will expire in 7 days.</strong></p>
-            <p>If you don't want to join this organization, you can safely ignore this email.</p>
-          </div>
-          <div class="footer">
-            <p>© 2024 Procur. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
+      ${this.getBrandHead(`Invitation to join ${organizationName}`)}
+        <h2>Join ${organizationName} on Procur</h2>
+        <p><strong>${inviterName}</strong> has invited you to join <strong>${organizationName}</strong> on Procur.</p>
+        <p>By accepting this invitation, you'll be able to collaborate with your team and access organization resources.</p>
+        <p style="margin-top: 16px;">
+          <a href="${invitationUrl}" class="button">Accept Invitation</a>
+        </p>
+        <p class="muted">Or copy and paste this link:</p>
+        <p><a href="${invitationUrl}">${invitationUrl}</a></p>
+        <p class="muted"><strong>This invitation will expire in 7 days.</strong></p>
+      ${this.getBrandFoot()}
     `;
   }
 }
