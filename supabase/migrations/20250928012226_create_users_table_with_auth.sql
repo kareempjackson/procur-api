@@ -1,72 +1,97 @@
--- Create enums for system-level permissions and categories
-CREATE TYPE permission_category AS ENUM (
-  'user_management',
-  'procurement', 
-  'reporting',
-  'audit',
-  'government',
-  'organization',
-  'inventory',
-  'finance',
-  'compliance',
-  'custom'
-);
+-- Create enums for system-level permissions and categories (idempotent)
+DO $$
+BEGIN
+  CREATE TYPE public.permission_category AS ENUM (
+    'user_management',
+    'procurement',
+    'reporting',
+    'audit',
+    'government',
+    'organization',
+    'inventory',
+    'finance',
+    'compliance',
+    'custom'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN
+    NULL; -- type already exists
+END
+$$;
 
-CREATE TYPE system_permission AS ENUM (
-  -- User Management
-  'manage_users',
-  'invite_users', 
-  'view_users',
-  'manage_roles',
-  'deactivate_users',
-  
-  -- Procurement
-  'create_rfp',
-  'approve_purchases',
-  'view_procurement',
-  'manage_vendors',
-  'create_purchase_orders',
-  'approve_contracts',
-  
-  -- Reporting & Analytics
-  'view_reports',
-  'export_data',
-  'view_audit_logs',
-  'create_reports',
-  'view_analytics',
-  
-  -- Government Specific
-  'conduct_inspections',
-  'issue_permits',
-  'regulatory_oversight',
-  'policy_management',
-  'compliance_monitoring',
-  'license_management',
-  'manage_seller_accounts',
-  
-  -- Organization Management
-  'manage_organization',
-  'view_organization',
-  'manage_settings',
-  'manage_billing',
-  
-  -- Inventory Management
-  'manage_inventory',
-  'view_inventory',
-  'track_shipments',
-  'quality_control',
-  
-  -- Finance
-  'manage_payments',
-  'view_financial_reports',
-  'approve_invoices',
-  'manage_budgets'
-);
+DO $$
+BEGIN
+  CREATE TYPE public.system_permission AS ENUM (
+    -- User Management
+    'manage_users',
+    'invite_users',
+    'view_users',
+    'manage_roles',
+    'deactivate_users',
+    
+    -- Procurement
+    'create_rfp',
+    'approve_purchases',
+    'view_procurement',
+    'manage_vendors',
+    'create_purchase_orders',
+    'approve_contracts',
+    
+    -- Reporting & Analytics
+    'view_reports',
+    'export_data',
+    'view_audit_logs',
+    'create_reports',
+    'view_analytics',
+    
+    -- Government Specific
+    'conduct_inspections',
+    'issue_permits',
+    'regulatory_oversight',
+    'policy_management',
+    'compliance_monitoring',
+    'license_management',
+    'manage_seller_accounts',
+    
+    -- Organization Management
+    'manage_organization',
+    'view_organization',
+    'manage_settings',
+    'manage_billing',
+    
+    -- Inventory Management
+    'manage_inventory',
+    'view_inventory',
+    'track_shipments',
+    'quality_control',
+    
+    -- Finance
+    'manage_payments',
+    'view_financial_reports',
+    'approve_invoices',
+    'manage_budgets'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN
+    NULL; -- type already exists
+END
+$$;
 
-CREATE TYPE user_role AS ENUM ('user', 'admin', 'super_admin');
-CREATE TYPE account_type AS ENUM ('buyer', 'government', 'seller', 'driver', 'qa');
-CREATE TYPE organization_status AS ENUM ('active', 'suspended', 'pending_verification');
-CREATE TYPE permission_status AS ENUM ('pending', 'approved', 'denied', 'revoked');
+DO $$ BEGIN
+  CREATE TYPE public.user_role AS ENUM ('user', 'admin', 'super_admin');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE public.account_type AS ENUM ('buyer', 'government', 'seller', 'driver', 'qa');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE public.organization_status AS ENUM ('active', 'suspended', 'pending_verification');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  CREATE TYPE public.permission_status AS ENUM ('pending', 'approved', 'denied', 'revoked');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- Users table (MOVED TO TOP - must be created before other tables reference it)
 CREATE TABLE users (

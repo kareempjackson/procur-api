@@ -39,7 +39,8 @@ export class EmailVerifiedGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
-    if (!user.emailVerified) {
+    // Allow organization admins to proceed even if email not yet verified
+    if (!user.emailVerified && user.organizationRole !== 'admin') {
       throw new ForbiddenException(
         'Email verification required. Please verify your email address.',
       );

@@ -9,8 +9,26 @@ export class ParticipantsService {
     const client = this.supabase.getClient();
     const { data, error } = await client
       .from('conversation_participants')
-      .select('*')
-      .eq('conversation_id', conversationId);
+      .select(
+        `
+        *,
+        users:user_id (
+          id,
+          email,
+          full_name:fullname
+        ),
+        organizations:org_id (
+          id,
+          name,
+          business_name,
+          country,
+          address,
+          logo_url
+        )
+      `,
+      )
+      .eq('conversation_id', conversationId)
+      .eq('is_removed', false);
     if (error) throw error;
     return data;
   }

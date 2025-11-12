@@ -43,10 +43,38 @@ export class SupabaseService {
   }
 
   // Storage helpers
+  async ensureBucketExists(
+    bucket: string,
+    isPublic: boolean = false,
+  ): Promise<void> {
+    try {
+      const { data } = await this.supabase.storage.getBucket(bucket);
+      if (data) return; // bucket exists
+      const { error } = await this.supabase.storage.createBucket(bucket, {
+        public: isPublic,
+      });
+      if (error) {
+        this.logger.error('Error creating bucket:', error);
+      }
+    } catch (e) {
+      // If getBucket is not available in this client version, try list+check
+      try {
+        const { data: buckets } = await this.supabase.storage.listBuckets();
+        if (buckets && buckets.some((b: any) => b.name === bucket)) return;
+        const { error } = await this.supabase.storage.createBucket(bucket, {
+          public: isPublic,
+        });
+        if (error) this.logger.error('Error creating bucket:', error);
+      } catch (err) {
+        this.logger.error('Bucket existence check failed:', err as any);
+      }
+    }
+  }
   async createSignedUploadUrl(
     bucket: string,
     path: string,
   ): Promise<{ signedUrl: string; token: string; path: string }> {
+    await this.ensureBucketExists(bucket, false);
     const { data, error } = await this.supabase.storage
       .from(bucket)
       .createSignedUploadUrl(path);
@@ -117,6 +145,21 @@ export class SupabaseService {
 
     if (error && error.code !== 'PGRST116') {
       this.logger.error('Error finding user by id:', error);
+      throw error;
+    }
+
+    return data as DatabaseUser | null;
+  }
+
+  async findUserByPhoneNumber(phoneE164: string): Promise<DatabaseUser | null> {
+    const { data, error } = await this.supabase
+      .from('users')
+      .select('*')
+      .eq('phone_number', phoneE164)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      this.logger.error('Error finding user by phone number:', error);
       throw error;
     }
 
@@ -234,6 +277,93 @@ export class SupabaseService {
     }
 
     return data as DatabaseOrganizationRole;
+  }
+
+  async ensureCreatorIsOrganizationAdmin(
+    userId: string,
+    organizationId: string,
+  ): Promise<DatabaseOrganizationUser | null> {
+    // First, try to locate the admin role. Since roles are created by a DB trigger
+    // on organization insert, add a short retry window in case of slight latency.
+    const maxAttempts = 5;
+    const delayMs = 150;
+
+    let adminRole: DatabaseOrganizationRole | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const { data } = await this.supabase
+          .from('organization_roles')
+          .select('*')
+          .eq('organization_id', organizationId)
+          .eq('name', 'admin')
+          .single();
+        if (data) {
+          adminRole = data as DatabaseOrganizationRole;
+          break;
+        }
+      } catch (err) {
+        // ignore and retry
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    if (!adminRole) {
+      this.logger.error(
+        `Admin role not found for organization ${organizationId} after retries`,
+      );
+      return null;
+    }
+
+    // Check if user is already a member
+    const { data: existingMembership, error: membershipErr } =
+      await this.supabase
+        .from('organization_users')
+        .select('*')
+        .eq('organization_id', organizationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (membershipErr) {
+      this.logger.error('Error checking existing membership:', membershipErr);
+      throw membershipErr;
+    }
+
+    if (existingMembership) {
+      // If exists but not admin, update role to admin
+      if (existingMembership.role_id !== adminRole.id) {
+        const { data: updated, error: updateErr } = await this.supabase
+          .from('organization_users')
+          .update({ role_id: adminRole.id, is_active: true })
+          .eq('id', existingMembership.id)
+          .select()
+          .single();
+        if (updateErr) {
+          this.logger.error('Error elevating user to admin:', updateErr);
+          throw updateErr;
+        }
+        return updated as DatabaseOrganizationUser;
+      }
+      return existingMembership as DatabaseOrganizationUser;
+    }
+
+    // Create membership as admin
+    const { data: created, error: createErr } = await this.supabase
+      .from('organization_users')
+      .insert({
+        user_id: userId,
+        organization_id: organizationId,
+        role_id: adminRole.id,
+      })
+      .select()
+      .single();
+
+    if (createErr) {
+      this.logger.error('Error adding creator as admin:', createErr);
+      throw createErr;
+    }
+
+    return created as DatabaseOrganizationUser;
   }
 
   // Permission operations

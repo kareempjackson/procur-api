@@ -1452,6 +1452,85 @@ export class SellersService {
     };
   }
 
+  // ==================== INSIGHTS ====================
+
+  async getSellerInsights(sellerOrgId: string) {
+    const client = this.supabaseService.getClient();
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const [featuredCountRes, pendingOrdersRes, recentHarvestsRes] =
+      await Promise.all([
+        client
+          .from('products')
+          .select('id', { count: 'exact', head: true })
+          .eq('seller_org_id', sellerOrgId)
+          .eq('is_featured', true)
+          .eq('status', 'active'),
+        client
+          .from('orders')
+          .select('id', { count: 'exact', head: true })
+          .eq('seller_org_id', sellerOrgId)
+          .in('status', ['pending', 'accepted', 'processing']),
+        client
+          .from('harvest_requests')
+          .select('id', { count: 'exact', head: true })
+          .eq('seller_org_id', sellerOrgId)
+          .gte('created_at', sevenDaysAgo.toISOString()),
+      ]);
+
+    const insights: Array<{
+      id: string;
+      title: string;
+      sub?: string;
+      cta?: string;
+      urgent?: boolean;
+      actionId?: string;
+    }> = [];
+
+    const featuredCount = featuredCountRes.count || 0;
+    if (featuredCount === 0) {
+      insights.push({
+        id: 'feature-a-product',
+        title: 'Feature a product to boost catalog visibility',
+        sub: 'Pick a best-seller to appear in your featured row',
+        cta: 'Feature a product',
+        actionId: 'feature_product',
+      });
+    }
+
+    const pendingOrders = pendingOrdersRes.count || 0;
+    if (pendingOrders > 0) {
+      insights.push({
+        id: 'review-pending-orders',
+        title: `You have ${pendingOrders} orders awaiting action`,
+        cta: 'Review orders',
+        urgent: true,
+        actionId: 'open_orders',
+      });
+    }
+
+    const harvestsLastWeek = recentHarvestsRes.count || 0;
+    if (harvestsLastWeek === 0) {
+      insights.push({
+        id: 'post-harvest-update',
+        title: 'Post a harvest update to attract buyers',
+        cta: 'Post update',
+        actionId: 'new_harvest',
+      });
+    }
+
+    return insights;
+  }
+
+  async executeSellerInsight(sellerOrgId: string, insightId: string) {
+    // For MVP, we do not perform complex actions. We can expand later to
+    // auto-flag featured products, generate tasks, etc.
+    // Returning success allows the UI to optimistically remove the card.
+    return { success: true };
+  }
+
   // ==================== HARVEST REQUESTS ====================
 
   async createHarvestRequest(
@@ -1917,7 +1996,8 @@ export class SellersService {
       throw new NotFoundException('Product request not found');
     }
 
-    if (request.status !== 'open') {
+    const acceptingStatuses = ['open', 'active'];
+    if (!acceptingStatuses.includes(request.status)) {
       throw new BadRequestException(
         'This request is no longer accepting quotes',
       );

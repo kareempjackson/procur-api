@@ -1739,6 +1739,26 @@ export class BuyersService {
       throw new NotFoundException('Order not found');
     }
 
+    // If shipping address is only an id placeholder, hydrate it from buyer_addresses
+    if (
+      order.shipping_address &&
+      typeof order.shipping_address === 'object' &&
+      order.shipping_address.id &&
+      !order.shipping_address.city &&
+      !order.shipping_address.street_address &&
+      !order.shipping_address.address_line1
+    ) {
+      const { data: addr } = await this.supabase
+        .getClient()
+        .from('buyer_addresses')
+        .select('*')
+        .eq('id', order.shipping_address.id)
+        .single();
+      if (addr) {
+        order.shipping_address = addr;
+      }
+    }
+
     const orderItems = Array.isArray(order.order_items)
       ? order.order_items
       : [];
@@ -1856,8 +1876,14 @@ export class BuyersService {
       billing_address: order.billing_address,
       buyer_notes: order.buyer_notes,
       seller_notes: order.seller_notes,
+      tracking_number: order.tracking_number,
+      shipping_method: order.shipping_method,
       estimated_delivery_date: order.estimated_delivery_date,
       actual_delivery_date: order.actual_delivery_date,
+      accepted_at: order.accepted_at,
+      rejected_at: order.rejected_at,
+      shipped_at: order.shipped_at,
+      delivered_at: order.delivered_at,
       items: orderItems.map((item) => ({
         id: item.id,
         product_id: item.product_id,
@@ -2380,7 +2406,7 @@ export class BuyersService {
         `
         *,
         seller_organization:organizations!seller_org_id(
-          id, name, logo_url, location, country, is_verified
+          id, name, logo_url, address, country, is_verified
         )
       `,
         { count: 'exact' },
@@ -2428,9 +2454,9 @@ export class BuyersService {
           seller_org_id: update.seller_org_id,
           farm_name: seller?.name || 'Unknown Farm',
           farm_avatar: seller?.logo_url,
-          location: seller?.location
-            ? `${seller.location}${seller.country ? `, ${seller.country}` : ''}`
-            : undefined,
+          location: seller?.address
+            ? `${seller.address}${seller.country ? `, ${seller.country}` : ''}`
+            : seller?.country || undefined,
           crop: update.crop,
           content: update.content,
           expected_harvest_window: update.expected_harvest_window,
@@ -2471,7 +2497,7 @@ export class BuyersService {
         `
         *,
         seller_organization:organizations!seller_org_id(
-          id, name, logo_url, location, country, is_verified, contact_email, contact_phone
+          id, name, logo_url, address, country, is_verified, phone_number
         )
       `,
       )
@@ -2523,9 +2549,9 @@ export class BuyersService {
       seller_org_id: update.seller_org_id,
       farm_name: seller?.name || 'Unknown Farm',
       farm_avatar: seller?.logo_url,
-      location: seller?.location
-        ? `${seller.location}${seller.country ? `, ${seller.country}` : ''}`
-        : undefined,
+      location: seller?.address
+        ? `${seller.address}${seller.country ? `, ${seller.country}` : ''}`
+        : seller?.country || undefined,
       crop: update.crop,
       content: update.content,
       expected_harvest_window: update.expected_harvest_window,
@@ -2545,8 +2571,8 @@ export class BuyersService {
       next_planting_area: update.next_planting_area,
       recent_comments: recentComments,
       seller_contact: {
-        email: seller?.contact_email,
-        phone: seller?.contact_phone,
+        email: undefined,
+        phone: seller?.phone_number || undefined,
       },
     };
   }

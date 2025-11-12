@@ -20,6 +20,28 @@ export class EmailService {
     this.postmarkClient = new postmark.ServerClient(apiKey);
     this.logger.log('Postmark client initialized');
   }
+  async sendBasicEmail(
+    to: string,
+    subject: string,
+    htmlBody: string,
+    textBody?: string,
+  ) {
+    try {
+      const result = await this.postmarkClient.sendEmail({
+        From: this.fromEmail,
+        To: to,
+        Subject: subject,
+        HtmlBody: htmlBody,
+        TextBody: textBody ?? '',
+        MessageStream: 'outbound',
+      });
+      this.logger.log(`Email sent to ${to}`, { messageId: result.MessageID });
+      return result;
+    } catch (error) {
+      this.logger.error(`Failed to send email to ${to}`, error);
+      // Do not throw to avoid breaking critical flows like payment webhooks
+    }
+  }
 
   async sendVerificationEmail(
     email: string,

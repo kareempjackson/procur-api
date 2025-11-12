@@ -20,6 +20,10 @@ import { SystemPermission } from '../common/enums/system-permission.enum';
 import { UsersService } from './users.service';
 import { UpdateUserProfileDto } from './dto/update-user-profile.dto';
 import {
+  CreateAvatarUploadUrlDto,
+  AvatarUploadUrlResponseDto,
+} from './dto/avatar-upload.dto';
+import {
   CreateFarmersIdUploadUrlDto,
   FarmersIdUploadUrlResponseDto,
 } from './dto/farmers-id-upload.dto';
@@ -71,6 +75,28 @@ export class UsersController {
     @Body() updateData: UpdateUserProfileDto,
   ) {
     return this.usersService.updateProfile(user, updateData);
+  }
+
+  @Patch('profile/avatar/signed-upload')
+  @ApiOperation({ summary: 'Create signed upload URL for user avatar' })
+  @ApiResponse({ status: 200, description: 'Signed URL created' })
+  async createAvatarSignedUpload(
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateAvatarUploadUrlDto,
+  ): Promise<AvatarUploadUrlResponseDto> {
+    const service: {
+      createAvatarSignedUpload: (
+        user: UserContext,
+        filename: string,
+      ) => Promise<AvatarUploadUrlResponseDto>;
+    } = this.usersService as unknown as {
+      createAvatarSignedUpload: (
+        user: UserContext,
+        filename: string,
+      ) => Promise<AvatarUploadUrlResponseDto>;
+    };
+    const upload = await service.createAvatarSignedUpload(user, dto.filename);
+    return upload;
   }
 
   @Get('admin-only')

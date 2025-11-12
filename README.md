@@ -96,3 +96,26 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+## WhatsApp Integration (Procur Bot)
+
+The API exposes a WhatsApp webhook and helpers to power Procur on WhatsApp.
+
+- Webhook: `/{API_PREFIX}/{API_VERSION}/whatsapp/webhook` (defaults to `/api/v1/whatsapp/webhook`)
+- Required env:
+  - `WHATSAPP_TOKEN` — Permanent access token
+  - `WHATSAPP_PHONE_NUMBER_ID` — Phone number ID from Meta
+  - `WHATSAPP_VERIFY_TOKEN` — Arbitrary token used to verify the webhook
+  - `WHATSAPP_APP_SECRET` — App secret (optional if not verifying signatures)
+
+1. Deploy the API and expose the webhook publicly (e.g., `https://api.yourdomain.com/api/v1/whatsapp/webhook`).
+2. In Meta App Dashboard, add the webhook, verify with `WHATSAPP_VERIFY_TOKEN`, and subscribe to `messages`.
+3. DM your WhatsApp number to trigger flows:
+   - Send “menu” to see options
+   - “signup” to create an account
+   - “upload” to add a product (then send a photo)
+
+Share your bot:
+
+- Use a wa.me link: `https://wa.me/<YOUR_NUMBER>?text=Hi%20Procur`
+- Generate a QR code with that link for your website/app/onboarding

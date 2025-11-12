@@ -64,6 +64,23 @@ export class EnvironmentVariables {
   @IsString()
   @IsOptional()
   API_VERSION?: string = 'v1';
+
+  // WhatsApp (optional)
+  @IsString()
+  @IsOptional()
+  WHATSAPP_TOKEN?: string;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_VERIFY_TOKEN?: string;
+
+  @IsString()
+  @IsOptional()
+  WHATSAPP_APP_SECRET?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

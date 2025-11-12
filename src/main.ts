@@ -3,9 +3,14 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
+import { json, raw } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  // Stripe webhook must receive raw body; attach before json parser for that route
+  app.use('/payments/stripe/webhook', raw({ type: '*/*' }));
+  // Default JSON parser for all other routes
+  app.use(json());
   const configService = app.get(ConfigService);
 
   // Global validation pipe

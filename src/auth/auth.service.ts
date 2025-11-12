@@ -94,25 +94,11 @@ export class AuthService {
         const organization =
           await this.supabaseService.createOrganization(organizationData);
 
-        // Add user to organization with admin role
-        // Note: We need to get the admin role ID for the organization
-        // This will be handled by the database trigger that creates default roles
-        // We'll need to query for the admin role and add the user
-        const { data: adminRole } = await this.supabaseService
-          .getClient()
-          .from('organization_roles')
-          .select('id')
-          .eq('organization_id', organization.id)
-          .eq('name', 'admin')
-          .single();
-
-        if (adminRole) {
-          await this.supabaseService.addUserToOrganization(
-            user.id,
-            organization.id,
-            adminRole.id,
-          );
-        }
+        // Ensure creator is added as organization admin (with retries if needed)
+        await this.supabaseService.ensureCreatorIsOrganizationAdmin(
+          user.id,
+          organization.id,
+        );
 
         this.logger.log(
           `Organization created for user: ${email}, org: ${organization.id}`,

@@ -19,7 +19,10 @@ import { RolesGuard } from './auth/guards/roles.guard';
 import { PermissionsGuard } from './auth/guards/permissions.guard';
 import { EmailVerifiedGuard } from './auth/guards/email-verified.guard';
 import configuration from './config/configuration';
+import { PaymentsModule } from './payments/payments.module';
 import { validate } from './config/validation';
+import { FinanceModule } from './finance/finance.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -38,6 +41,9 @@ import { validate } from './config/validation';
     GovernmentModule,
     HomeModule,
     MessagesModule,
+    PaymentsModule,
+    FinanceModule,
+    WhatsappModule,
   ],
   controllers: [AppController],
   providers: [

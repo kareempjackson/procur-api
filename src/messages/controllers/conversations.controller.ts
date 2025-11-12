@@ -34,6 +34,7 @@ export class ConversationsController {
     @Body()
     dto: {
       withUserId?: string;
+      withOrgId?: string;
       contextType?: string;
       contextId?: string;
       title?: string;
@@ -47,6 +48,7 @@ export class ConversationsController {
       currentUserId: user.id,
       currentOrgId: user.organizationId,
       otherUserId: dto.withUserId,
+      otherOrgId: dto.withOrgId,
       title: dto.title,
     });
   }

@@ -622,8 +622,7 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) orderId: string,
   ): Promise<BuyerOrderResponseDto> {
-    // TODO: Implement getOrderById in service
-    throw new Error('Not implemented');
+    return this.buyersService.getOrderById(user.organizationId!, orderId);
   }
 
   @Patch('orders/:id/cancel')

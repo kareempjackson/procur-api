@@ -50,12 +50,59 @@ export class ConversationsService {
     currentUserId: string;
     currentOrgId?: string;
     otherUserId?: string;
+    otherOrgId?: string;
     title?: string;
   }) {
+    const client = this.supabase.getClient();
+
+    // If org is provided but not a specific user, resolve an active user from that org
+    if (!dto.otherUserId && dto.otherOrgId) {
+      const { data: orgUser, error: orgErr } = await client
+        .from('organization_users')
+        .select('user_id, joined_at')
+        .eq('organization_id', dto.otherOrgId)
+        .eq('is_active', true)
+        .order('joined_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (orgErr) throw orgErr;
+      if (orgUser?.user_id) {
+        dto.otherUserId = orgUser.user_id as string;
+      }
+    }
     // Check if conversation already exists for this context
     if (dto.contextType && dto.contextId) {
       const existing = await this.findByContext(dto.contextType, dto.contextId);
-      if (existing) return existing;
+      if (existing) {
+        // Make sure the current user is a participant
+        await this.ensureParticipant(
+          existing.id,
+          dto.currentUserId,
+          dto.currentOrgId,
+        );
+        // If the other user/org is provided, try to ensure they are a participant too
+        if (dto.otherUserId) {
+          await this.ensureParticipant(existing.id, dto.otherUserId);
+        } else if (dto.otherOrgId) {
+          // Resolve a user for the org and ensure presence
+          const { data: orgUser } = await this.supabase
+            .getClient()
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', dto.otherOrgId)
+            .eq('is_active', true)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+          if (orgUser?.user_id) {
+            await this.ensureParticipant(
+              existing.id,
+              orgUser.user_id as string,
+            );
+          }
+        }
+        return existing;
+      }
     }
 
     // For direct messages, check if conversation already exists between these users
@@ -64,7 +111,14 @@ export class ConversationsService {
         dto.currentUserId,
         dto.otherUserId,
       );
-      if (existing) return existing;
+      if (existing) {
+        await this.ensureParticipant(
+          existing.id,
+          dto.currentUserId,
+          dto.currentOrgId,
+        );
+        return existing;
+      }
     }
 
     // Create new conversation with participants
@@ -90,6 +144,43 @@ export class ConversationsService {
       },
       dto.currentUserId,
     );
+  }
+
+  private async ensureParticipant(
+    conversationId: string,
+    userId: string,
+    orgId?: string,
+  ): Promise<void> {
+    const client = this.supabase.getClient();
+    const { data: existing, error: checkErr } = await client
+      .from('conversation_participants')
+      .select('id, is_removed')
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (checkErr) throw checkErr;
+
+    if (!existing) {
+      const { error: insertErr } = await client
+        .from('conversation_participants')
+        .insert([
+          {
+            conversation_id: conversationId,
+            user_id: userId,
+            org_id: orgId ?? null,
+            role: 'member',
+            permissions: {},
+            is_removed: false,
+          },
+        ]);
+      if (insertErr) throw insertErr;
+    } else if (existing && existing.is_removed) {
+      const { error: restoreErr } = await client
+        .from('conversation_participants')
+        .update({ is_removed: false })
+        .eq('id', existing.id);
+      if (restoreErr) throw restoreErr;
+    }
   }
 
   async findByContext(contextType: string, contextId: string) {

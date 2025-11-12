@@ -18,3 +18,5 @@ export * from './home.dto';
 export * from './harvest.dto';
 // Product Request DTOs
 export * from './product-request.dto';
+// Insights DTOs
+export * from './insight.dto';

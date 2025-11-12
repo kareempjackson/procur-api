@@ -46,7 +46,17 @@ export class PermissionsGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
+    // Organization admins have full access within their org by default
+    // Also grant if user holds organization-wide management permission
+    if (user.organizationRole === 'admin') {
+      return true;
+    }
+
     const userPermissions = user.permissions || [];
+
+    if (userPermissions.includes('manage_organization')) {
+      return true;
+    }
 
     // Log for debugging
     this.logger.debug(

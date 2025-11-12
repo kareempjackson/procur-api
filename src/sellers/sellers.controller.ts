@@ -752,6 +752,40 @@ export class SellersController {
     return this.sellersService.getSellerHome(user.organizationId!, query);
   }
 
+  // ==================== INSIGHTS ====================
+
+  @Get('insights')
+  @RequirePermissions('view_products')
+  @ApiOperation({
+    summary: 'Get Seller Insights',
+    description:
+      'Returns recommended actions and alerts for the seller dashboard',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Insights retrieved',
+    type: [/* SellerInsightDto */ Object],
+  })
+  async getSellerInsights(@CurrentUser() user: UserContext) {
+    return this.sellersService.getSellerInsights(user.organizationId!);
+  }
+
+  @Post('insights/:id/execute')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('manage_inventory')
+  @ApiOperation({
+    summary: 'Execute Seller Insight Action',
+    description: 'Executes the action associated with a seller insight',
+  })
+  @ApiParam({ name: 'id', description: 'Insight ID' })
+  @ApiResponse({ status: 200, description: 'Action executed' })
+  async executeSellerInsight(
+    @CurrentUser() user: UserContext,
+    @Param('id') id: string,
+  ) {
+    return this.sellersService.executeSellerInsight(user.organizationId!, id);
+  }
+
   // ==================== HARVEST REQUESTS ====================
 
   @Post('harvest-request')

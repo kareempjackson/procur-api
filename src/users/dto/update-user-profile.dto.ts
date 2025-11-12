@@ -222,4 +222,20 @@ export class UpdateUserProfileDto {
   @IsString()
   @Length(1, 2048)
   farmersIdPath?: string;
+
+  @ApiPropertyOptional({
+    description: "Private storage path for user's avatar (preferred)",
+    example: 'avatars/users/<userId>/<uuid>.jpg',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 2048)
+  avatarPath?: string;
 }

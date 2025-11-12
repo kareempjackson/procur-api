@@ -64,6 +64,26 @@ export class UsersService {
       }
     }
 
+    // Build signed profile avatar URL if stored as path
+    let profileAvatarUrl: string | null = null;
+    if ((dbUser as any)?.profile_img) {
+      const imgPath = (dbUser as any).profile_img as string;
+      if (typeof imgPath === 'string' && /^https?:\/\//i.test(imgPath)) {
+        profileAvatarUrl = imgPath;
+      } else {
+        try {
+          const signed = await this.supabase.createSignedDownloadUrl(
+            this.privateBucket,
+            imgPath,
+            60 * 60,
+          );
+          profileAvatarUrl = signed.signedUrl;
+        } catch {
+          profileAvatarUrl = null;
+        }
+      }
+    }
+
     return {
       id: user.id,
       email: user.email,
@@ -76,6 +96,7 @@ export class UsersService {
       phone: (dbUser as any)?.phone ?? null,
       firstName: (dbUser as any)?.first_name ?? null,
       lastName: (dbUser as any)?.last_name ?? null,
+      avatarUrl: profileAvatarUrl,
       organization,
     };
   }
@@ -114,6 +135,11 @@ export class UsersService {
     else if (typeof (updateData as any)?.farmersIdUrl === 'string')
       orgUpdates.farmers_id = (updateData as any).farmersIdUrl;
 
+    // Support avatar path update (stored in users.profile_img)
+    if (typeof (updateData as any)?.avatarPath === 'string') {
+      userUpdates.profile_img = (updateData as any).avatarPath;
+    }
+
     const results: Record<string, any> = {};
     if (Object.keys(userUpdates).length > 0) {
       results.user = await this.supabase.updateUser(user.id, userUpdates);
@@ -128,6 +154,30 @@ export class UsersService {
     }
 
     return { message: 'Profile updated', ...results };
+  }
+
+  async createAvatarSignedUpload(user: UserContext, filename: string) {
+    const ext = filename.includes('.')
+      ? filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = this.privateBucket;
+    const objectPath = `avatars/users/${user.id}/${crypto.randomUUID()}.${ext}`;
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e: any) {
+      const status = typeof e?.status === 'number' ? e.status : 400;
+      throw new HttpException('Failed to create signed upload URL', status);
+    }
   }
 
   async adminOnly(user: UserContext) {
