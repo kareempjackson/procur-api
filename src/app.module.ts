@@ -23,6 +23,8 @@ import { PaymentsModule } from './payments/payments.module';
 import { validate } from './config/validation';
 import { FinanceModule } from './finance/finance.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { AiModule } from './ai/ai.module';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [
@@ -44,8 +46,9 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
     PaymentsModule,
     FinanceModule,
     WhatsappModule,
+    AiModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, HealthController],
   providers: [
     AppService,
     {

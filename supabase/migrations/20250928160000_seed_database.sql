@@ -328,14 +328,23 @@ BEGIN
   IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'product_requests') THEN
     -- Create sample product requests (RFQs)
     INSERT INTO product_requests (
-  id, request_number, buyer_org_id, buyer_user_id, product_name, product_type, category,
-  description, quantity, unit_of_measurement, date_needed, budget_range, status, expires_at
-) VALUES
-('bb0e8400-e29b-41d4-a716-446655440001', generate_request_number(), '660e8400-e29b-41d4-a716-446655440007', '550e8400-e29b-41d4-a716-446655440008', 'Premium Beef Steaks', 'meat', 'meat', 'Looking for high-quality beef steaks for our fine dining restaurant. Prefer grass-fed, aged beef.', 50, 'lb', CURRENT_DATE + INTERVAL '14 days', '{"min": 25, "max": 40, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '30 days'),
-
-('bb0e8400-e29b-41d4-a716-446655440002', '660e8400-e29b-41d4-a716-446655440008', '550e8400-e29b-41d4-a716-446655440009', 'Organic Herbs', 'herbs', 'vegetables', 'Need fresh organic herbs (basil, thyme, rosemary) for hotel restaurants. Weekly delivery preferred.', 20, 'lb', CURRENT_DATE + INTERVAL '7 days', '{"min": 8, "max": 15, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '21 days'),
-
-('bb0e8400-e29b-41d4-a716-446655440003', '660e8400-e29b-41d4-a716-446655440009', '550e8400-e29b-41d4-a716-446655440010', 'Seasonal Fruits', 'fruits', 'fruits', 'Looking for seasonal fruits for our supermarket chain. Need consistent supply and competitive pricing.', 500, 'lb', CURRENT_DATE + INTERVAL '10 days', '{"min": 3, "max": 8, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '45 days');
+      id, request_number, buyer_org_id, buyer_user_id, product_name, product_type, category,
+      description, quantity, unit_of_measurement, date_needed, budget_range, status, expires_at
+    ) VALUES (
+      'bb0e8400-e29b-41d4-a716-446655440001', generate_request_number(), '660e8400-e29b-41d4-a716-446655440007', '550e8400-e29b-41d4-a716-446655440008', 'Premium Beef Steaks', 'meat', 'meat', 'Looking for high-quality beef steaks for our fine dining restaurant. Prefer grass-fed, aged beef.', 50, 'lb', CURRENT_DATE + INTERVAL '14 days', '{"min": 25, "max": 40, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '30 days'
+    ) ON CONFLICT (request_number) DO NOTHING;
+    INSERT INTO product_requests (
+      id, request_number, buyer_org_id, buyer_user_id, product_name, product_type, category,
+      description, quantity, unit_of_measurement, date_needed, budget_range, status, expires_at
+    ) VALUES (
+      'bb0e8400-e29b-41d4-a716-446655440002', generate_request_number(), '660e8400-e29b-41d4-a716-446655440008', '550e8400-e29b-41d4-a716-446655440009', 'Organic Herbs', 'herbs', 'vegetables', 'Need fresh organic herbs (basil, thyme, rosemary) for hotel restaurants. Weekly delivery preferred.', 20, 'lb', CURRENT_DATE + INTERVAL '7 days', '{"min": 8, "max": 15, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '21 days'
+    ) ON CONFLICT (request_number) DO NOTHING;
+    INSERT INTO product_requests (
+      id, request_number, buyer_org_id, buyer_user_id, product_name, product_type, category,
+      description, quantity, unit_of_measurement, date_needed, budget_range, status, expires_at
+    ) VALUES (
+      'bb0e8400-e29b-41d4-a716-446655440003', generate_request_number(), '660e8400-e29b-41d4-a716-446655440009', '550e8400-e29b-41d4-a716-446655440010', 'Seasonal Fruits', 'fruits', 'fruits', 'Looking for seasonal fruits for our supermarket chain. Need consistent supply and competitive pricing.', 500, 'lb', CURRENT_DATE + INTERVAL '10 days', '{"min": 3, "max": 8, "currency": "USD"}', 'open', CURRENT_DATE + INTERVAL '45 days'
+    ) ON CONFLICT (request_number) DO NOTHING;
   END IF;
 END $$;
 
@@ -347,17 +356,58 @@ BEGIN
   IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'request_quotes') THEN
     -- Create quotes for product requests
     INSERT INTO request_quotes (
-  id, request_id, seller_org_id, seller_user_id, unit_price, total_price, currency,
-  available_quantity, delivery_date, notes, offered_product_id, status
-) VALUES
--- Quotes for beef steaks request
-('cc0e8400-e29b-41d4-a716-446655440001', 'bb0e8400-e29b-41d4-a716-446655440001', '660e8400-e29b-41d4-a716-446655440003', '550e8400-e29b-41d4-a716-446655440004', 32.50, 1625.00, 'USD', 50, CURRENT_DATE + INTERVAL '12 days', 'Premium grass-fed beef, aged 21 days. Can provide certificates of quality.', NULL, 'pending'),
+      id, request_id, seller_org_id, seller_user_id, unit_price, total_price, currency,
+      available_quantity, delivery_date, notes, offered_product_id, status
+    )
+    SELECT
+      'cc0e8400-e29b-41d4-a716-446655440001',
+      pr.id,
+      '660e8400-e29b-41d4-a716-446655440003',
+      '550e8400-e29b-41d4-a716-446655440004',
+      32.50, 1625.00, 'USD', 50, CURRENT_DATE + INTERVAL '12 days',
+      'Premium grass-fed beef, aged 21 days. Can provide certificates of quality.',
+      NULL, 'pending'
+    FROM product_requests pr
+    WHERE (pr.id = 'bb0e8400-e29b-41d4-a716-446655440001'
+           OR (pr.product_name = 'Premium Beef Steaks' AND pr.buyer_org_id = '660e8400-e29b-41d4-a716-446655440007'))
+    LIMIT 1
+    ON CONFLICT (request_id, seller_org_id) DO NOTHING;
 
--- Quotes for organic herbs request
-('cc0e8400-e29b-41d4-a716-446655440002', 'bb0e8400-e29b-41d4-a716-446655440002', '660e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440006', 12.00, 240.00, 'USD', 20, CURRENT_DATE + INTERVAL '5 days', 'Fresh organic herbs, harvested same day as delivery. Weekly delivery available.', NULL, 'pending'),
+    INSERT INTO request_quotes (
+      id, request_id, seller_org_id, seller_user_id, unit_price, total_price, currency,
+      available_quantity, delivery_date, notes, offered_product_id, status
+    )
+    SELECT
+      'cc0e8400-e29b-41d4-a716-446655440002',
+      pr.id,
+      '660e8400-e29b-41d4-a716-446655440004',
+      '550e8400-e29b-41d4-a716-446655440006',
+      12.00, 240.00, 'USD', 20, CURRENT_DATE + INTERVAL '5 days',
+      'Fresh organic herbs, harvested same day as delivery. Weekly delivery available.',
+      NULL, 'pending'
+    FROM product_requests pr
+    WHERE (pr.id = 'bb0e8400-e29b-41d4-a716-446655440002'
+           OR (pr.product_name = 'Organic Herbs' AND pr.buyer_org_id = '660e8400-e29b-41d4-a716-446655440008'))
+    LIMIT 1
+    ON CONFLICT (request_id, seller_org_id) DO NOTHING;
 
--- Quotes for seasonal fruits request
-('cc0e8400-e29b-41d4-a716-446655440003', 'bb0e8400-e29b-41d4-a716-446655440003', '660e8400-e29b-41d4-a716-446655440004', '550e8400-e29b-41d4-a716-446655440006', 5.50, 2750.00, 'USD', 500, CURRENT_DATE + INTERVAL '8 days', 'Seasonal mix of apples, pears, and citrus fruits. Can provide consistent weekly supply.', '770e8400-e29b-41d4-a716-446655440004', 'pending');
+    INSERT INTO request_quotes (
+      id, request_id, seller_org_id, seller_user_id, unit_price, total_price, currency,
+      available_quantity, delivery_date, notes, offered_product_id, status
+    )
+    SELECT
+      'cc0e8400-e29b-41d4-a716-446655440003',
+      pr.id,
+      '660e8400-e29b-41d4-a716-446655440004',
+      '550e8400-e29b-41d4-a716-446655440006',
+      5.50, 2750.00, 'USD', 500, CURRENT_DATE + INTERVAL '8 days',
+      'Seasonal mix of apples, pears, and citrus fruits. Can provide consistent weekly supply.',
+      '770e8400-e29b-41d4-a716-446655440004', 'pending'
+    FROM product_requests pr
+    WHERE (pr.id = 'bb0e8400-e29b-41d4-a716-446655440003'
+           OR (pr.product_name = 'Seasonal Fruits' AND pr.buyer_org_id = '660e8400-e29b-41d4-a716-446655440009'))
+    LIMIT 1
+    ON CONFLICT (request_id, seller_org_id) DO NOTHING;
   END IF;
 END $$;
 
@@ -451,22 +501,23 @@ BEGIN
     INSERT INTO government_reports (
   id, government_org_id, name, description, tables, charts, format, status, created_by
 ) VALUES
-('gg0e8400-e29b-41d4-a716-446655440001', '660e8400-e29b-41d4-a716-446655440001', 'Monthly Agriculture Report', 'Comprehensive monthly report on agricultural activities and compliance',
+('a10e8400-e29b-41d4-a716-446655440001', '660e8400-e29b-41d4-a716-446655440001', 'Monthly Agriculture Report', 'Comprehensive monthly report on agricultural activities and compliance',
 '["ee0e8400-e29b-41d4-a716-446655440001", "ee0e8400-e29b-41d4-a716-446655440002", "ee0e8400-e29b-41d4-a716-446655440003"]',
 '["ff0e8400-e29b-41d4-a716-446655440001", "ff0e8400-e29b-41d4-a716-446655440002", "ff0e8400-e29b-41d4-a716-446655440003"]',
 'pdf', 'draft', '550e8400-e29b-41d4-a716-446655440001'),
 
-('gg0e8400-e29b-41d4-a716-446655440002', '660e8400-e29b-41d4-a716-446655440001', 'Compliance Summary', 'Summary of product safety inspections and compliance status',
+('a20e8400-e29b-41d4-a716-446655440002', '660e8400-e29b-41d4-a716-446655440001', 'Compliance Summary', 'Summary of product safety inspections and compliance status',
 '["ee0e8400-e29b-41d4-a716-446655440002"]',
 '[]',
-'xlsx', 'completed', '550e8400-e29b-41d4-a716-446655440002');
+'xlsx', 'completed', '550e8400-e29b-41d4-a716-446655440002')
+ON CONFLICT (id) DO NOTHING;
 
     -- Update completed report with file info
     UPDATE government_reports 
     SET file_url = 'https://example.com/reports/compliance-summary-2024.xlsx',
         generated_at = NOW() - INTERVAL '1 day',
         expires_at = NOW() + INTERVAL '30 days'
-    WHERE id = 'gg0e8400-e29b-41d4-a716-446655440002';
+    WHERE id = 'a20e8400-e29b-41d4-a716-446655440002';
   END IF;
 END $$;
 

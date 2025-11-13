@@ -1,48 +1,132 @@
--- Add government-specific permissions to system_permission enum
-ALTER TYPE system_permission ADD VALUE 'manage_government_tables';
-ALTER TYPE system_permission ADD VALUE 'view_government_data';
-ALTER TYPE system_permission ADD VALUE 'create_government_charts';
-ALTER TYPE system_permission ADD VALUE 'manage_government_reports';
-ALTER TYPE system_permission ADD VALUE 'edit_seller_data';
-ALTER TYPE system_permission ADD VALUE 'manage_government_analytics';
-ALTER TYPE system_permission ADD VALUE 'export_government_data';
-ALTER TYPE system_permission ADD VALUE 'manage_role_permissions';
+-- Add government-specific permissions to system_permission enum (idempotent)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'manage_government_tables'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'manage_government_tables';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'view_government_data'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'view_government_data';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'create_government_charts'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'create_government_charts';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'manage_government_reports'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'manage_government_reports';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'edit_seller_data'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'edit_seller_data';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'manage_government_analytics'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'manage_government_analytics';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'export_government_data'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'export_government_data';
+  END IF;
+END $$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'system_permission' AND e.enumlabel = 'manage_role_permissions'
+  ) THEN
+    ALTER TYPE system_permission ADD VALUE 'manage_role_permissions';
+  END IF;
+END $$;
 
 -- Create enums for flexible system
-CREATE TYPE field_type AS ENUM (
-  'text',
-  'number',
-  'date',
-  'boolean',
-  'select',
-  'multi_select',
-  'email',
-  'phone',
-  'url',
-  'currency',
-  'percentage',
-  'rating',
-  'file',
-  'relation'
-);
+DO $$ BEGIN
+  CREATE TYPE field_type AS ENUM (
+    'text',
+    'number',
+    'date',
+    'boolean',
+    'select',
+    'multi_select',
+    'email',
+    'phone',
+    'url',
+    'currency',
+    'percentage',
+    'rating',
+    'file',
+    'relation'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE chart_type AS ENUM (
-  'line',
-  'bar',
-  'pie',
-  'area',
-  'scatter',
-  'table',
-  'metric',
-  'map'
-);
+DO $$ BEGIN
+  CREATE TYPE chart_type AS ENUM (
+    'line',
+    'bar',
+    'pie',
+    'area',
+    'scatter',
+    'table',
+    'metric',
+    'map'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE report_status AS ENUM (
-  'draft',
-  'generating',
-  'completed',
-  'failed'
-);
+DO $$ BEGIN
+  CREATE TYPE report_status AS ENUM (
+    'draft',
+    'generating',
+    'completed',
+    'failed'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Government tables (like Notion databases/Airtable bases)
 CREATE TABLE government_tables (
@@ -67,12 +151,9 @@ CREATE TABLE government_tables (
   created_by UUID REFERENCES users(id),
   updated_by UUID REFERENCES users(id),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
   
-  -- Ensure government organizations only
-  CONSTRAINT check_government_org CHECK (
-    (SELECT account_type FROM organizations WHERE id = government_org_id) = 'government'
-  )
+  -- Ensure government organizations only (enforced by trigger below)
 );
 
 -- Government charts (visualizations)
@@ -98,12 +179,9 @@ CREATE TABLE government_charts (
   created_by UUID REFERENCES users(id),
   updated_by UUID REFERENCES users(id),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
   
-  -- Ensure government organizations only
-  CONSTRAINT check_government_org CHECK (
-    (SELECT account_type FROM organizations WHERE id = government_org_id) = 'government'
-  )
+  -- Ensure government organizations only (enforced by trigger below)
 );
 
 -- Government reports
@@ -133,20 +211,46 @@ CREATE TABLE government_reports (
   created_by UUID REFERENCES users(id),
   updated_by UUID REFERENCES users(id),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
   
-  -- Ensure government organizations only
-  CONSTRAINT check_government_org CHECK (
-    (SELECT account_type FROM organizations WHERE id = government_org_id) = 'government'
-  )
+  -- Ensure government organizations only (enforced by trigger below)
 );
 
+-- Validation function and triggers to ensure government_org_id references a government organization
+CREATE OR REPLACE FUNCTION ensure_government_org()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM organizations o
+    WHERE o.id = NEW.government_org_id AND o.account_type = 'government'
+  ) THEN
+    RAISE EXCEPTION 'government_org_id must reference an organization with account_type=government';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS ensure_government_org_tables ON government_tables;
+CREATE TRIGGER ensure_government_org_tables
+  BEFORE INSERT OR UPDATE ON government_tables
+  FOR EACH ROW EXECUTE FUNCTION ensure_government_org();
+
+DROP TRIGGER IF EXISTS ensure_government_org_charts ON government_charts;
+CREATE TRIGGER ensure_government_org_charts
+  BEFORE INSERT OR UPDATE ON government_charts
+  FOR EACH ROW EXECUTE FUNCTION ensure_government_org();
+
+DROP TRIGGER IF EXISTS ensure_government_org_reports ON government_reports;
+CREATE TRIGGER ensure_government_org_reports
+  BEFORE INSERT OR UPDATE ON government_reports
+  FOR EACH ROW EXECUTE FUNCTION ensure_government_org();
+
 -- Create indexes for better performance
-CREATE INDEX idx_government_tables_org_id ON government_tables(government_org_id);
-CREATE INDEX idx_government_charts_org_id ON government_charts(government_org_id);
-CREATE INDEX idx_government_charts_table_id ON government_charts(table_id);
-CREATE INDEX idx_government_reports_org_id ON government_reports(government_org_id);
-CREATE INDEX idx_government_reports_status ON government_reports(status);
+CREATE INDEX IF NOT EXISTS idx_government_tables_org_id ON government_tables(government_org_id);
+CREATE INDEX IF NOT EXISTS idx_government_charts_org_id ON government_charts(government_org_id);
+CREATE INDEX IF NOT EXISTS idx_government_charts_table_id ON government_charts(table_id);
+CREATE INDEX IF NOT EXISTS idx_government_reports_org_id ON government_reports(government_org_id);
+CREATE INDEX IF NOT EXISTS idx_government_reports_status ON government_reports(status);
 
 -- Create a function to get available data sources for government organizations
 CREATE OR REPLACE FUNCTION get_government_data_sources(gov_org_id UUID)
@@ -225,64 +329,80 @@ $$ LANGUAGE plpgsql;
 -- These will be automatically assigned when government roles are created
 
 -- Insert system permissions for government roles
-INSERT INTO role_system_permissions (role_id, permission_name, granted_by, granted_at)
+INSERT INTO role_system_permissions (role_id, permission_id, granted_by, granted_at)
 SELECT 
   r.id,
-  'view_government_data',
+  sp.id,
   NULL,
   NOW()
 FROM organization_roles r
 JOIN organizations o ON r.organization_id = o.id
+JOIN system_permissions sp ON sp.name::text = 'view_government_data'
 WHERE o.account_type = 'government' 
   AND r.name IN ('admin', 'staff', 'inspector', 'procurement_officer')
-ON CONFLICT (role_id, permission_name) DO NOTHING;
+  AND sp.is_active = true
+ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- Admin can manage everything including role permissions
-INSERT INTO role_system_permissions (role_id, permission_name, granted_by, granted_at)
+INSERT INTO role_system_permissions (role_id, permission_id, granted_by, granted_at)
 SELECT 
   r.id,
-  unnest(ARRAY[
-    'manage_government_tables', 
-    'create_government_charts', 
-    'manage_government_reports', 
-    'manage_government_analytics', 
-    'export_government_data',
-    'edit_seller_data',
-    'manage_role_permissions'
-  ]),
+  sp.id,
   NULL,
   NOW()
 FROM organization_roles r
 JOIN organizations o ON r.organization_id = o.id
+CROSS JOIN LATERAL unnest(ARRAY[
+  'manage_government_tables', 
+  'create_government_charts', 
+  'manage_government_reports', 
+  'manage_government_analytics', 
+  'export_government_data',
+  'edit_seller_data',
+  'manage_role_permissions'
+]) AS perm_name(name)
+JOIN system_permissions sp ON sp.name::text = perm_name.name
 WHERE o.account_type = 'government' 
   AND r.name = 'admin'
-ON CONFLICT (role_id, permission_name) DO NOTHING;
+  AND sp.is_active = true
+ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- Procurement officers can manage tables, charts, and reports
-INSERT INTO role_system_permissions (role_id, permission_name, granted_by, granted_at)
+INSERT INTO role_system_permissions (role_id, permission_id, granted_by, granted_at)
 SELECT 
   r.id,
-  unnest(ARRAY['manage_government_tables', 'create_government_charts', 'manage_government_reports', 'manage_government_analytics', 'export_government_data']),
+  sp.id,
   NULL,
   NOW()
 FROM organization_roles r
 JOIN organizations o ON r.organization_id = o.id
+CROSS JOIN LATERAL unnest(ARRAY[
+  'manage_government_tables', 
+  'create_government_charts', 
+  'manage_government_reports', 
+  'manage_government_analytics', 
+  'export_government_data'
+]) AS perm_name(name)
+JOIN system_permissions sp ON sp.name::text = perm_name.name
 WHERE o.account_type = 'government' 
   AND r.name = 'procurement_officer'
-ON CONFLICT (role_id, permission_name) DO NOTHING;
+  AND sp.is_active = true
+ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- Inspectors can edit seller data
-INSERT INTO role_system_permissions (role_id, permission_name, granted_by, granted_at)
+INSERT INTO role_system_permissions (role_id, permission_id, granted_by, granted_at)
 SELECT 
   r.id,
-  'edit_seller_data',
+  sp.id,
   NULL,
   NOW()
 FROM organization_roles r
 JOIN organizations o ON r.organization_id = o.id
+JOIN system_permissions sp ON sp.name::text = 'edit_seller_data'
 WHERE o.account_type = 'government' 
   AND r.name = 'inspector'
-ON CONFLICT (role_id, permission_name) DO NOTHING;
+  AND sp.is_active = true
+ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- Add comments for documentation
 COMMENT ON TABLE government_tables IS 'Flexible tables created by government organizations (like Notion databases)';

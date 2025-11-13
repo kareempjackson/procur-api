@@ -9,8 +9,14 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   // Stripe webhook must receive raw body; attach before json parser for that route
   app.use('/payments/stripe/webhook', raw({ type: '*/*' }));
-  // Default JSON parser for all other routes
-  app.use(json());
+  // Default JSON parser for all other routes, while capturing raw body for signature verification (e.g., WhatsApp)
+  app.use(
+    json({
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
   const configService = app.get(ConfigService);
 
   // Global validation pipe

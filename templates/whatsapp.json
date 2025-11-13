@@ -1,0 +1,86 @@
+{
+  "templates": [
+    {
+      "name": "otp_verify",
+      "category": "UTILITY",
+      "languages": [
+        {
+          "code": "en_US",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "Your Procur verification code is {{1}}. It expires in 10 minutes.",
+              "example": { "body_text": [["123456"]] }
+            },
+            { "type": "FOOTER", "text": "Do not share this code with anyone." }
+          ]
+        },
+        {
+          "code": "es_ES",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "Tu código de verificación de Procur es {{1}}. Expira en 10 minutos.",
+              "example": { "body_text": [["123456"]] }
+            },
+            { "type": "FOOTER", "text": "No compartas este código con nadie." }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "order_update_with_tracking",
+      "category": "UTILITY",
+      "languages": [
+        {
+          "code": "en_US",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "Order number {{1}} has been updated to status {{2}}. Tracking number: {{3}}. Thank you for using Procur.",
+              "example": { "body_text": [["12345","shipped","1Z999AA10123456784"]] }
+            }
+          ]
+        },
+        {
+          "code": "es_ES",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "El pedido número {{1}} ha sido actualizado al estado {{2}}. Número de seguimiento: {{3}}. Gracias por usar Procur.",
+              "example": { "body_text": [["12345","enviado","1Z999AA10123456784"]] }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "order_update_no_tracking",
+      "category": "UTILITY",
+      "languages": [
+        {
+          "code": "en_US",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "Order number {{1}} has been updated to status {{2}}. Thank you for using Procur.",
+              "example": { "body_text": [["12345","accepted"]] }
+            }
+          ]
+        },
+        {
+          "code": "es_ES",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "El pedido número {{1}} ha sido actualizado al estado {{2}}. Gracias por usar Procur.",
+              "example": { "body_text": [["12345","aceptado"]] }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+

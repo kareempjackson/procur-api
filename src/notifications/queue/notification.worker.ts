@@ -7,7 +7,7 @@ export function startNotificationWorker(env: {
   supabaseUrl: string;
   supabaseServiceKey: string;
 }) {
-  const connection = new IORedis(env.redisUrl);
+  const connection = new IORedis(env.redisUrl, { maxRetriesPerRequest: null });
 
   const deliveryQueue = new Queue('notification-delivery', { connection });
 

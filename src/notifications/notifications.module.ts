@@ -29,9 +29,9 @@ import { Queue } from 'bullmq';
       useFactory: (config: ConfigService) => {
         const url = config.get<string>('redis.url');
         if (!url) {
-          return new IORedis();
+          return new IORedis({ maxRetriesPerRequest: null });
         }
-        return new IORedis(url);
+        return new IORedis(url, { maxRetriesPerRequest: null });
       },
     },
     {
@@ -43,6 +43,11 @@ import { Queue } from 'bullmq';
     },
   ],
   controllers: [NotificationsController],
-  exports: [NotificationsService, NotificationsGateway, NotificationQueue],
+  exports: [
+    NotificationsService,
+    NotificationsGateway,
+    NotificationQueue,
+    'REDIS',
+  ],
 })
 export class NotificationsModule {}

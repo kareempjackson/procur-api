@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "title": "Upload product via WhatsApp",
+      "content": "To upload a product, choose Upload product, enter the name and base price (per lb), then send a product photo. Description and category are optional.",
+      "scope": "faq"
+    },
+    {
+      "title": "Post an upcoming harvest",
+      "content": "Choose Post harvest, provide crop, harvest window (e.g., Apr 10–20), quantity and unit (lb/kg), and optional notes.",
+      "scope": "faq"
+    },
+    {
+      "title": "Respond to buyer requests",
+      "content": "Choose Requests & quotes, pick a request, then provide unit price, currency, available quantity, optional delivery date and notes.",
+      "scope": "faq"
+    }
+  ]
+}
+
+

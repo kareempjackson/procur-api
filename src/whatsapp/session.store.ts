@@ -13,7 +13,8 @@ type Flow =
   | 'upload_price'
   | 'upload_desc'
   | 'upload_category'
-  | 'upload_photo';
+  | 'upload_photo'
+  | 'upload_price_confirm';
 
 // Extended flows for features
 export type ExtendedFlow =
@@ -78,6 +79,15 @@ export class SessionStore {
       data: { ...cur.data, ...(patch.data || {}) },
       updatedAt: Date.now(),
     };
+    // Keep a simple single-step history for undo
+    const modifies =
+      typeof patch.flow !== 'undefined' || typeof patch.data !== 'undefined';
+    if (modifies) {
+      next.data._prev = {
+        flow: cur.flow,
+        data: { ...cur.data },
+      };
+    }
     this.store.set(id, next);
     return next;
   }

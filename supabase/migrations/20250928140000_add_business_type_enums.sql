@@ -2,21 +2,29 @@
 -- This migration adds specific business types while keeping the main account_type for authorization
 
 -- Create buyer business type enum
-CREATE TYPE buyer_business_type AS ENUM (
-  'general',
-  'hotels',
-  'restaurants',
-  'supermarkets',
-  'exporters'
-);
+DO $$ BEGIN
+  CREATE TYPE buyer_business_type AS ENUM (
+    'general',
+    'hotels',
+    'restaurants',
+    'supermarkets',
+    'exporters'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Create seller business type enum  
-CREATE TYPE seller_business_type AS ENUM (
-  'general',
-  'farmers',
-  'manufacturers',
-  'fishermen'
-);
+DO $$ BEGIN
+  CREATE TYPE seller_business_type AS ENUM (
+    'general',
+    'farmers',
+    'manufacturers',
+    'fishermen'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Create a function to validate business type based on account type
 CREATE OR REPLACE FUNCTION validate_business_type()
@@ -47,6 +55,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Add trigger to validate business type on organizations table
+DROP TRIGGER IF EXISTS validate_organization_business_type ON organizations;
 CREATE TRIGGER validate_organization_business_type
   BEFORE INSERT OR UPDATE ON organizations
   FOR EACH ROW
@@ -58,7 +67,7 @@ SET business_type = 'general'
 WHERE business_type IS NULL AND account_type IN ('buyer', 'seller');
 
 -- Add index for better performance on business type queries
-CREATE INDEX idx_organizations_account_business_type ON organizations(account_type, business_type);
+CREATE INDEX IF NOT EXISTS idx_organizations_account_business_type ON organizations(account_type, business_type);
 
 -- Add comments for documentation
 COMMENT ON TYPE buyer_business_type IS 'Business types available for buyer organizations';

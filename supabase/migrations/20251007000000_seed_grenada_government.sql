@@ -438,7 +438,11 @@ INSERT INTO government_tables (
 ) VALUES
 -- Farmers Registry Table
 ('aa0e8400-e29b-41d4-a716-446655440110',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Farmers Registry',
  'Complete registry of all registered farmers in Grenada with detailed farm information',
  '🌾',
@@ -452,7 +456,11 @@ INSERT INTO government_tables (
 
 -- Products Catalog Table
 ('aa0e8400-e29b-41d4-a716-446655440120',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Agricultural Products Catalog',
  'Comprehensive catalog of all agricultural products available from Grenadian farmers',
  '🥬',
@@ -466,7 +474,11 @@ INSERT INTO government_tables (
 
 -- Production Tracking Table
 ('aa0e8400-e29b-41d4-a716-446655440130',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Production Tracking',
  'Track production volumes and trends across different crops and regions',
  '📊',
@@ -487,7 +499,11 @@ INSERT INTO government_charts (
 ) VALUES
 -- Total Farmers by Parish (Pie Chart)
 ('bb0e8400-e29b-41d4-a716-446655440110',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440110',
  'Farmers Distribution by Parish',
  'Distribution of registered farmers across Grenadian parishes',
@@ -503,7 +519,11 @@ INSERT INTO government_charts (
 
 -- Production Volume by Crop (Bar Chart)
 ('bb0e8400-e29b-41d4-a716-446655440120',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440120',
  'Production Volume by Crop Type',
  'Total production volume for major crops in Grenada',
@@ -519,7 +539,11 @@ INSERT INTO government_charts (
 
 -- Price Trends Over Time (Line Chart)
 ('bb0e8400-e29b-41d4-a716-446655440130',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440120',
  'Average Price Trends',
  'Historical price trends for major agricultural products',
@@ -535,7 +559,11 @@ INSERT INTO government_charts (
 
 -- Total Acreage Metric
 ('bb0e8400-e29b-41d4-a716-446655440140',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440110',
  'Total Agricultural Acreage',
  'Total acreage under cultivation in Grenada',
@@ -551,7 +579,11 @@ INSERT INTO government_charts (
 
 -- Total Farmers Metric
 ('bb0e8400-e29b-41d4-a716-446655440150',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440110',
  'Total Registered Farmers',
  'Total number of registered farmers in Grenada',
@@ -567,7 +599,11 @@ INSERT INTO government_charts (
 
 -- Total Products Metric
 ('bb0e8400-e29b-41d4-a716-446655440160',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440120',
  'Total Products Available',
  'Total number of products in the marketplace',
@@ -583,7 +619,11 @@ INSERT INTO government_charts (
 
 -- Market Value Metric
 ('bb0e8400-e29b-41d4-a716-446655440170',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'aa0e8400-e29b-41d4-a716-446655440120',
  'Total Market Value',
  'Total estimated market value of all available products',
@@ -605,7 +645,11 @@ INSERT INTO government_reports (
 ) VALUES
 -- Quarterly Production Report
 ('cc0e8400-e29b-41d4-a716-446655440110',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Q4 2024 Agricultural Production Report',
  'Comprehensive quarterly report on agricultural production, market trends, and farmer statistics',
  '["aa0e8400-e29b-41d4-a716-446655440110", "aa0e8400-e29b-41d4-a716-446655440120", "aa0e8400-e29b-41d4-a716-446655440130"]'::jsonb,
@@ -617,7 +661,11 @@ INSERT INTO government_reports (
 
 -- Annual Spice Export Report
 ('cc0e8400-e29b-41d4-a716-446655440120',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  '2024 Spice Export Analysis',
  'Annual report on spice production and export potential for nutmeg, mace, cinnamon, and other spices',
  '["aa0e8400-e29b-41d4-a716-446655440120"]'::jsonb,
@@ -629,7 +677,11 @@ INSERT INTO government_reports (
 
 -- Farmer Registration Summary
 ('cc0e8400-e29b-41d4-a716-446655440130',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Farmer Registration Summary - 2024',
  'Summary of new farmer registrations and agricultural land utilization',
  '["aa0e8400-e29b-41d4-a716-446655440110"]'::jsonb,
@@ -641,7 +693,11 @@ INSERT INTO government_reports (
 
 -- Market Intelligence Report
 ('cc0e8400-e29b-41d4-a716-446655440140',
- '770e8400-e29b-41d4-a716-446655440100',
+ COALESCE(
+   (SELECT id FROM organizations WHERE id = '770e8400-e29b-41d4-a716-446655440100' AND account_type = 'government' LIMIT 1),
+   (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'government' ORDER BY created_at DESC LIMIT 1),
+   (SELECT id FROM organizations WHERE account_type = 'government' ORDER BY created_at DESC LIMIT 1)
+ ),
  'Market Intelligence Report - January 2025',
  'Monthly market intelligence including price trends, supply-demand analysis, and market opportunities',
  '["aa0e8400-e29b-41d4-a716-446655440120", "aa0e8400-e29b-41d4-a716-446655440130"]'::jsonb,
@@ -696,50 +752,72 @@ INSERT INTO organizations (
  NOW() - INTERVAL '2 years')
 ON CONFLICT (id) DO NOTHING;
 
--- Create sample orders
-INSERT INTO orders (
-  id, buyer_org_id, seller_org_id, products, 
-  subtotal, tax, shipping_cost, total_amount,
-  status, currency, created_at, updated_at
-)
-SELECT 
-  gen_random_uuid(),
-  buyer_org.id,
-  seller_org.id,
-  jsonb_build_array(
+-- Create sample orders and order items (compatible with orders/order_items schema)
+WITH order_rows AS (
+  SELECT 
+    gen_random_uuid() AS id,
+    buyer_org.id AS buyer_org_id,
+    seller_org.id AS seller_org_id,
+    p.id AS product_id,
+    p.name AS product_name,
+    floor(random() * 100 + 20)::int AS quantity,
+    p.base_price AS unit_price,
+    floor(random() * 2000 + 500)::numeric AS subtotal,
+    floor(random() * 200 + 50)::numeric AS tax_amount,
+    floor(random() * 100 + 20)::numeric AS shipping_amount,
+    floor(random() * 2300 + 570)::numeric AS total_amount,
+    CASE floor(random() * 4)
+      WHEN 0 THEN 'delivered'
+      WHEN 1 THEN 'shipped'
+      WHEN 2 THEN 'processing'
+      ELSE 'pending'
+    END AS status_text,
+    'XCD' AS currency,
+    NOW() - (random() * INTERVAL '90 days') AS created_at,
     jsonb_build_object(
-      'product_id', p.id,
-      'name', p.name,
-      'quantity', floor(random() * 100 + 20)::int,
-      'unit_price', p.base_price,
-      'total', (floor(random() * 100 + 20) * p.base_price)
-    )
-  ),
-  floor(random() * 2000 + 500)::numeric,
-  floor(random() * 200 + 50)::numeric,
-  floor(random() * 100 + 20)::numeric,
-  floor(random() * 2300 + 570)::numeric,
-  CASE floor(random() * 4)
-    WHEN 0 THEN 'completed'
-    WHEN 1 THEN 'completed'
-    WHEN 2 THEN 'processing'
-    ELSE 'pending'
-  END,
-  'XCD',
-  NOW() - (random() * INTERVAL '90 days'),
-  NOW() - (random() * INTERVAL '85 days')
-FROM 
-  (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'buyer' ORDER BY random() LIMIT 3) buyer_org,
-  (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'seller' ORDER BY random() LIMIT 10) seller_org,
-  LATERAL (
-    SELECT id, name, base_price 
-    FROM products 
-    WHERE seller_org_id = seller_org.id 
-    ORDER BY random() 
-    LIMIT 1
-  ) p
-LIMIT 35
-ON CONFLICT (id) DO NOTHING;
+      'street', 'Government Complex',
+      'city', 'St. George',
+      'country', 'Grenada'
+    ) AS shipping_address
+  FROM 
+    (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'buyer' ORDER BY random() LIMIT 3) buyer_org,
+    (SELECT id FROM organizations WHERE country = 'Grenada' AND account_type = 'seller' ORDER BY random() LIMIT 10) seller_org,
+    LATERAL (
+      SELECT id, name, base_price 
+      FROM products 
+      WHERE seller_org_id = seller_org.id 
+      ORDER BY random() 
+      LIMIT 1
+    ) p
+  LIMIT 35
+),
+inserted_orders AS (
+  INSERT INTO orders (
+    id, order_number, buyer_org_id, seller_org_id, 
+    status, subtotal, tax_amount, shipping_amount, total_amount,
+    currency, shipping_address, created_at
+  )
+  SELECT 
+    id, generate_order_number(), buyer_org_id, seller_org_id,
+    status_text::order_status, subtotal, tax_amount, shipping_amount, total_amount,
+    currency, shipping_address, created_at
+  FROM order_rows
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id
+)
+INSERT INTO order_items (
+  order_id, product_id, product_name, product_sku, unit_price, quantity, total_price
+)
+SELECT
+  o.id,
+  r.product_id,
+  r.product_name,
+  upper(replace(r.product_name, ' ', '-')) || '-SKU',
+  r.unit_price,
+  r.quantity,
+  (r.unit_price * r.quantity)
+FROM order_rows r
+JOIN inserted_orders o ON o.id = r.id;
 
 -- ==================== COMPLETION MESSAGE ====================
 

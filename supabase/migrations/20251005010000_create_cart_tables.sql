@@ -8,11 +8,28 @@ CREATE TABLE IF NOT EXISTS shopping_carts (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   buyer_org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   buyer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  status VARCHAR(50) DEFAULT 'active',
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(buyer_org_id, buyer_user_id)
 );
+
+-- Ensure status column exists even if table pre-existed from earlier migrations
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables 
+    WHERE table_schema = 'public' AND table_name = 'shopping_carts'
+  ) THEN
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'shopping_carts' AND column_name = 'status'
+    ) THEN
+      ALTER TABLE shopping_carts ADD COLUMN status VARCHAR(50) DEFAULT 'active';
+      -- backfill to 'active' for existing rows
+      UPDATE shopping_carts SET status = 'active' WHERE status IS NULL;
+    END IF;
+  END IF;
+END $$;
 
 -- Cart Items Table
 CREATE TABLE IF NOT EXISTS cart_items (
@@ -28,7 +45,15 @@ CREATE TABLE IF NOT EXISTS cart_items (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_shopping_carts_buyer_org ON shopping_carts(buyer_org_id);
 CREATE INDEX IF NOT EXISTS idx_shopping_carts_buyer_user ON shopping_carts(buyer_user_id);
-CREATE INDEX IF NOT EXISTS idx_shopping_carts_status ON shopping_carts(status);
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'shopping_carts' AND column_name = 'status'
+  ) THEN
+    CREATE INDEX IF NOT EXISTS idx_shopping_carts_status ON shopping_carts(status);
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_cart_items_cart ON cart_items(cart_id);
 CREATE INDEX IF NOT EXISTS idx_cart_items_product ON cart_items(product_id);
 

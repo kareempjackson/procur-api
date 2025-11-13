@@ -17,6 +17,42 @@ EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
 
+-- Ensure 'active' exists on request_status even if the type pre-existed without it
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'request_status' AND e.enumlabel = 'active'
+  ) THEN
+    ALTER TYPE request_status ADD VALUE 'active';
+  END IF;
+END $$;
+
+-- Ensure 'completed' exists on request_status even if the type pre-existed without it
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'request_status' AND e.enumlabel = 'completed'
+  ) THEN
+    ALTER TYPE request_status ADD VALUE 'completed';
+  END IF;
+END $$;
+
+-- Ensure 'expired' exists on request_status even if the type pre-existed without it
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type t
+    JOIN pg_enum e ON t.oid = e.enumtypid
+    WHERE t.typname = 'request_status' AND e.enumlabel = 'expired'
+  ) THEN
+    ALTER TYPE request_status ADD VALUE 'expired';
+  END IF;
+END $$;
+
 -- Quote status enum
 DO $$ BEGIN
   CREATE TYPE quote_status AS ENUM (
@@ -138,7 +174,7 @@ CREATE SEQUENCE IF NOT EXISTS product_request_number_seq START 1000;
 
 -- Function to generate request number
 CREATE OR REPLACE FUNCTION generate_request_number()
-RETURNS TEXT AS $$
+RETURNS VARCHAR(50) AS $$
 DECLARE
   next_num INTEGER;
 BEGIN
@@ -258,7 +294,7 @@ CREATE POLICY product_requests_buyer_update ON product_requests
 CREATE POLICY product_requests_seller_select ON product_requests
   FOR SELECT
   USING (
-    status = 'active'
+    status::text IN ('active', 'open')
     AND (
       target_seller_id IS NULL
       OR target_seller_id IN (

@@ -18,9 +18,16 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "start:worker": "ts-node src/notification-worker.ts"
+    "start:worker": "ts-node src/notification-worker.ts",
+    "templates:apply": "ts-node scripts/wa-templates.ts apply templates/whatsapp.json",
+    "templates:list": "ts-node scripts/wa-templates.ts list",
+    "templates:delete": "ts-node scripts/wa-templates.ts delete",
+    "ai:seed:faq": "ts-node scripts/ai-seed-faq.ts templates/faq.json"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
+    "@langchain/core": "^1.0.4",
+    "@langchain/openai": "^1.1.0",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.1",
@@ -38,6 +45,7 @@
     "class-validator": "^0.14.2",
     "firebase-admin": "^12.6.0",
     "ioredis": "^5.4.1",
+    "openai": "^6.8.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "postmark": "^4.0.5",
