@@ -962,6 +962,7 @@ export class SellersController {
       user.organizationId!,
       requestId,
       createDto,
+      user.id,
     );
   }
 }

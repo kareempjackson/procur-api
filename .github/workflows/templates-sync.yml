@@ -1,0 +1,30 @@
+name: Sync WhatsApp Templates
+
+on:
+    workflow_dispatch:
+    push:
+        branches: ["main"]
+        paths:
+            - "procur-api/templates/whatsapp.json"
+            - "procur-api/scripts/wa-templates.ts"
+
+jobs:
+    apply-templates:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: procur-api
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+            - name: Install deps
+              run: npm ci
+            - name: Apply templates
+              env:
+                  WHATSAPP_WABA_ID: ${{ secrets.WHATSAPP_WABA_ID }}
+                  WHATSAPP_TOKEN: ${{ secrets.WHATSAPP_TOKEN }}
+              run: npm run templates:apply

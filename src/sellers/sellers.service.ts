@@ -1982,6 +1982,7 @@ export class SellersService {
     sellerOrgId: string,
     requestId: string,
     createDto: any,
+    userId: string,
   ): Promise<any> {
     const client = this.supabaseService.getClient();
 
@@ -2031,6 +2032,7 @@ export class SellersService {
       .insert({
         request_id: requestId,
         seller_org_id: sellerOrgId,
+        seller_user_id: userId,
         unit_price: createDto.unit_price,
         total_price: totalPrice,
         currency: createDto.currency,

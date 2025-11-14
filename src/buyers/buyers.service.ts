@@ -378,7 +378,7 @@ export class BuyersService {
       .select(
         `
         id, name, logo_url, created_at, business_type, country,
-        products(id)
+        products:products!seller_org_id(id)
       `,
         { count: 'exact' },
       )
@@ -388,7 +388,7 @@ export class BuyersService {
     // Apply filters
     if (search) {
       queryBuilder = queryBuilder.or(
-        `name.ilike.%${search}%, description.ilike.%${search}%`,
+        `name.ilike.%${search}%, business_type.ilike.%${search}%, country.ilike.%${search}%`,
       );
     }
     if (business_type) {
@@ -424,7 +424,7 @@ export class BuyersService {
         business_type: seller.business_type,
         logo_url: seller.logo_url,
         location: seller.country,
-        average_rating: undefined, // TODO: Calculate from reviews
+        average_rating: 0, // Will be calculated from reviews below
         review_count: 0, // TODO: Count reviews
         product_count: seller.products?.length || 0,
         years_in_business:
@@ -432,6 +432,34 @@ export class BuyersService {
         is_verified: true, // TODO: Add verification logic
         specialties: [], // TODO: Add specialties
       })) || [];
+
+    // Compute average rating and review count from order_reviews for these sellers
+    if (mappedSellers.length > 0) {
+      const sellerIds = mappedSellers.map((s) => s.id);
+      const { data: reviews } = await this.supabase
+        .getClient()
+        .from('order_reviews')
+        .select('seller_org_id, rating')
+        .in('seller_org_id', sellerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r) => {
+        const id = r.seller_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(id) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(id, cur);
+      });
+
+      mappedSellers.forEach((s) => {
+        const a = agg.get(s.id);
+        if (a && a.count > 0) {
+          s.average_rating = Number((a.sum / a.count).toFixed(2));
+          s.review_count = a.count;
+        }
+      });
+    }
 
     // Sort by product count if requested (since we can't do this in the database query easily)
     if (sort_by === 'product_count') {
@@ -2135,7 +2163,7 @@ export class BuyersService {
         seller_org_id, created_at,
         seller:organizations!seller_org_id(
           id, name, logo_url, business_type, country,
-          products(count)
+          products:products!seller_org_id(count)
         )
       `,
       )

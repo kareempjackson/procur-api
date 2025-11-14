@@ -41,7 +41,9 @@ export type ExtendedFlow =
   | 'order_update_status'
   | 'order_update_tracking'
   // Transactions
-  | 'tx_check_id';
+  | 'tx_check_id'
+  // Security
+  | 'unlock_otp';
 
 export interface Session {
   flow: ExtendedFlow;

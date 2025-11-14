@@ -2,7 +2,8 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { SupabaseService } from '../database/supabase.service';
-import { OpenAIEmbeddings } from '@langchain/openai';
+import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
+import { z } from 'zod';
 import IORedis from 'ioredis';
 
 @Injectable()
@@ -247,113 +248,107 @@ export class AiService {
   }
 
   async extractProduct(text: string): Promise<{
-    name?: string;
-    base_price?: number;
-    currency?: string;
-    unit?: string;
+    name: string | null;
+    base_price: number | null;
+    currency: string | null;
+    unit: string | null;
   }> {
-    const client = this.ensureClient();
-    const sys = `Extract product fields from user text. JSON keys: name, base_price (number), currency (ISO), unit (default 'lb'). Omit unknowns.`;
-    const res = await client.chat.completions.create({
-      model: this.chatModel,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: text },
-      ],
+    const schema = z.object({
+      name: z.string().nullable(),
+      base_price: z.number().nullable(),
+      currency: z.string().nullable(),
+      unit: z.string().nullable(),
     });
-    return JSON.parse(res.choices[0].message.content || '{}') as {
-      name?: string;
-      base_price?: number;
-      currency?: string;
-      unit?: string;
-    };
+    const llm = new ChatOpenAI({
+      modelName: this.chatModel,
+      temperature: 0.2,
+      apiKey: this.config.get<string>('OPENAI_API_KEY'),
+    });
+    const model = llm.withStructuredOutput(schema);
+    const res = await model.invoke(
+      `Extract product fields. If unit missing, omit it. Text: ${text}`,
+    );
+    return res as any;
   }
 
   async extractHarvest(text: string): Promise<{
-    crop?: string;
-    quantity?: number;
-    unit?: string;
-    expected_harvest_window?: string;
-    notes?: string;
+    crop: string | null;
+    quantity: number | null;
+    unit: string | null;
+    expected_harvest_window: string | null;
+    notes: string | null;
   }> {
-    const client = this.ensureClient();
-    const sys = `Extract harvest info. JSON: {crop, quantity (number), unit, expected_harvest_window, notes}. Omit unknowns.`;
-    const res = await client.chat.completions.create({
-      model: this.chatModel,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: text },
-      ],
+    const schema = z.object({
+      crop: z.string().nullable(),
+      quantity: z.number().nullable(),
+      unit: z.string().nullable(),
+      expected_harvest_window: z.string().nullable(),
+      notes: z.string().nullable(),
     });
-    return JSON.parse(res.choices[0].message.content || '{}') as {
-      crop?: string;
-      quantity?: number;
-      unit?: string;
-      expected_harvest_window?: string;
-      notes?: string;
-    };
+    const llm = new ChatOpenAI({
+      modelName: this.chatModel,
+      temperature: 0.2,
+      apiKey: this.config.get<string>('OPENAI_API_KEY'),
+    });
+    const model = llm.withStructuredOutput(schema);
+    const res = await model.invoke(
+      `Extract upcoming harvest info. Text: ${text}`,
+    );
+    return res as any;
   }
 
   async extractQuote(text: string): Promise<{
-    request_id?: string;
-    unit_price?: number;
-    currency?: string;
-    available_quantity?: number;
-    delivery_date?: string;
-    notes?: string;
+    request_id: string | null;
+    unit_price: number | null;
+    currency: string | null;
+    available_quantity: number | null;
+    delivery_date: string | null;
+    notes: string | null;
   }> {
-    const client = this.ensureClient();
-    const sys = `Extract quote fields. JSON: {request_id, unit_price (number), currency, available_quantity (number), delivery_date, notes}. Omit unknowns.`;
-    const res = await client.chat.completions.create({
-      model: this.chatModel,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: text },
-      ],
+    const schema = z.object({
+      request_id: z.string().nullable(),
+      unit_price: z.number().nullable(),
+      currency: z.string().nullable(),
+      available_quantity: z.number().nullable(),
+      delivery_date: z.string().nullable(),
+      notes: z.string().nullable(),
     });
-    return JSON.parse(res.choices[0].message.content || '{}') as {
-      request_id?: string;
-      unit_price?: number;
-      currency?: string;
-      available_quantity?: number;
-      delivery_date?: string;
-      notes?: string;
-    };
+    const llm = new ChatOpenAI({
+      modelName: this.chatModel,
+      temperature: 0.2,
+      apiKey: this.config.get<string>('OPENAI_API_KEY'),
+    });
+    const model = llm.withStructuredOutput(schema);
+    const res = await model.invoke(`Extract quote fields. Text: ${text}`);
+    return res as any;
   }
 
   async extractOrderAction(text: string): Promise<{
-    action?: 'accept' | 'reject' | 'update';
-    order_id?: string;
-    reason?: string;
-    tracking_number?: string;
-    status?: string;
-    estimated_delivery_date?: string;
+    action: 'accept' | 'reject' | 'update' | null;
+    order_id: string | null;
+    reason: string | null;
+    tracking_number: string | null;
+    status: string | null;
+    estimated_delivery_date: string | null;
   }> {
-    const client = this.ensureClient();
-    const sys = `Extract order action: accept/reject/update. JSON: {action, order_id, reason, tracking_number, status, estimated_delivery_date}. Omit unknowns.`;
-    const res = await client.chat.completions.create({
-      model: this.chatModel,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: text },
-      ],
+    const schema = z.object({
+      action: z.enum(['accept', 'reject', 'update']).nullable(),
+      order_id: z.string().nullable(),
+      reason: z.string().nullable(),
+      tracking_number: z.string().nullable(),
+      status: z.string().nullable(),
+      estimated_delivery_date: z.string().nullable(),
     });
-    return JSON.parse(res.choices[0].message.content || '{}') as {
-      action?: 'accept' | 'reject' | 'update';
-      order_id?: string;
-      reason?: string;
-      tracking_number?: string;
-      status?: string;
-      estimated_delivery_date?: string;
-    };
+    const llm = new ChatOpenAI({
+      modelName: this.chatModel,
+      temperature: 0.2,
+      apiKey: this.config.get<string>('OPENAI_API_KEY'),
+    });
+    const model = llm.withStructuredOutput(schema);
+    const res = await model.invoke(
+      `Extract order action fields: accept/reject/update. Text: ${text}`,
+    );
+    return res as any;
   }
 
   async moderate(text: string): Promise<boolean> {

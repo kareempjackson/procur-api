@@ -58,4 +58,18 @@ export class WhatsappController {
     await this.svc.handleWebhook(body);
     return { status: 'ok' };
   }
+
+  @Post('/admin/token')
+  @HttpCode(200)
+  async setToken(
+    @Body('token') token: string,
+    @Headers('x-admin-token') adminToken?: string,
+  ) {
+    const expected = process.env.WHATSAPP_ADMIN_TOKEN;
+    if (!expected || adminToken !== expected) {
+      throw new (require('@nestjs/common').ForbiddenException)();
+    }
+    await this.svc.adminSetToken(token);
+    return { status: 'ok' };
+  }
 }

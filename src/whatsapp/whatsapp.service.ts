@@ -8,8 +8,11 @@ import { SupabaseService } from '../database/supabase.service';
 import { AiService } from '../ai/ai.service';
 import * as bcrypt from 'bcryptjs';
 import { OrderStatus } from '../sellers/dto/order.dto';
+import { SendService } from './send/send.service';
+import { TemplateService } from './templates/template.service';
 import IORedis from 'ioredis';
 import { WaQueue } from './wa.queue';
+import * as crypto from 'crypto';
 
 @Injectable()
 export class WhatsappService {
@@ -27,6 +30,8 @@ export class WhatsappService {
     private readonly ai: AiService,
     @Inject('REDIS') private readonly redis: IORedis,
     private readonly waQueue: WaQueue,
+    private readonly sendSvc: SendService,
+    private readonly tmplSvc: TemplateService,
   ) {
     // Read from env first, then from nested config
     this.phoneNumberId =
@@ -72,9 +77,43 @@ export class WhatsappService {
       60 * 60 * 48,
     );
     const session = this.sessions.get(from);
+    const userId = session.user?.id;
+    if (userId) {
+      const idleDays = Number(
+        this.config.get<string>('WHATSAPP_IDLE_LOCK_DAYS') || '14',
+      );
+      const idleMs = idleDays * 24 * 60 * 60 * 1000;
+      const last = Number(
+        (await this.redis.get(`wa:last_active:${userId}`)) || 0,
+      );
+      const isLocked = (await this.redis.get(`wa:locked:${userId}`)) === '1';
+      if (!isLocked && last && Date.now() - last > idleMs) {
+        await this.redis.set(
+          `wa:locked:${userId}`,
+          '1',
+          'EX',
+          60 * 60 * 24 * 365,
+        );
+        await this.audit('account_locked_idle', {
+          user_id: userId,
+          from_e164: `+${from}`,
+        });
+        await this.sendText(
+          from,
+          'Your account was locked due to inactivity. Reply "unlock" to receive an OTP.',
+        );
+      }
+    }
+    await this.audit('inbound_message', {
+      from_e164: `+${from}`,
+      type,
+      user_id: userId || null,
+    });
 
     // Frictionless identify: hydrate session by phone number if not set
-    if (!session.user) {
+    const loggedOutFlag =
+      (await this.redis.get(`wa:logged_out:${from}`)) === '1';
+    if (!session.user && !loggedOutFlag) {
       await this.tryHydrateUserFromPhone(from);
       const after = this.sessions.get(from);
       // If user exists but needs quick OTP, we will have switched to signup_otp
@@ -93,6 +132,18 @@ export class WhatsappService {
 
     if (buttonId || listId) {
       const choice = buttonId || listId;
+      const sLock = this.sessions.get(from);
+      const uidLock = sLock.user?.id;
+      if (uidLock) {
+        const isLocked = (await this.redis.get(`wa:locked:${uidLock}`)) === '1';
+        if (isLocked && choice !== 'menu_unlock') {
+          await this.sendText(
+            from,
+            'Your account is locked. Reply "unlock" to receive an OTP and unlock.',
+          );
+          return;
+        }
+      }
       await this.routeMenuChoice(from, choice);
       return;
     }
@@ -103,8 +154,62 @@ export class WhatsappService {
     }
 
     const lower = (text || '').trim().toLowerCase();
+    // Global lock enforcement: block everything except unlock-related
+    if (session.user?.id) {
+      const locked =
+        (await this.redis.get(`wa:locked:${session.user.id}`)) === '1';
+      if (locked && session.flow !== 'unlock_otp' && lower !== 'unlock') {
+        await this.sendText(
+          from,
+          'Your account is locked. Reply "unlock" to receive an OTP and unlock.',
+        );
+        return;
+      }
+    }
     if (lower === 'menu' || lower === 'hi') {
       await this.showMenu(from);
+      return;
+    }
+    if (lower === 'lock' && session.user?.id) {
+      await this.redis.set(
+        `wa:locked:${session.user.id}`,
+        '1',
+        'EX',
+        60 * 60 * 24 * 365,
+      );
+      await this.audit('account_locked_manual', {
+        user_id: session.user.id,
+        from_e164: `+${from}`,
+      });
+      await this.sendText(
+        from,
+        'Your account is now locked. Reply "unlock" to unlock with an OTP.',
+      );
+      return;
+    }
+    if (lower === 'unlock' && session.user?.id) {
+      const otp = this.generateOtp();
+      await this.redis.set(
+        `wa:unlock:otp:${session.user.id}`,
+        otp,
+        'EX',
+        10 * 60,
+      );
+      await this.redis.set(`wa:unlock:attempts:${from}`, '0', 'EX', 10 * 60);
+      await this.sendOtp(from, otp);
+      await this.audit('otp_sent_unlock', {
+        user_id: session.user.id,
+        from_e164: `+${from}`,
+      });
+      this.sessions.set(from, { flow: 'unlock_otp' });
+      await this.sendText(
+        from,
+        'Enter the 6-digit code to unlock your account.',
+      );
+      return;
+    }
+    if (lower === 'login') {
+      await this.startLoginFlow(from);
       return;
     }
     if (lower.startsWith('help') || lower.startsWith('how')) {
@@ -294,13 +399,18 @@ export class WhatsappService {
               q.available_quantity
             ) {
               try {
-                await this.sellers.createQuote(user.orgId, q.request_id, {
-                  unit_price: q.unit_price,
-                  currency: q.currency,
-                  available_quantity: q.available_quantity,
-                  delivery_date: q.delivery_date,
-                  notes: q.notes,
-                } as any);
+                await this.sellers.createQuote(
+                  user.orgId,
+                  q.request_id,
+                  {
+                    unit_price: q.unit_price,
+                    currency: q.currency,
+                    available_quantity: q.available_quantity,
+                    delivery_date: q.delivery_date,
+                    notes: q.notes,
+                  } as any,
+                  user.id,
+                );
                 await this.sendText(
                   from,
                   `Quote submitted for request ${q.request_id} ✅`,
@@ -411,6 +521,68 @@ export class WhatsappService {
       case 'signup_otp': {
         const code = text.trim();
         await this.verifyWhatsappOtp(from, code);
+        break;
+      }
+      case 'unlock_otp': {
+        if (!session.user?.id) {
+          this.sessions.set(from, { flow: 'menu' });
+          await this.showMenu(from);
+          break;
+        }
+        const code = (text || '').trim();
+        if (!/^[0-9]{6}$/.test(code)) {
+          await this.sendText(from, 'Please enter the 6-digit code.');
+          break;
+        }
+        const attemptsKey = `wa:unlock:attempts:${from}`;
+        const attempts = await this.redis.incr(attemptsKey);
+        if (attempts === 1) await this.redis.expire(attemptsKey, 10 * 60);
+        if (attempts > 5) {
+          await this.sendText(
+            from,
+            'Too many attempts. Please wait 10 minutes and try again.',
+          );
+          this.sessions.set(from, { flow: 'menu', data: {} });
+          break;
+        }
+        const expected = await this.redis.get(
+          `wa:unlock:otp:${session.user.id}`,
+        );
+        if (code !== expected) {
+          await this.sendText(
+            from,
+            'That code does not match. Please try again.',
+          );
+          break;
+        }
+        await this.redis.del(`wa:unlock:otp:${session.user.id}`);
+        await this.redis.set(
+          `wa:locked:${session.user.id}`,
+          '0',
+          'EX',
+          60 * 60 * 24 * 365,
+        );
+        const e164 = `+${from}`;
+        const fp = crypto.createHash('sha256').update(e164).digest('hex');
+        await this.redis.set(
+          `wa:fp:${session.user.id}`,
+          fp,
+          'EX',
+          60 * 60 * 24 * 90,
+        );
+        await this.redis.set(
+          `wa:last_active:${session.user.id}`,
+          String(Date.now()),
+          'EX',
+          60 * 60 * 24 * 60,
+        );
+        await this.audit('account_unlocked', {
+          user_id: session.user.id,
+          from_e164: e164,
+        });
+        await this.sendText(from, '✅ Account unlocked.');
+        this.sessions.set(from, { flow: 'menu', data: {} });
+        await this.showMenu(from);
         break;
       }
       case 'upload_name':
@@ -620,13 +792,18 @@ export class WhatsappService {
           break;
         }
         try {
-          await this.sellers.createQuote(user.orgId, reqId, {
-            unit_price,
-            currency,
-            available_quantity,
-            delivery_date,
-            notes,
-          });
+          await this.sellers.createQuote(
+            user.orgId,
+            reqId,
+            {
+              unit_price,
+              currency,
+              available_quantity,
+              delivery_date,
+              notes,
+            },
+            user.id,
+          );
           await this.ai.upsertEmbedding({
             orgId: user.orgId,
             scope: 'quote',
@@ -919,11 +1096,78 @@ export class WhatsappService {
   }
 
   private async routeMenuChoice(to: string, choice: string) {
+    // Locked accounts: only allow explicit unlock
+    const s0 = this.sessions.get(to);
+    const uid0 = s0.user?.id;
+    if (uid0) {
+      const isLocked = (await this.redis.get(`wa:locked:${uid0}`)) === '1';
+      if (isLocked && choice !== 'menu_unlock') {
+        await this.sendText(
+          to,
+          'Your account is locked. Reply "unlock" to receive an OTP and unlock.',
+        );
+        return;
+      }
+    }
     if (choice === 'menu_signup') {
       this.sessions.set(to, { flow: 'signup_name', data: {} });
       await this.sendText(
         to,
-        'Let’s create your Procur account. What’s your full name?',
+        "Let's create your Procur account. What's your full name?",
+      );
+      return;
+    }
+    if (choice === 'menu_lock') {
+      const s = this.sessions.get(to);
+      if (s.user?.id) {
+        await this.redis.set(
+          `wa:locked:${s.user.id}`,
+          '1',
+          'EX',
+          60 * 60 * 24 * 365,
+        );
+        await this.sendText(
+          to,
+          'Your account is now locked. Reply "unlock" to unlock with an OTP.',
+        );
+      } else {
+        await this.sendText(to, 'Please sign up or log in first.');
+      }
+      return;
+    }
+    if (choice === 'menu_unlock') {
+      const s = this.sessions.get(to);
+      if (s.user?.id) {
+        const otp = this.generateOtp();
+        await this.redis.set(`wa:unlock:otp:${s.user.id}`, otp, 'EX', 10 * 60);
+        await this.redis.set(`wa:unlock:attempts:${to}`, '0', 'EX', 10 * 60);
+        await this.sendOtp(to, otp);
+        this.sessions.set(to, { flow: 'unlock_otp' });
+        await this.sendText(
+          to,
+          'Enter the 6-digit code to unlock your account.',
+        );
+      } else {
+        await this.sendText(to, 'Please sign up or log in first.');
+      }
+      return;
+    }
+    if (choice === 'menu_logout') {
+      const s = this.sessions.get(to);
+      const uid = s.user?.id;
+      if (uid) {
+        await this.redis.del(`wa:fp:${uid}`);
+      }
+      await this.redis.set(
+        `wa:logged_out:${to}`,
+        '1',
+        'EX',
+        60 * 60 * 24 * 365,
+      );
+      this.sessions.clear(to);
+      await this.sendText(
+        to,
+        'You have been logged out. Type "login" to sign in or "signup" to create an account.',
       );
       return;
     }
@@ -1238,6 +1482,10 @@ export class WhatsappService {
       await this.sendText(to, 'Product name?');
       return;
     }
+    if (choice === 'menu_login') {
+      await this.startLoginFlow(to);
+      return;
+    }
     await this.showMenu(to);
   }
 
@@ -1274,6 +1522,7 @@ export class WhatsappService {
         business_type: businessType as any,
         country,
         phone_number: e164,
+        status: 'active',
       } as any);
       await this.supabase.ensureCreatorIsOrganizationAdmin(user.id, org.id);
       this.sessions.set(from, {
@@ -1284,7 +1533,7 @@ export class WhatsappService {
       this.sessions.set(from, { flow: 'signup_farmers_id' });
       await this.sendText(
         from,
-        'Please upload a photo of your Farmer’s ID to continue.',
+        "Please upload a photo of your Farmer's ID to continue.",
       );
     } catch (e) {
       this.logger.error('WhatsApp signup failed', e as any);
@@ -1328,6 +1577,16 @@ export class WhatsappService {
         return;
       }
       await this.redis.del(attemptsKey);
+      // Ensure the organization is active for marketplace visibility
+      const current = this.sessions.get(from);
+      const orgId = current.user?.orgId;
+      if (orgId) {
+        try {
+          await this.supabase.updateOrganization(orgId, {
+            status: 'active',
+          } as any);
+        } catch {}
+      }
       await this.sendText(from, '✅ Verified! Your Procur account is ready.');
       this.sessions.set(from, { flow: 'menu', data: {} });
       await this.showMenu(from);
@@ -1339,6 +1598,16 @@ export class WhatsappService {
 
   private async handleImage(from: string, mediaId: string) {
     const s = this.sessions.get(from);
+    if (s.user?.id) {
+      const isLocked = (await this.redis.get(`wa:locked:${s.user.id}`)) === '1';
+      if (isLocked) {
+        await this.sendText(
+          from,
+          'Your account is locked. Reply "unlock" to receive an OTP and unlock.',
+        );
+        return;
+      }
+    }
     if (s.flow !== 'upload_photo' && s.flow !== 'signup_farmers_id') {
       await this.sendText(
         from,
@@ -1392,6 +1661,9 @@ export class WhatsappService {
         this.sessions.set(from, { flow: 'menu' });
         return;
       }
+      if (await this.ensurePairedOrRequestUnlock(from, s)) {
+        return;
+      }
 
       const dto: any = {
         name: s.data.productName,
@@ -1431,8 +1703,13 @@ export class WhatsappService {
         },
       });
       await this.sendText(from, `Product created: ${created.name} ✅`);
+      await this.redis.set(
+        `wa:last_active:${user.id}`,
+        String(Date.now()),
+        'EX',
+        60 * 60 * 24 * 60,
+      );
       this.sessions.set(from, { flow: 'menu', data: {} });
-      await this.showMenu(from);
     } catch (e) {
       this.logger.error('Upload flow failed', e as any);
       await this.sendText(
@@ -1503,73 +1780,66 @@ export class WhatsappService {
         { id: 'menu_lang', title: this.t(locale, 'change_language') },
         { id: 'menu_undo', title: this.t(locale, 'undo') },
       ]);
+      const isLocked = (await this.redis.get(`wa:locked:${s.user.id}`)) === '1';
+      const accountButtons = [
+        isLocked
+          ? { id: 'menu_unlock', title: 'Unlock account' }
+          : { id: 'menu_lock', title: 'Lock account' },
+        { id: 'menu_logout', title: 'Logout' },
+      ];
+      await this.sendButtons(to, 'Account:', accountButtons);
     } else {
       await this.sendButtons(
         to,
         'Welcome to Procur on WhatsApp. Create your account to get started.',
-        [{ id: 'menu_signup', title: 'Sign up' }],
+        [
+          { id: 'menu_signup', title: 'Sign up' },
+          { id: 'menu_login', title: 'Login' },
+        ],
       );
     }
   }
 
   private async sendCountryList(to: string) {
-    await this.waQueue.enqueueSendMessage({
-      payload: {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          header: { type: 'text', text: 'Select your country' },
-          body: { text: 'Choose one from the list' },
-          action: {
-            button: 'Countries',
-            sections: [
-              {
-                title: 'OECS',
-                rows: [
-                  { id: 'country_gd', title: 'Grenada' },
-                  { id: 'country_vc', title: 'St. Vincent' },
-                  { id: 'country_lc', title: 'St Lucia' },
-                  { id: 'country_dm', title: 'Dominica' },
-                  { id: 'country_kn', title: 'St Kitts' },
-                ],
-              },
-            ],
-          },
+    await this.sendSvc.list(
+      to,
+      'Select your country',
+      'Choose one from the list',
+      'Countries',
+      [
+        {
+          title: 'OECS',
+          rows: [
+            { id: 'country_gd', title: 'Grenada' },
+            { id: 'country_vc', title: 'St. Vincent' },
+            { id: 'country_lc', title: 'St Lucia' },
+            { id: 'country_dm', title: 'Dominica' },
+            { id: 'country_kn', title: 'St Kitts' },
+          ],
         },
-      },
-    });
+      ],
+    );
   }
 
   private async sendUnitsList(to: string) {
-    await this.waQueue.enqueueSendMessage({
-      payload: {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'list',
-          header: { type: 'text', text: 'Pick a unit' },
-          body: { text: 'Choose unit of measure' },
-          action: {
-            button: 'Units',
-            sections: [
-              {
-                title: 'Units',
-                rows: [
-                  { id: 'unit_kg', title: 'kg' },
-                  { id: 'unit_lb', title: 'lb' },
-                  { id: 'unit_tonne', title: 'tonne' },
-                  { id: 'unit_sacks', title: 'sacks' },
-                  { id: 'unit_crates', title: 'crates' },
-                ],
-              },
-            ],
-          },
+    await this.sendSvc.list(
+      to,
+      'Pick a unit',
+      'Choose unit of measure',
+      'Units',
+      [
+        {
+          title: 'Units',
+          rows: [
+            { id: 'unit_kg', title: 'kg' },
+            { id: 'unit_lb', title: 'lb' },
+            { id: 'unit_tonne', title: 'tonne' },
+            { id: 'unit_sacks', title: 'sacks' },
+            { id: 'unit_crates', title: 'crates' },
+          ],
         },
-      },
-    });
+      ],
+    );
   }
 
   private async listOpenRequests(to: string) {
@@ -1781,6 +2051,23 @@ export class WhatsappService {
       }
     }
     return this.token;
+  }
+
+  // Admin path to rotate token at runtime
+  async adminSetToken(newToken: string) {
+    if (!newToken || typeof newToken !== 'string') {
+      throw new Error('Invalid token');
+    }
+    (this as any).token = newToken;
+    try {
+      await this.redis.set('wa:token', newToken, 'EX', 60 * 60 * 24);
+      this.logger.log('WhatsApp token updated and published to Redis.');
+    } catch (e) {
+      this.logger.warn(
+        'Failed to publish updated WhatsApp token to Redis',
+        e as any,
+      );
+    }
   }
 
   private isExpiredTokenError(err: any): boolean {
@@ -2036,41 +2323,90 @@ export class WhatsappService {
     body: string,
     buttons: { id: string; title: string }[],
   ) {
-    if (!this.token || !this.phoneNumberId) {
-      this.logger.error('Cannot send buttons: WhatsApp credentials missing');
-      return;
-    }
-    await this.waQueue.enqueueSendMessage({
-      payload: {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'interactive',
-        interactive: {
-          type: 'button',
-          body: { text: body },
-          action: {
-            buttons: buttons.map((b) => ({
-              type: 'reply',
-              reply: { id: b.id, title: b.title },
-            })),
-          },
-        },
-      },
-    });
+    await this.sendSvc.buttons(to, body, buttons);
   }
 
   private async sendText(to: string, body: string) {
-    if (!this.token || !this.phoneNumberId) {
-      this.logger.error('Cannot send text: WhatsApp credentials missing');
-      return;
+    await this.sendSvc.text(to, this.formatBody(body));
+  }
+
+  private async audit(event: string, meta: Record<string, any>) {
+    try {
+      const client = this.supabase.getClient();
+      await client.from('whatsapp_audit').insert({
+        user_id: meta.user_id ?? null,
+        from_e164: meta.from_e164 ?? null,
+        event,
+        meta,
+      });
+    } catch (e) {
+      this.logger.warn('Audit insert failed', e as any);
     }
-    await this.waQueue.enqueueSendMessage({
-      payload: {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: this.formatBody(body) },
-      },
-    });
+  }
+
+  private async ensurePairedOrRequestUnlock(
+    from: string,
+    s: any,
+  ): Promise<boolean> {
+    const userId = s?.user?.id as string | undefined;
+    if (!userId) return false;
+    const stored = await this.redis.get(`wa:fp:${userId}`);
+    if (!stored) {
+      await this.sendText(from, 'Please verify to continue. Reply "unlock".');
+      return true;
+    }
+    const e164 = `+${from}`;
+    const fp = crypto.createHash('sha256').update(e164).digest('hex');
+    if (stored !== fp) {
+      await this.sendText(from, 'Please verify to continue. Reply "unlock".');
+      return true;
+    }
+    return false;
+  }
+
+  private async startLoginFlow(from: string) {
+    try {
+      const e164 = `+${from}`;
+      const user = await this.supabase.findUserByPhoneNumber(e164);
+      if (!user) {
+        await this.sendText(
+          from,
+          'No account found for this number. Type "signup" to create one.',
+        );
+        return;
+      }
+      const withOrg = await this.supabase.getUserWithOrganization(user.id);
+      const orgId = withOrg?.organization_users?.[0]?.organization_id;
+      const accountType =
+        withOrg?.organization_users?.[0]?.organizations?.account_type;
+      this.sessions.set(from, {
+        user: {
+          id: user.id,
+          email: user.email,
+          orgId,
+          accountType,
+          name: user.fullname,
+        },
+      });
+      const otp = this.generateOtp();
+      const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      await this.supabase.updateUser(user.id, {
+        email_verification_token: otp,
+        email_verification_expires: expires,
+      });
+      this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+      await this.sendOtp(from, otp);
+      await this.redis.del(`wa:logged_out:${from}`);
+      await this.sendText(
+        from,
+        'Please reply with the 6-digit code to continue.',
+      );
+    } catch (e) {
+      this.logger.error('Start login flow failed', e as any);
+      await this.sendText(
+        from,
+        'Login failed. Please try again or type "signup".',
+      );
+    }
   }
 }
