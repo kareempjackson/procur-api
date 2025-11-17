@@ -6,6 +6,7 @@ import {
   Post,
   Req,
   UseGuards,
+  Get,
 } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -15,6 +16,14 @@ import { UserContext } from '../common/interfaces/jwt-payload.interface';
 @Controller()
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
+
+  // Public config for client-side Stripe initialization
+  @Get('payments/config')
+  async getConfig() {
+    return {
+      publishable_key: process.env.STRIPE_PUBLISHABLE_KEY || null,
+    };
+  }
 
   @UseGuards(JwtAuthGuard)
   @Post('buyers/checkout/payment-intent')

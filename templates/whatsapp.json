@@ -79,6 +79,26 @@
           ]
         }
       ]
+    },
+    {
+      "name": "new_order_to_seller",
+      "category": "UTILITY",
+      "languages": [
+        {
+          "code": "en_US",
+          "components": [
+            {
+              "type": "BODY",
+              "text": "New order {{1}} from {{2}}. Total: {{3}} {{4}}.\n\nPlease prepare the order:\n• Confirm stock and quality\n• Pack and label items\n• Arrange pickup/delivery\n\nManage: {{5}}",
+              "example": {
+                "body_text": [
+                  ["ORD-12345", "Acme Foods", "125.50", "USD", "https://yourapp/seller/orders/abc123"]
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, HttpException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import {
@@ -81,7 +81,14 @@ export class SupabaseService {
 
     if (error) {
       this.logger.error('Error creating signed upload URL:', error);
-      throw error;
+      const status =
+        typeof (error as any)?.status === 'number'
+          ? (error as any).status
+          : Number((error as any)?.statusCode) || 400;
+      throw new HttpException(
+        (error as any)?.message || 'Failed to create signed upload URL',
+        status,
+      );
     }
 
     return data as { signedUrl: string; token: string; path: string };
@@ -98,7 +105,14 @@ export class SupabaseService {
 
     if (error) {
       this.logger.error('Error creating signed download URL:', error);
-      throw error;
+      const status =
+        typeof (error as any)?.status === 'number'
+          ? (error as any).status
+          : Number((error as any)?.statusCode) || 400;
+      throw new HttpException(
+        (error as any)?.message || 'Failed to create signed download URL',
+        status,
+      );
     }
 
     return data as { signedUrl: string };

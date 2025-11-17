@@ -2,7 +2,7 @@
   "items": [
     {
       "title": "Upload product via WhatsApp",
-      "content": "To upload a product, choose Upload product, enter the name and base price (per lb), then send a product photo. Description and category are optional.",
+      "content": "To upload a product, choose Upload product, enter the name and price, then select the unit and currency, and send a product photo. Description and category are optional.",
       "scope": "faq"
     },
     {

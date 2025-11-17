@@ -14,7 +14,16 @@ type Flow =
   | 'upload_desc'
   | 'upload_category'
   | 'upload_photo'
-  | 'upload_price_confirm';
+  | 'upload_price_confirm'
+  | 'upload_unit'
+  | 'upload_currency'
+  | 'upload_stock'
+  | 'upload_condition'
+  | 'upload_organic'
+  | 'upload_short_desc'
+  | 'upload_qty'
+  | 'inventory_browse'
+  | 'mp_browse';
 
 // Extended flows for features
 export type ExtendedFlow =

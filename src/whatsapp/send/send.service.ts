@@ -12,6 +12,21 @@ export class SendService {
     return s.slice(0, max - 1) + '…';
   }
 
+  async image(to: string, imageUrl: string, caption?: string) {
+    await this.queue.enqueueSendMessage({
+      payload: {
+        messaging_product: 'whatsapp',
+        to,
+        type: 'image',
+        image: {
+          link: imageUrl,
+          caption,
+        },
+      },
+      meta: { kind: 'image' },
+    });
+  }
+
   async text(to: string, body: string) {
     await this.queue.enqueueSendMessage({
       payload: {

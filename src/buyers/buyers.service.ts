@@ -4,6 +4,9 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { TemplateService } from '../whatsapp/templates/template.service';
+import { EmailService } from '../email/email.service';
 import { SupabaseService } from '../database/supabase.service';
 import { ConversationsService } from '../messages/services/conversations.service';
 import {
@@ -75,6 +78,9 @@ export class BuyersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly conversationsService: ConversationsService,
+    private readonly waTemplates: TemplateService,
+    private readonly emailService: EmailService,
+    private readonly config: ConfigService,
   ) {}
 
   // ==================== MARKETPLACE METHODS ====================
@@ -378,7 +384,7 @@ export class BuyersService {
       .select(
         `
         id, name, logo_url, created_at, business_type, country,
-        products:products!seller_org_id(id)
+        products:products!seller_org_id(id, status)
       `,
         { count: 'exact' },
       )
@@ -426,7 +432,9 @@ export class BuyersService {
         location: seller.country,
         average_rating: 0, // Will be calculated from reviews below
         review_count: 0, // TODO: Count reviews
-        product_count: seller.products?.length || 0,
+        product_count:
+          (seller.products || []).filter((p: any) => p.status === 'active')
+            .length || 0,
         years_in_business:
           new Date().getFullYear() - new Date(seller.created_at).getFullYear(),
         is_verified: true, // TODO: Add verification logic
@@ -1516,7 +1524,12 @@ export class BuyersService {
       const { data: product } = await this.supabase
         .getClient()
         .from('products')
-        .select('*')
+        .select(
+          `
+          *,
+          product_images(image_url, is_primary, display_order)
+        `,
+        )
         .eq('id', item.product_id)
         .eq('status', 'active')
         .single();
@@ -1657,6 +1670,130 @@ export class BuyersService {
       } catch (convError) {
         // Log but don't fail the order creation
         console.error('Failed to create conversation for order:', convError);
+      }
+
+      // Notify the specific seller via WhatsApp if they are paired (signed up using WhatsApp)
+      try {
+        const client = this.supabase.getClient();
+        // Deep link to manage this order
+        const frontend =
+          this.config.get<string>('frontend.url') ||
+          process.env.FRONTEND_URL ||
+          'http://localhost:3001';
+        const manageUrl = `${frontend}/seller/orders/${order.id}`;
+
+        // Prefer product creator as the target seller user
+        const creatorId =
+          (items.find((it: any) => it?.product_snapshot?.created_by)
+            ?.product_snapshot?.created_by as string | undefined) || undefined;
+
+        let targetSellerUserId: string | null = creatorId ?? null;
+
+        // Fallback to an org member (e.g., earliest joined) if creator not available
+        if (!targetSellerUserId) {
+          const { data: owner } = await client
+            .from('organization_users')
+            .select('user_id, joined_at')
+            .eq('organization_id', sellerOrgId)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .single();
+          targetSellerUserId = owner?.user_id ?? null;
+        }
+
+        if (targetSellerUserId) {
+          const { data: sellerUser } = await client
+            .from('users')
+            .select('id, fullname, phone_number')
+            .eq('id', targetSellerUserId)
+            .not('phone_number', 'is', null)
+            .single();
+
+          if (sellerUser?.phone_number) {
+            const orderNum = String(order.order_number || order.id);
+            const buyerName =
+              (shippingAddress as any)?.name ||
+              (billingAddress as any)?.name ||
+              'Buyer';
+            const currency = String(order.currency || 'USD');
+            const totalAmt = Number(order.total_amount || 0);
+
+            const to = String(sellerUser.phone_number).replace(/^\+/, '');
+            await this.waTemplates.sendNewOrderToSeller(
+              to,
+              orderNum,
+              buyerName,
+              totalAmt,
+              currency,
+              manageUrl,
+              'en',
+            );
+          }
+        }
+      } catch (waErr) {
+        // Do not block order creation on WhatsApp issues
+        console.warn('WA notify seller (new order) failed:', waErr);
+      }
+
+      // Notify seller users via Email (all available emails in the seller organization)
+      try {
+        const client = this.supabase.getClient();
+        const frontend =
+          this.config.get<string>('frontend.url') ||
+          process.env.FRONTEND_URL ||
+          'http://localhost:3001';
+        const manageUrl = `${frontend}/seller/orders/${order.id}`;
+        const orderNum = String(order.order_number || order.id);
+        const currency = String(order.currency || 'USD');
+        const totalAmt = Number(order.total_amount || 0);
+        const buyerName =
+          (shippingAddress as any)?.contact_name ||
+          (shippingAddress as any)?.name ||
+          (billingAddress as any)?.contact_name ||
+          (billingAddress as any)?.name ||
+          'Buyer';
+
+        // Fetch all members of the seller organization
+        const { data: orgUsers } = await client
+          .from('organization_users')
+          .select('user_id')
+          .eq('organization_id', sellerOrgId);
+        const userIds = (orgUsers || []).map((ou: any) => ou.user_id);
+        if (userIds.length > 0) {
+          const { data: users } = await client
+            .from('users')
+            .select('id, email, fullname')
+            .in('id', userIds);
+          const recipients =
+            (users || [])
+              .filter((u: any) => !!u.email)
+              .map((u: any) => ({
+                email: u.email as string,
+                name: u.fullname as string,
+              })) || [];
+
+          if (recipients.length > 0) {
+            const subject = `New order ${orderNum} received`;
+            const link = manageUrl;
+            const html = `<p>Hello,</p>
+<p>You have a new order <strong>${orderNum}</strong> from <strong>${buyerName}</strong>.</p>
+<p>Total: <strong>${currency} ${totalAmt.toFixed(2)}</strong></p>
+<p>Manage this order here: <a href="${link}">${link}</a></p>`;
+            const text = `You have a new order ${orderNum} from ${buyerName}.
+Total: ${currency} ${totalAmt.toFixed(2)}
+Manage this order: ${link}`;
+
+            // Send to each recipient (non-blocking failures)
+            await Promise.all(
+              recipients.map((r) =>
+                this.emailService.sendBasicEmail(r.email, subject, html, text),
+              ),
+            );
+          }
+        }
+      } catch (emailErr) {
+        // Do not block order creation on email issues
+        console.warn('Email notify seller (new order) failed:', emailErr);
       }
 
       createdOrders.push(order);
@@ -1920,6 +2057,15 @@ export class BuyersService {
         unit_price: item.unit_price,
         quantity: item.quantity,
         total_price: item.total_price,
+        // Helpful extras for UI rendering
+        product_image:
+          (item.product_snapshot?.product_images || []).find?.(
+            (img: any) => img?.is_primary,
+          )?.image_url ||
+          item.product_snapshot?.image_url ||
+          null,
+        unit_of_measurement: item.product_snapshot?.unit_of_measurement,
+        product_snapshot: item.product_snapshot,
       })),
       // timeline, // Remove timeline as it's not in the DTO
       created_at: order.created_at,

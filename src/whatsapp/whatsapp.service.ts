@@ -4,6 +4,7 @@ import axios from 'axios';
 import { SessionStore } from './session.store';
 import { AuthService } from '../auth/auth.service';
 import { SellersService } from '../sellers/sellers.service';
+import { BuyersService } from '../buyers/buyers.service';
 import { SupabaseService } from '../database/supabase.service';
 import { AiService } from '../ai/ai.service';
 import * as bcrypt from 'bcryptjs';
@@ -26,6 +27,7 @@ export class WhatsappService {
     private readonly sessions: SessionStore,
     private readonly auth: AuthService,
     private readonly sellers: SellersService,
+    private readonly buyers: BuyersService,
     private readonly supabase: SupabaseService,
     private readonly ai: AiService,
     @Inject('REDIS') private readonly redis: IORedis,
@@ -256,18 +258,31 @@ export class WhatsappService {
       const sFree = this.sessions.get(from);
       const inStrictFlow = [
         'signup_name',
+        'signup_account_type',
         'signup_country',
         'signup_otp',
+        // Product upload flow (all steps must bypass AI parsing)
+        'upload_name',
+        'upload_category',
+        'upload_short_desc',
+        'upload_desc',
         'upload_price',
+        'upload_qty',
+        'upload_unit',
         'upload_price_confirm',
         'upload_photo',
+        // Inventory viewing
+        'inventory_browse',
+        // Harvest flows
         'harvest_window',
         'harvest_qty',
         'harvest_unit',
+        // Quotes
         'quote_currency',
         'quote_available_qty',
         'quote_delivery_date',
         'quote_notes',
+        // Orders
         'order_accept_eta',
         'order_accept_shipping',
         'order_reject_reason',
@@ -386,7 +401,7 @@ export class WhatsappService {
               }
               if (!h.unit) {
                 this.sessions.set(from, { flow: 'harvest_unit' });
-                await this.sendUnitsList(from);
+                await this.sendHarvestUnitsList(from);
                 return;
               }
             }
@@ -494,16 +509,43 @@ export class WhatsappService {
 
     switch (session.flow) {
       case 'signup_name': {
-        // Default to seller and farmers for WhatsApp signups
+        const name = (text || '').trim();
+        if (!name) {
+          await this.sendText(from, "What's your full name?");
+          break;
+        }
         this.sessions.set(from, {
-          flow: 'signup_country',
-          data: {
-            name: text.trim(),
-            accountType: 'seller',
-            businessType: 'farmers',
-          },
+          flow: 'signup_account_type',
+          data: { name },
         });
-        await this.sendCountryList(from);
+        await this.sendButtons(from, 'Are you signing up as?', [
+          { id: 'acct_buyer', title: 'Buyer' },
+          { id: 'acct_seller', title: 'Seller' },
+        ]);
+        break;
+      }
+      case 'signup_account_type': {
+        const lowerTxt = String(text || '')
+          .trim()
+          .toLowerCase();
+        if (lowerTxt === 'buyer' || lowerTxt === 'seller') {
+          const accountType = lowerTxt === 'buyer' ? 'buyer' : 'seller';
+          const businessType = accountType === 'seller' ? 'farmers' : 'general';
+          this.sessions.set(from, {
+            flow: 'signup_country',
+            data: {
+              ...(this.sessions.get(from).data || {}),
+              accountType,
+              businessType,
+            },
+          });
+          await this.sendCountryList(from);
+          break;
+        }
+        await this.sendButtons(from, 'Pick account type:', [
+          { id: 'acct_buyer', title: 'Buyer' },
+          { id: 'acct_seller', title: 'Seller' },
+        ]);
         break;
       }
       case 'signup_country': {
@@ -585,41 +627,102 @@ export class WhatsappService {
         await this.showMenu(from);
         break;
       }
-      case 'upload_name':
+      case 'upload_name': {
+        const name = (text || '').trim();
+        if (!name) {
+          await this.sendText(from, 'Please enter a valid product name.');
+          break;
+        }
+        this.sessions.set(from, {
+          flow: 'upload_category',
+          data: { productName: name, category_page: 1 },
+        });
+        await this.sendProductCategoryList(from);
+        break;
+      }
+      case 'upload_category': {
+        const category = (text || '').trim();
+        if (!category) {
+          // If user typed nothing or invalid free-text, show picker again
+          await this.sendProductCategoryList(from);
+          break;
+        }
+        const s2 = this.sessions.get(from);
+        this.sessions.set(from, {
+          flow: 'upload_short_desc',
+          data: { ...s2.data, category },
+        });
+        await this.sendText(
+          from,
+          'Short description? (optional, type "skip" to continue)',
+        );
+        break;
+      }
+      case 'upload_short_desc': {
+        const s2 = this.sessions.get(from);
+        const shortText = (text || '').trim();
+        const short_description =
+          shortText.toLowerCase() === 'skip' ? undefined : shortText;
+        this.sessions.set(from, {
+          flow: 'upload_desc',
+          data: { ...s2.data, short_description },
+        });
+        await this.sendText(
+          from,
+          'Full description? (optional, type "skip" to continue)',
+        );
+        break;
+      }
+      case 'upload_desc': {
+        const s2 = this.sessions.get(from);
+        const fullText = (text || '').trim();
+        const description =
+          fullText.toLowerCase() === 'skip' ? undefined : fullText;
         this.sessions.set(from, {
           flow: 'upload_price',
-          data: { productName: text.trim() },
+          data: { ...s2.data, description },
         });
         await this.sendText(from, this.t(this.getLocale(from), 'ask_price'));
         break;
-      case 'upload_price':
+      }
+      case 'upload_price': {
+        const price = Number(String(text).replace(/[^0-9.]/g, ''));
+        if (!isFinite(price) || price <= 0) {
+          await this.sendText(from, 'Enter a valid price (e.g., 5.99).');
+          break;
+        }
+        const s2 = this.sessions.get(from);
         this.sessions.set(from, {
-          flow: 'upload_price_confirm',
-          data: { price: Number(String(text).replace(/[^\\d.]/g, '')) },
+          flow: 'upload_qty',
+          data: { ...s2.data, price },
         });
-        const p = this.sessions.get(from).data.price;
-        await this.sendButtons(from, `Confirm price: ${p} USD/lb?`, [
-          { id: 'price_yes', title: 'Yes' },
-          { id: 'price_change', title: 'Change' },
-        ]);
+        await this.sendText(from, 'Quantity in stock? (e.g., 0, 10, 250)');
         break;
-      case 'upload_price_confirm':
-        // waiting for button reply; fall through to menu on unexpected text
-        await this.sendButtons(from, 'Please confirm the price:', [
-          { id: 'price_yes', title: 'Yes' },
-          { id: 'price_change', title: 'Change' },
-        ]);
+      }
+      case 'upload_qty': {
+        const qty = Number(String(text).replace(/[^0-9]/g, ''));
+        if (!Number.isFinite(qty) || qty < 0) {
+          await this.sendText(from, 'Enter a whole number (e.g., 0, 10, 250).');
+          break;
+        }
+        const s2 = this.sessions.get(from);
+        this.sessions.set(from, {
+          flow: 'upload_unit',
+          data: { ...s2.data, stock: Math.floor(qty) },
+        });
+        await this.sendProductUnitsList(from);
         break;
-      case 'upload_desc':
-        // No longer asking for description; go straight to photo
-        this.sessions.set(from, { flow: 'upload_photo' });
-        await this.sendText(from, 'Send a product photo now.');
+      }
+      case 'inventory_browse': {
+        // Disallow free-text while browsing inventory; show list again
+        await this.sendText(
+          from,
+          'Use the list to navigate or tap a product. Type "menu" to exit.',
+        );
+        await this.listSellerProducts(from);
         break;
-      case 'upload_category':
-        // No longer asking for category; go straight to photo
-        this.sessions.set(from, { flow: 'upload_photo' });
-        await this.sendText(from, 'Send a product photo now.');
-        break;
+      }
+      // removed: upload_price_confirm, upload_stock, upload_condition, upload_organic
       // ===== HARVESTS =====
       case 'harvest_crop':
         this.sessions.set(from, {
@@ -651,12 +754,12 @@ export class WhatsappService {
           flow: 'harvest_unit',
           data: { quantity: qty },
         });
-        await this.sendUnitsList(from);
+        await this.sendHarvestUnitsList(from);
         break;
       }
       case 'harvest_unit':
         // handled by list reply via routeMenuChoice('unit_*')
-        await this.sendUnitsList(from);
+        await this.sendHarvestUnitsList(from);
         break;
       case 'harvest_notes': {
         const s2 = this.sessions.get(from);
@@ -1292,29 +1395,164 @@ export class WhatsappService {
       await this.finishWhatsappSignup(to, randomPwd);
       return;
     }
+    if (choice === 'acct_buyer' || choice === 'acct_seller') {
+      const accountType = choice === 'acct_buyer' ? 'buyer' : 'seller';
+      const businessType = accountType === 'seller' ? 'farmers' : 'general';
+      const s = this.sessions.get(to);
+      this.sessions.set(to, {
+        flow: 'signup_country',
+        data: { ...(s.data || {}), accountType, businessType },
+      });
+      await this.sendCountryList(to);
+      return;
+    }
     if (choice.startsWith('unit_')) {
       const unit = choice.replace('unit_', '').replace('_', ' ');
-      this.sessions.set(to, { flow: 'harvest_notes', data: { unit } });
-      await this.sendText(to, 'Notes? (optional, type "skip" to continue)');
+      const s = this.sessions.get(to);
+      if (s.flow === 'upload_unit') {
+        // Product upload flow: capture unit, then go to photos
+        this.sessions.set(to, {
+          flow: 'upload_photo',
+          data: { ...s.data, unit },
+        });
+        await this.sendText(
+          to,
+          'Send a product photo now. You can add up to 5. After each photo, choose “Finish” or “Add another”.',
+        );
+      } else {
+        // Harvest flow (existing)
+        this.sessions.set(to, { flow: 'harvest_notes', data: { unit } });
+        await this.sendText(to, 'Notes? (optional, type "skip" to continue)');
+      }
       return;
+    }
+    if (choice.startsWith('cat_')) {
+      const category = choice.substring(4).replace(/_/g, ' ');
+      const s = this.sessions.get(to);
+      if (s.flow === 'upload_category') {
+        this.sessions.set(to, {
+          flow: 'upload_short_desc',
+          data: { ...s.data, category },
+        });
+        await this.sendText(
+          to,
+          'Short description? (optional, type "skip" to continue)',
+        );
+        return;
+      }
     }
     if (choice.startsWith('cur_')) {
       const cur = choice.replace('cur_', '').toUpperCase();
+      const s = this.sessions.get(to);
+      if (s.flow === 'upload_currency') {
+        // Upload flow: capture currency, then ask for stock quantity
+        this.sessions.set(to, {
+          flow: 'upload_stock',
+          data: { ...s.data, currency: cur },
+        });
+        await this.sendText(to, 'Stock quantity? (e.g., 0, 10, 250)');
+      } else {
+        // Quote flow (existing)
+        this.sessions.set(to, {
+          flow: 'quote_available_qty',
+          data: { currency: cur },
+        });
+        await this.sendText(
+          to,
+          this.t(this.getLocale(to), 'ask_available_qty'),
+        );
+      }
+      return;
+    }
+    if (choice === 'cat_more' || choice === 'cat_prev') {
+      const s = this.sessions.get(to);
+      const page = Number(s.data.category_page || 1);
+      const next = choice === 'cat_more' ? page + 1 : Math.max(1, page - 1);
       this.sessions.set(to, {
-        flow: 'quote_available_qty',
-        data: { currency: cur },
+        flow: 'upload_category',
+        data: { ...s.data, category_page: next },
       });
-      await this.sendText(to, this.t(this.getLocale(to), 'ask_available_qty'));
+      await this.sendProductCategoryList(to);
       return;
     }
-    if (choice === 'price_yes') {
-      this.sessions.set(to, { flow: 'upload_photo' });
-      await this.sendText(to, this.t(this.getLocale(to), 'ask_photo'));
+    // price confirmation and condition/organic steps removed from product flow
+    if (choice === 'photo_add') {
+      await this.sendText(to, 'Send another product photo.');
       return;
     }
-    if (choice === 'price_change') {
-      this.sessions.set(to, { flow: 'upload_price' });
-      await this.sendText(to, this.t(this.getLocale(to), 'ask_price'));
+    if (choice === 'photo_done') {
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || !user?.id) {
+        await this.sendText(to, 'Please link your seller account first.');
+        this.sessions.set(to, { flow: 'menu' });
+        return;
+      }
+      const images = (s.data.images as Array<{ image_url: string }>) || [];
+      if (images.length < 1) {
+        await this.sendText(
+          to,
+          'Please send at least one photo before finishing.',
+        );
+        return;
+      }
+      try {
+        const dto: any = {
+          name: s.data.productName,
+          category: s.data.category || 'General',
+          short_description: s.data.short_description,
+          description: s.data.description,
+          base_price: s.data.price,
+          stock_quantity: typeof s.data.stock === 'number' ? s.data.stock : 0,
+          unit_of_measurement: s.data.unit || 'piece',
+          currency: 'XCD',
+          status: 'active',
+          images: images.map((img, idx) => ({
+            image_url: img.image_url,
+            is_primary: idx === 0,
+            display_order: idx,
+          })),
+        };
+        const created = await this.sellers.createProduct(
+          user.orgId,
+          dto,
+          user.id,
+        );
+        await this.ai.upsertEmbedding({
+          orgId: user.orgId,
+          scope: 'product',
+          refId: created?.id,
+          title: created?.name,
+          content: `${created?.name} • ${dto.base_price} ${dto.currency}/${dto.unit_of_measurement}`,
+          metadata: {
+            currency: dto.currency,
+            unit: dto.unit_of_measurement,
+            type: 'product',
+          },
+        });
+        const previewLines = [
+          `Product created ✅`,
+          `• Name: ${created?.name}`,
+          `• Category: ${created?.category}`,
+          created?.short_description
+            ? `• Short: ${created.short_description}`
+            : undefined,
+          created?.description
+            ? `• Desc: ${String(created.description).slice(0, 200)}${String(created.description).length > 200 ? '…' : ''}`
+            : undefined,
+          `• Price: ${dto.base_price} ${dto.currency}/${dto.unit_of_measurement}`,
+          `• Stock: ${dto.stock_quantity}`,
+          created?.images?.length
+            ? `• Images: ${created.images.length}`
+            : undefined,
+        ].filter(Boolean);
+        await this.sendText(to, previewLines.join('\n'));
+      } catch (e) {
+        this.logger.error('Upload finalize failed', e as any);
+        await this.sendText(to, 'Failed to create product. Please try again.');
+      }
+      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.showMenu(to);
       return;
     }
     if (choice.startsWith('req_')) {
@@ -1361,7 +1599,6 @@ export class WhatsappService {
         return;
       }
       const mapping: Record<string, string> = {
-        faq_upload: 'How do I upload a product?',
         faq_harvest: 'How do I post an upcoming harvest?',
         faq_quotes: 'How do I respond to buyer requests and submit a quote?',
         faq_orders: 'How do I accept, reject, or update an order?',
@@ -1478,8 +1715,143 @@ export class WhatsappService {
         this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
+      // Require phone pairing before starting product upload
+      if (await this.ensurePairedOrRequestUnlock(to, s)) {
+        // ensurePairedOrRequestUnlock already sent instructions
+        return;
+      }
       this.sessions.set(to, { flow: 'upload_name', data: {} });
       await this.sendText(to, 'Product name?');
+      return;
+    }
+    if (choice === 'menu_inventory') {
+      const s = this.sessions.get(to);
+      if (!s.user?.orgId || s.user?.accountType !== 'seller') {
+        await this.sendText(
+          to,
+          'Sign up or link your seller account to continue.',
+        );
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      this.sessions.set(to, {
+        flow: 'inventory_browse',
+        data: { inv_page: 1 },
+      });
+      await this.listSellerProducts(to);
+      return;
+    }
+    if (choice === 'menu_market') {
+      const s = this.sessions.get(to);
+      if (!s.user?.orgId || s.user?.accountType !== 'buyer') {
+        await this.sendText(
+          to,
+          'Sign up or switch to a buyer account to continue.',
+        );
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
+      await this.listMarketplaceProducts(to);
+      return;
+    }
+    if (choice === 'mp_next' || choice === 'mp_prev') {
+      const s = this.sessions.get(to);
+      const cur = Number(s.data.mp_page || 1);
+      const next = choice === 'mp_next' ? cur + 1 : Math.max(1, cur - 1);
+      this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: next } });
+      await this.listMarketplaceProducts(to);
+      return;
+    }
+    if (choice.startsWith('mp_')) {
+      const productId = choice.substring(3);
+      await this.showMarketplaceProductDetail(to, productId);
+      return;
+    }
+    if (choice.startsWith('farm_')) {
+      const sellerId = choice.substring(5);
+      if (sellerId) {
+        await this.showSellerInfo(to, sellerId);
+      } else {
+        await this.sendText(to, 'Seller information unavailable.');
+      }
+      return;
+    }
+    if (choice.startsWith('cart_add_')) {
+      const productId = choice.substring(9);
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || !user?.id) return;
+      try {
+        await this.buyers.addToCart(user.orgId, user.id, {
+          product_id: productId,
+          quantity: 1,
+        } as any);
+        await this.sendText(to, 'Added to cart ✅');
+      } catch (e) {
+        this.logger.error('Add to cart failed', e as any);
+        await this.sendText(to, 'Failed to add to cart.');
+      }
+      // Stay in marketplace browsing
+      await this.listMarketplaceProducts(to);
+      return;
+    }
+    if (choice === 'menu_cart') {
+      await this.showCart(to);
+      return;
+    }
+    if (choice === 'inv_next' || choice === 'inv_prev') {
+      const s = this.sessions.get(to);
+      const cur = Number(s.data.inv_page || 1);
+      const next = choice === 'inv_next' ? cur + 1 : Math.max(1, cur - 1);
+      this.sessions.set(to, {
+        flow: 'inventory_browse',
+        data: { inv_page: next },
+      });
+      await this.listSellerProducts(to);
+      return;
+    }
+    if (choice.startsWith('prod_')) {
+      const productId = choice.substring(5);
+      // We only show a quick summary for now; details/edit can be added later
+      try {
+        const s = this.sessions.get(to);
+        const user = s.user;
+        if (!user?.orgId) return;
+        const p = await this.sellers.getProductById(user.orgId, productId);
+        if (p) {
+          const firstImage = p.images?.[0]?.image_url;
+          if (firstImage) {
+            const caption = `${p.name} • ${p.base_price} ${p.currency}/${p.unit_of_measurement}`;
+            try {
+              await this.sendSvc.image(to, firstImage, caption);
+            } catch (e) {
+              // Ignore image send failure; fall back to text-only details
+              this.logger.warn('Failed to send product image', e as any);
+            }
+          }
+          const lines = [
+            `Product`,
+            `• Name: ${p.name}`,
+            p.category ? `• Category: ${p.category}` : undefined,
+            p.short_description ? `• Short: ${p.short_description}` : undefined,
+            p.description
+              ? `• Desc: ${String(p.description).slice(0, 300)}${
+                  String(p.description).length > 300 ? '…' : ''
+                }`
+              : undefined,
+            `• Price: ${p.base_price} ${p.currency}/${p.unit_of_measurement}`,
+            `• Stock: ${p.stock_quantity}`,
+            p.status ? `• Status: ${p.status}` : undefined,
+            undefined,
+          ].filter(Boolean);
+          await this.sendText(to, lines.join('\n'));
+        } else {
+          await this.sendText(to, 'Product not found.');
+        }
+      } catch {
+        await this.sendText(to, 'Failed to load product details.');
+      }
       return;
     }
     if (choice === 'menu_login') {
@@ -1492,8 +1864,10 @@ export class WhatsappService {
   private async finishWhatsappSignup(from: string, passwordPlain: string) {
     const s = this.sessions.get(from);
     const name = s.data.name;
-    const accountType = 'seller';
-    const businessType = 'farmers';
+    const accountType = (s.data.accountType as string) || 'seller';
+    const businessType =
+      (s.data.businessType as string) ||
+      (accountType === 'seller' ? 'farmers' : 'general');
     const country = (s.data.country as string) || '';
     const e164 = `+${from}`;
     const email = `wa_${from}@signup.local`;
@@ -1516,8 +1890,10 @@ export class WhatsappService {
 
       // Create organization for buyer or seller
       const org = await this.supabase.createOrganization({
-        name: `${name}'s Farm`,
-        business_name: `${name}'s Farm`,
+        name:
+          accountType === 'seller' ? `${name}'s Farm` : `${name}'s Business`,
+        business_name:
+          accountType === 'seller' ? `${name}'s Farm` : `${name}'s Business`,
         account_type: accountType,
         business_type: businessType as any,
         country,
@@ -1529,12 +1905,28 @@ export class WhatsappService {
         user: { id: user.id, email, orgId: org.id, accountType, name },
       });
 
-      // Ask for Farmer's ID image before OTP
-      this.sessions.set(from, { flow: 'signup_farmers_id' });
-      await this.sendText(
-        from,
-        "Please upload a photo of your Farmer's ID to continue.",
-      );
+      // Ask for Farmer's ID for sellers only; buyers go straight to OTP
+      if (accountType === 'seller') {
+        this.sessions.set(from, { flow: 'signup_farmers_id' });
+        await this.sendText(
+          from,
+          "Please upload a photo of your Farmer's ID to continue.",
+        );
+      } else {
+        // Issue OTP immediately for buyers
+        const otp = this.generateOtp();
+        const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        await this.supabase.updateUser(user.id, {
+          email_verification_token: otp,
+          email_verification_expires: expires,
+        });
+        this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+        await this.sendOtp(from, otp);
+        await this.sendText(
+          from,
+          'Please reply with the 6-digit code to verify your account.',
+        );
+      }
     } catch (e) {
       this.logger.error('WhatsApp signup failed', e as any);
       await this.sendText(from, 'Sign-up failed. Please try again.');
@@ -1611,7 +2003,9 @@ export class WhatsappService {
     if (s.flow !== 'upload_photo' && s.flow !== 'signup_farmers_id') {
       await this.sendText(
         from,
-        'Got your image. To upload a product, choose "Upload product" from the menu.',
+        s.flow === 'inventory_browse'
+          ? 'Viewing inventory. Images are not accepted here.'
+          : 'Image received. Product upload via WhatsApp is unavailable. Use the Seller web app to add products.',
       );
       return;
     }
@@ -1661,55 +2055,32 @@ export class WhatsappService {
         this.sessions.set(from, { flow: 'menu' });
         return;
       }
-      if (await this.ensurePairedOrRequestUnlock(from, s)) {
-        return;
+      // Skip pairing re-check during image upload; pairing was enforced when starting upload
+      if (s.flow !== 'upload_photo') {
+        if (await this.ensurePairedOrRequestUnlock(from, s)) {
+          return;
+        }
       }
-
-      const dto: any = {
-        name: s.data.productName,
-        description: s.data.description, // optional
-        short_description: s.data.description?.slice(0, 140), // optional
-        base_price: s.data.price,
-        currency: 'USD',
-        category: 'general',
-        status: 'active',
-        stock_quantity: 1,
-        unit_of_measurement: 'lb',
-        images: [
-          {
-            image_url: publicUrl,
-            is_primary: true,
-            display_order: 0,
-          },
-        ],
-      };
-
-      const created = await this.sellers.createProduct(
-        user.orgId,
-        dto,
-        user.id,
-      );
-      // RAG: upsert product context
-      await this.ai.upsertEmbedding({
-        orgId: user.orgId,
-        scope: 'product',
-        refId: created?.id,
-        title: created?.name,
-        content: `${created?.name} • ${dto.base_price} ${dto.currency}/lb`,
-        metadata: {
-          currency: dto.currency,
-          unit: 'lb',
-          type: 'product',
-        },
+      // Accumulate images during upload flow
+      const existing = Array.isArray(s.data.images)
+        ? (s.data.images as any[])
+        : [];
+      const updated = [...existing, { image_url: publicUrl }];
+      this.sessions.set(from, {
+        flow: 'upload_photo',
+        data: { ...s.data, images: updated },
       });
-      await this.sendText(from, `Product created: ${created.name} ✅`);
-      await this.redis.set(
-        `wa:last_active:${user.id}`,
-        String(Date.now()),
-        'EX',
-        60 * 60 * 24 * 60,
-      );
-      this.sessions.set(from, { flow: 'menu', data: {} });
+      if (updated.length >= 5) {
+        await this.sendText(
+          from,
+          'You have added 5 photos. Type "Finish" or tap Finish to continue.',
+        );
+      } else {
+        await this.sendButtons(from, 'Photo added. What next?', [
+          { id: 'photo_add', title: 'Add another' },
+          { id: 'photo_done', title: 'Finish' },
+        ]);
+      }
     } catch (e) {
       this.logger.error('Upload flow failed', e as any);
       await this.sendText(
@@ -1750,12 +2121,16 @@ export class WhatsappService {
       objectPath,
     );
     await axios.put(signed.signedUrl, bytes, {
-      headers: { 'Content-Type': contentType },
+      headers: {
+        'Content-Type': contentType,
+        'x-upsert': 'true',
+      },
     });
 
     if (isPublic && makePublicUrl) {
       const supaUrl = this.config.get<string>('database.supabaseUrl')!;
-      return `${supaUrl}/storage/v1/object/public/${objectPath}`;
+      // Include the bucket name in the public URL path
+      return `${supaUrl}/storage/v1/object/public/${bucket}/${objectPath}`;
     }
     return objectPath;
   }
@@ -1766,16 +2141,29 @@ export class WhatsappService {
       const locale = this.getLocale(to);
       const name = s.user.name || 'there';
       const welcome = this.t(locale, 'welcome_back').replace('{{name}}', name);
-      await this.sendButtons(to, welcome, [
-        { id: 'menu_upload', title: this.t(locale, 'upload_product') },
-        { id: 'menu_harvest', title: this.t(locale, 'post_harvest') },
-        { id: 'menu_requests', title: this.t(locale, 'requests_quotes') },
-      ]);
-      await this.sendButtons(to, this.t(locale, 'more'), [
-        { id: 'menu_orders', title: this.t(locale, 'orders') },
-        { id: 'menu_transactions', title: this.t(locale, 'transactions') },
-        { id: 'menu_faq', title: this.t(locale, 'faq') },
-      ]);
+      if (s.user.accountType === 'buyer') {
+        await this.sendButtons(to, welcome, [
+          { id: 'menu_market', title: 'Browse products' },
+          { id: 'menu_cart', title: 'My cart' },
+          { id: 'menu_orders', title: this.t(locale, 'orders') },
+        ]);
+        await this.sendButtons(to, this.t(locale, 'more'), [
+          { id: 'menu_transactions', title: this.t(locale, 'transactions') },
+          { id: 'menu_faq', title: this.t(locale, 'faq') },
+        ]);
+      } else {
+        await this.sendButtons(to, welcome, [
+          { id: 'menu_upload', title: this.t(locale, 'upload_product') },
+          { id: 'menu_harvest', title: this.t(locale, 'post_harvest') },
+          { id: 'menu_requests', title: this.t(locale, 'requests_quotes') },
+        ]);
+        await this.sendButtons(to, this.t(locale, 'more'), [
+          { id: 'menu_inventory', title: 'My products' },
+          { id: 'menu_orders', title: this.t(locale, 'orders') },
+          { id: 'menu_transactions', title: this.t(locale, 'transactions') },
+          { id: 'menu_faq', title: this.t(locale, 'faq') },
+        ]);
+      }
       await this.sendButtons(to, 'Settings:', [
         { id: 'menu_lang', title: this.t(locale, 'change_language') },
         { id: 'menu_undo', title: this.t(locale, 'undo') },
@@ -1821,7 +2209,297 @@ export class WhatsappService {
     );
   }
 
-  private async sendUnitsList(to: string) {
+  private async sendProductUnitsList(to: string) {
+    await this.sendSvc.list(
+      to,
+      'Pick a unit',
+      'Choose unit of measure',
+      'Units',
+      [
+        {
+          title: 'Units',
+          rows: [
+            { id: 'unit_piece', title: 'piece' },
+            { id: 'unit_dozen', title: 'dozen' },
+            { id: 'unit_kg', title: 'kg' },
+            { id: 'unit_g', title: 'g' },
+            { id: 'unit_lb', title: 'lb' },
+            { id: 'unit_oz', title: 'oz' },
+            { id: 'unit_liter', title: 'liter' },
+            { id: 'unit_ml', title: 'ml' },
+            { id: 'unit_gallon', title: 'gallon' },
+          ],
+        },
+      ],
+    );
+  }
+  private async sendProductCategoryList(to: string) {
+    const categories = [
+      'Vegetables',
+      'Fruits',
+      'Herbs',
+      'Grains',
+      'Legumes',
+      'Root Crops',
+      'Spices',
+      'Beverages',
+      'Dairy',
+      'Meat',
+      'Seafood',
+      'Other',
+    ];
+    const s = this.sessions.get(to);
+    const page = Number(s.data.category_page || 1);
+    const pageSize = 9; // keep <=9 so we can add a nav row and stay within 10 rows limit
+    const totalPages = Math.max(1, Math.ceil(categories.length / pageSize));
+    const currentPage = Math.min(Math.max(1, page), totalPages);
+    const start = (currentPage - 1) * pageSize;
+    const slice = categories.slice(start, start + pageSize);
+    const rows = slice.map((c) => ({
+      id: `cat_${c.replace(/ /g, '_')}`,
+      title: c,
+    }));
+    if (currentPage < totalPages) {
+      rows.push({ id: 'cat_more', title: 'More categories' });
+    } else if (currentPage > 1) {
+      rows.push({ id: 'cat_prev', title: 'Back' });
+    }
+    await this.sendSvc.list(
+      to,
+      'Pick a category',
+      `Choose a product category (page ${currentPage}/${totalPages})`,
+      'Categories',
+      [
+        {
+          title: 'Categories',
+          rows,
+        },
+      ],
+    );
+  }
+
+  private async listSellerProducts(to: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId) {
+      await this.sendText(to, 'Sign up to continue. Type "menu" to begin.');
+      return;
+    }
+    const page = Number(s.data.inv_page || 1);
+    const limit = 5;
+    try {
+      const { products, total } = await this.sellers.getProducts(user.orgId, {
+        page,
+        limit,
+      } as any);
+      const totalPages = Math.max(1, Math.ceil((total || 0) / limit));
+      const rows = (products || []).map((p: any) => ({
+        id: `prod_${p.id}`,
+        title: p.name?.slice(0, 40) || 'Product',
+        description: `${p.base_price} ${p.currency}/${p.unit_of_measurement} • stock ${p.stock_quantity}`,
+      })) as Array<{ id: string; title: string; description?: string }>;
+      if (page < totalPages) rows.push({ id: 'inv_next', title: 'Next page' });
+      if (page > 1) rows.push({ id: 'inv_prev', title: 'Previous page' });
+      await this.sendSvc.list(
+        to,
+        'Your products',
+        `Page ${page} of ${totalPages}`,
+        'View',
+        [
+          {
+            title: 'Products',
+            rows,
+          },
+        ],
+      );
+    } catch (e) {
+      this.logger.error('List seller products failed', e as any);
+      await this.sendText(to, 'Failed to load products. Please try again.');
+    }
+  }
+
+  private async listMarketplaceProducts(to: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId) {
+      await this.sendText(to, 'Sign up to continue. Type "menu" to begin.');
+      return;
+    }
+    const page = Number(s.data.mp_page || 1);
+    const limit = 5;
+    try {
+      const { products, total } = await this.buyers.browseProducts(
+        { page, limit, in_stock: true } as any,
+        user.orgId,
+      );
+      const totalPages = Math.max(1, Math.ceil((total || 0) / limit));
+      const rows = (products || []).map((p: any) => ({
+        id: `mp_${p.id}`,
+        title: p.name?.slice(0, 40) || 'Product',
+        description: `${p.current_price} ${p.currency}/${p.unit_of_measurement} • stock ${p.stock_quantity} • ${p.seller?.name || ''}`,
+      }));
+      if (page < totalPages)
+        rows.push({
+          id: 'mp_next',
+          title: 'Next page',
+          description: 'More results',
+        });
+      if (page > 1)
+        rows.push({
+          id: 'mp_prev',
+          title: 'Previous page',
+          description: 'Back to previous results',
+        });
+      await this.sendSvc.list(
+        to,
+        'Marketplace',
+        `Page ${page} of ${totalPages}`,
+        'Browse',
+        [
+          {
+            title: 'Products',
+            rows,
+          },
+        ],
+      );
+    } catch (e) {
+      this.logger.error('List marketplace products failed', e as any);
+      await this.sendText(to, 'Failed to load marketplace. Please try again.');
+    }
+  }
+
+  private async showMarketplaceProductDetail(to: string, productId: string) {
+    try {
+      const s = this.sessions.get(to);
+      const user = s.user;
+      const p = await this.buyers.getProductDetail(productId, user?.orgId);
+      if (p.image_url) {
+        try {
+          await this.sendSvc.image(
+            to,
+            p.image_url,
+            `${p.name} • ${p.current_price} ${p.currency}/${p.unit_of_measurement}`,
+          );
+        } catch (e) {
+          this.logger.warn('Failed to send marketplace image', e as any);
+        }
+      }
+      const lines = [
+        `Product`,
+        `• Name: ${p.name}`,
+        p.category ? `• Category: ${p.category}` : undefined,
+        p.short_description ? `• Short: ${p.short_description}` : undefined,
+        p.description
+          ? `• Desc: ${String(p.description).slice(0, 300)}${
+              String(p.description).length > 300 ? '…' : ''
+            }`
+          : undefined,
+        `• Price: ${p.current_price} ${p.currency}/${p.unit_of_measurement}`,
+        `• Stock: ${p.stock_quantity}`,
+        p.seller?.name ? `• Seller: ${p.seller.name}` : undefined,
+      ].filter(Boolean);
+      await this.sendText(to, lines.join('\n'));
+      await this.sendButtons(to, 'Actions:', [
+        { id: `cart_add_${p.id}`, title: 'Add to cart' },
+        { id: `farm_${p.seller?.id || ''}`, title: 'View farm' },
+        { id: 'menu_market', title: 'Back to results' },
+      ]);
+    } catch (e) {
+      this.logger.error('Show marketplace product failed', e as any);
+      await this.sendText(to, 'Failed to load product.');
+    }
+  }
+
+  private async showCart(to: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId || !user?.id) {
+      await this.sendText(to, 'Sign up to continue.');
+      this.sessions.set(to, { flow: 'signup_name' });
+      return;
+    }
+    try {
+      const cart = await this.buyers.getCart(user.orgId, user.id);
+      if (!cart.total_items) {
+        await this.sendText(to, 'Your cart is empty.');
+        this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
+        await this.listMarketplaceProducts(to);
+        return;
+      }
+      const lines: string[] = ['Your cart'];
+      for (const group of cart.seller_groups) {
+        lines.push(`\n${group.seller_name} • ${group.items.length} item(s)`);
+        for (const it of group.items) {
+          lines.push(
+            `• ${it.product_name} x${it.quantity} — ${it.unit_price} ${it.currency}/${it.unit_of_measurement}`,
+          );
+        }
+      }
+      lines.push(
+        `\nSubtotal: ${cart.subtotal} ${cart.currency}`,
+        `Est. shipping: ${cart.estimated_shipping} ${cart.currency}`,
+        `Est. tax: ${cart.estimated_tax} ${cart.currency}`,
+        `Total: ${cart.total} ${cart.currency}`,
+      );
+      await this.sendText(to, lines.join('\n'));
+      // Checkout requires a shipping address; steer users accordingly for now
+      await this.sendButtons(to, 'Next:', [
+        { id: 'menu_market', title: 'Continue browsing' },
+      ]);
+    } catch (e) {
+      this.logger.error('Show cart failed', e as any);
+      await this.sendText(to, 'Failed to load cart.');
+    }
+  }
+
+  private async showSellerInfo(to: string, sellerOrgId: string) {
+    try {
+      const client = this.supabase.getClient();
+      const { data: org } = await client
+        .from('organizations')
+        .select(
+          'id, name, business_type, country, description, logo_url, created_at',
+        )
+        .eq('id', sellerOrgId)
+        .single();
+      if (!org) {
+        await this.sendText(to, 'Seller not found.');
+        return;
+      }
+      const { count: productCount } = await client
+        .from('products')
+        .select('*', { count: 'exact', head: true })
+        .eq('seller_org_id', sellerOrgId)
+        .eq('status', 'active');
+      const lines = [
+        'Farm',
+        `• Name: ${org.name}`,
+        org.business_type ? `• Type: ${org.business_type}` : undefined,
+        org.country ? `• Country: ${org.country}` : undefined,
+        typeof productCount === 'number'
+          ? `• Active products: ${productCount}`
+          : undefined,
+        org.description
+          ? `• About: ${String(org.description).slice(0, 300)}${String(org.description).length > 300 ? '…' : ''}`
+          : undefined,
+      ].filter(Boolean);
+      if (org.logo_url) {
+        try {
+          await this.sendSvc.image(to, org.logo_url, org.name);
+        } catch (e) {
+          this.logger.warn('Failed to send seller logo', e as any);
+        }
+      }
+      await this.sendText(to, lines.join('\n'));
+      await this.sendButtons(to, 'Next:', [
+        { id: 'menu_market', title: 'Back to marketplace' },
+      ]);
+    } catch (e) {
+      this.logger.error('Show seller info failed', e as any);
+      await this.sendText(to, 'Failed to load farm information.');
+    }
+  }
+  private async sendHarvestUnitsList(to: string) {
     await this.sendSvc.list(
       to,
       'Pick a unit',
@@ -1979,7 +2657,6 @@ export class WhatsappService {
               {
                 title: 'Common questions',
                 rows: [
-                  { id: 'faq_upload', title: 'Upload product' },
                   { id: 'faq_harvest', title: 'Post harvest' },
                   { id: 'faq_quotes', title: 'Requests & quotes' },
                   { id: 'faq_orders', title: 'Orders' },

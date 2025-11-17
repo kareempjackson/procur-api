@@ -24,6 +24,10 @@ import {
 import { JwtPayload } from '../common/interfaces/jwt-payload.interface';
 import { AccountType } from '../common/enums/account-type.enum';
 import { BusinessType } from '../common/enums/business-types.enum';
+import { RequestOtpDto } from './dto/request-otp.dto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { SendService as WaSendService } from '../whatsapp/send/send.service';
+import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
 
 @Injectable()
 export class AuthService {
@@ -34,6 +38,9 @@ export class AuthService {
     private emailService: EmailService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    // Optional: present if WhatsappModule is loaded
+    private waSend?: WaSendService,
+    private waTemplates?: WaTemplateService,
   ) {}
 
   async signup(signupDto: SignupDto): Promise<SignupResponseDto> {
@@ -125,6 +132,119 @@ export class AuthService {
     }
   }
 
+  private generateOtp(): string {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+  }
+
+  async requestOtp(dto: RequestOtpDto): Promise<{ message: string }> {
+    const phone = dto.phoneNumber?.trim();
+    if (!phone) {
+      throw new BadRequestException('Phone number is required');
+    }
+    const user = await this.supabaseService.findUserByPhoneNumber(phone);
+    if (!user) {
+      // Hide existence
+      return { message: 'Code sent if the account exists.' };
+    }
+
+    const code = this.generateOtp();
+    const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await this.supabaseService.updateUser(user.id, {
+      email_verification_token: code,
+      email_verification_expires: expires,
+    });
+
+    const channel = dto.channel ?? 'whatsapp';
+    try {
+      if (channel === 'whatsapp' && user.phone_number) {
+        const to = user.phone_number.replace('+', '');
+        // Use template to allow delivery outside 24h window
+        if (this.waTemplates) {
+          await this.waTemplates.sendOtp(to, code, 'en');
+        } else if (this.waSend) {
+          await this.waSend.text(
+            to,
+            `Your Procur login code is ${code}. It expires in 10 minutes.`,
+          );
+        }
+      } else {
+        await this.emailService.sendVerificationEmail(
+          user.email,
+          user.fullname,
+          code,
+        );
+      }
+    } catch (e) {
+      this.logger.error('Failed to deliver OTP', e as any);
+      // continue to hide delivery errors
+    }
+
+    this.logger.log(`OTP requested for phone ${phone}`);
+    return { message: 'Code sent if the account exists.' };
+  }
+
+  async verifyOtp(dto: VerifyOtpDto): Promise<AuthResponseDto> {
+    const phone = dto.phoneNumber?.trim();
+    const code = dto.code?.trim();
+    if (!phone || !code) {
+      throw new BadRequestException('Phone number and code are required');
+    }
+    const user = await this.supabaseService.findUserByPhoneNumber(phone);
+    if (!user) {
+      throw new UnauthorizedException('Invalid code');
+    }
+    const expMs = user.email_verification_expires
+      ? new Date(user.email_verification_expires).getTime()
+      : 0;
+    const valid =
+      user.email_verification_token === code && expMs > 0 && Date.now() < expMs;
+    if (!valid) {
+      throw new UnauthorizedException('Invalid or expired code');
+    }
+
+    await this.supabaseService.updateUser(user.id, {
+      email_verification_token: null as any,
+      email_verification_expires: null as any,
+      email_verified: true,
+    });
+
+    // Get user with organization info if applicable
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(
+      user.id,
+    );
+    const { organizationId, organizationName, organizationRole, accountType } =
+      this.extractOrganizationInfo(user, userWithOrg);
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType,
+      organizationId,
+      organizationRole,
+      emailVerified: true,
+    };
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    this.logger.log(`OTP sign-in successful for ${phone}`);
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType,
+        emailVerified: true,
+        organizationId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
   async signin(signinDto: SigninDto): Promise<AuthResponseDto> {
     const { email, password } = signinDto;
 

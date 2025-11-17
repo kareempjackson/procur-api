@@ -7,17 +7,19 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
 ### Current Features (Implemented)
 
 - **Webhook + Verification**
-
   - GET `whatsapp/webhook` verifies with `WHATSAPP_VERIFY_TOKEN`
   - POST `whatsapp/webhook` receives inbound messages (public route)
   - HMAC signature verification using `WHATSAPP_APP_SECRET`
 
 - **Session + Flow**
-
   - In-memory sessions (with TTL); Redis-backed implementation scaffolded, and Redis is used for idempotency and media caching now
   - Menu-driven flows for:
     - Signup (WhatsApp-native, OTP verification, Farmer ID image → private bucket)
-    - Product upload (name, price, photo; default lb)
+    - Product upload (mirrors web form):
+      - name, category, price, unit, currency (default XCD), stock quantity
+      - condition, organic flag, optional description
+      - multiple photos (up to 5), primary auto-set to first
+      - units aligned to API enum: piece, dozen, kg, g, lb, oz, liter, ml, gallon
     - Harvest post (crop, window, quantity, unit, notes)
     - Requests & quotes (list requests, create quotes)
     - Orders (list, accept/reject, update status + tracking)
@@ -25,26 +27,22 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
   - “Undo last step” support and language picker (en/es) for menu prompts
 
 - **WhatsApp Sending**
-
   - Outbound messages via BullMQ queue/worker; retries with backoff and DLQ behavior
   - Token refresh: reads latest token from config; publishes token to Redis (`wa:token`); worker re-reads and retries on 401 (code 190)
   - Interactive UI: buttons and list messages (safe truncation for list row titles/descriptions)
 
 - **Templates**
-
   - Code-based templates (`templates/whatsapp.json`) and a sync script (`scripts/wa-templates.ts`)
   - OTP (`otp_verify`) and order updates: `order_update_with_tracking`, `order_update_no_tracking` (en_US/es_ES)
   - OTP sending logic: uses template outside 24h, text inside 24h
   - GitHub Action workflow to apply templates automatically on push/dispatch
 
 - **Media + Storage**
-
   - WhatsApp media downloaded via Graph; uploaded to Supabase Storage
   - Product images to public; Farmer ID to private bucket
   - Media bytes short-term cached in Redis
 
 - **AI/RAG (Phase 3)**
-
   - `ai_embeddings` table + vector index; hybrid search RPC (`search_ai_embeddings_hybrid`) adds FTS blending
   - AiService: embeddings, hybrid search, RAG answer with citations, Redis answer caching
   - Structured extractors for product/harvest/quote/order
@@ -90,12 +88,10 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
 ### Phase Summary
 
 - **Phase 1 (Reliability) – Done**
-
   - Webhook + signature verify; idempotency; media caching; base flows; menu
   - Token retry; robust WhatsApp sends; UI buttons/lists
 
 - **Phase 2 (UX/Flows) – Done**
-
   - Pagination for lists; price confirmation and date validation
   - Templates wired for OTP and order updates (outside 24h); CI workflow for templates
   - Localization baseline (menu/settings and key prompts); Undo
@@ -107,7 +103,6 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
 ### What’s Missing / Next Phases
 
 - **Phase 4 (Security, Compliance, Persistence) – Next**
-
   - Migrate `SessionStore` to Redis-backed async store; update all session get/set calls
   - “DELETE MY DATA” workflow: queue job, soft-delete account/org, revoke tokens, purge sensitive storage pointers; audit trail
   - Persist opt-out in DB and suppress proactive sends across channels
@@ -115,7 +110,6 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
   - Signed private media URLs with short TTL + access logging
 
 - **Phase 5 (Observability & Analytics) – Next**
-
   - Sentry integration (API + worker); structured JSON logs with flow tags
   - Prometheus metrics: WA send rates/errors, queue latency, RAG cache hit rate, flow step latencies
   - Funnel events for signup/product/harvest/quote/order/transaction
@@ -128,11 +122,9 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
 ### Runbook Highlights
 
 - Token Rotation
-
   - Update `WHATSAPP_TOKEN` in config or write to Redis `wa:token`. Worker reads the latest before every send and on 401 retries with the latest.
 
 - Webhook Issues
-
   - Ensure `WHATSAPP_VERIFY_TOKEN` and `WHATSAPP_APP_SECRET` are correct
   - 403 on invalid signature (expected)
 

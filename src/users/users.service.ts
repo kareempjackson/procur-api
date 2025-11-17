@@ -35,12 +35,16 @@ export class UsersService {
           ) {
             farmersIdUrl = farmersIdPath;
           } else {
-            const signed = await this.supabase.createSignedDownloadUrl(
-              this.privateBucket,
-              farmersIdPath,
-              60 * 60, // 1 hour
-            );
-            farmersIdUrl = signed.signedUrl;
+            try {
+              const signed = await this.supabase.createSignedDownloadUrl(
+                this.privateBucket,
+                farmersIdPath,
+                60 * 60, // 1 hour
+              );
+              farmersIdUrl = signed.signedUrl;
+            } catch {
+              farmersIdUrl = null;
+            }
           }
         }
         organization = {

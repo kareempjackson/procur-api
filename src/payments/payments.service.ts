@@ -3,6 +3,8 @@ import { SupabaseService } from '../database/supabase.service';
 import Stripe from 'stripe';
 import { EmailService } from '../email/email.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { TemplateService } from '../whatsapp/templates/template.service';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class PaymentsService {
@@ -14,6 +16,8 @@ export class PaymentsService {
     private readonly supabase: SupabaseService,
     private readonly emailService: EmailService,
     private readonly notifications: NotificationsService,
+    private readonly waTemplates: TemplateService,
+    private readonly config: ConfigService,
   ) {
     const apiKey = process.env.STRIPE_SECRET_KEY;
     if (!apiKey) {
@@ -50,7 +54,20 @@ export class PaymentsService {
     // Load cart items with product details
     const { data: cartItems } = await client
       .from('cart_items')
-      .select('*, products(seller_org_id, base_price, sale_price, name, sku)')
+      .select(
+        `
+        *,
+        products(
+          seller_org_id,
+          base_price,
+          sale_price,
+          name,
+          sku,
+          unit_of_measurement,
+          product_images(image_url, is_primary, display_order)
+        )
+      `,
+      )
       .eq('cart_id', cartId);
 
     if (!cartItems || cartItems.length === 0) {
@@ -306,6 +323,90 @@ export class PaymentsService {
           },
         });
       }
+    }
+
+    // WhatsApp notify the specific seller for each seller org, if paired
+    try {
+      for (const sellerOrgId of sellerOrgIds) {
+        // Find a representative order for this seller among the paid orderIds
+        const { data: ord } = await client
+          .from('orders')
+          .select(
+            `
+            id,
+            order_number,
+            seller_org_id,
+            order_items(product_snapshot)
+          `,
+          )
+          .in('id', orderIds)
+          .eq('seller_org_id', sellerOrgId)
+          .limit(1)
+          .single();
+        if (!ord) continue;
+
+        // Prefer product creator as the target seller user
+        const creatorId =
+          ord.order_items?.find((it: any) => it?.product_snapshot?.created_by)
+            ?.product_snapshot?.created_by || null;
+
+        let targetSellerUserId: string | null = creatorId;
+        if (!targetSellerUserId) {
+          const { data: owner } = await client
+            .from('organization_users')
+            .select('user_id, joined_at')
+            .eq('organization_id', sellerOrgId)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .single();
+          targetSellerUserId = owner?.user_id ?? null;
+        }
+
+        if (targetSellerUserId) {
+          const { data: sellerUser } = await client
+            .from('users')
+            .select('id, phone_number')
+            .eq('id', targetSellerUserId)
+            .not('phone_number', 'is', null)
+            .single();
+          if (sellerUser?.phone_number) {
+            const orderNumber = String(ord.order_number || ord.id);
+            await this.waTemplates.sendOrderUpdateIfPaired(
+              sellerUser.id,
+              String(sellerUser.phone_number),
+              orderNumber,
+              'paid',
+              undefined,
+              'en',
+            );
+          }
+        }
+      }
+    } catch (waErr) {
+      // do not fail webhook handling
+      // eslint-disable-next-line no-console
+      console.warn('WA notify seller on payment succeeded failed:', waErr);
+    }
+
+    // Clear the buyer's shopping cart after successful payment
+    try {
+      const { data: cart } = await client
+        .from('shopping_carts')
+        .select('id')
+        .eq('buyer_org_id', buyerOrgId)
+        .eq('buyer_user_id', buyerUserId)
+        .single();
+      if (cart?.id) {
+        await client.from('cart_items').delete().eq('cart_id', cart.id);
+        await client
+          .from('shopping_carts')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', cart.id);
+      }
+    } catch (e) {
+      // non-fatal
+      // eslint-disable-next-line no-console
+      console.warn('Failed to clear cart after payment:', e);
     }
   }
 

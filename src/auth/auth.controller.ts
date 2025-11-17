@@ -27,6 +27,8 @@ import {
   VerifyEmailResponseDto,
 } from './dto/auth-response.dto';
 import { Public } from './decorators/public.decorator';
+import { RequestOtpDto } from './dto/request-otp.dto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -209,5 +211,35 @@ export class AuthController {
     @Body(ValidationPipe) devSigninDto: DevSigninDto,
   ): Promise<AuthResponseDto> {
     return this.authService.devSignin(devSigninDto);
+  }
+
+  @Public()
+  @Post('otp/request')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Request login OTP via WhatsApp or Email',
+    description:
+      'Generates a 6-digit OTP for the given phone number and delivers it via WhatsApp (default) or email.',
+  })
+  @ApiBody({ type: RequestOtpDto })
+  async requestOtp(
+    @Body(ValidationPipe) dto: RequestOtpDto,
+  ): Promise<{ message: string }> {
+    return this.authService.requestOtp(dto);
+  }
+
+  @Public()
+  @Post('otp/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Verify OTP and sign in',
+    description:
+      'Verifies a 6-digit OTP for the given phone number and returns a signed-in session.',
+  })
+  @ApiBody({ type: VerifyOtpDto })
+  async verifyOtp(
+    @Body(ValidationPipe) dto: VerifyOtpDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.verifyOtp(dto);
   }
 }
