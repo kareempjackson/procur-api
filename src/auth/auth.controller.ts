@@ -20,7 +20,10 @@ import { AuthService } from './auth.service';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { DevSigninDto } from './dto/dev-signin.dto';
+import { CurrentUser } from './decorators/current-user.decorator';
+import { UserContext } from '../common/interfaces/jwt-payload.interface';
 import {
   AuthResponseDto,
   SignupResponseDto,
@@ -241,5 +244,29 @@ export class AuthController {
     @Body(ValidationPipe) dto: VerifyOtpDto,
   ): Promise<AuthResponseDto> {
     return this.authService.verifyOtp(dto);
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Change Password',
+    description:
+      'Change the password for the authenticated user by providing the current and new passwords.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Password changed successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Password updated successfully' },
+      },
+    },
+  })
+  async changePassword(
+    @CurrentUser() user: UserContext,
+    @Body(ValidationPipe) dto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.changePassword(user, dto);
   }
 }

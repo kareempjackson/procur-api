@@ -232,6 +232,25 @@ export class SupabaseService {
     return data as DatabaseUser;
   }
 
+  async updateUserPassword(
+    userId: string,
+    hashedPassword: string,
+  ): Promise<DatabaseUser> {
+    const { data, error } = await this.supabase
+      .from('users')
+      .update({ password: hashedPassword } as any)
+      .eq('id', userId)
+      .select()
+      .single();
+
+    if (error) {
+      this.logger.error('Error updating user password:', error);
+      throw error;
+    }
+
+    return data as DatabaseUser;
+  }
+
   // Organization operations
   async createOrganization(
     orgData: CreateOrganizationData,

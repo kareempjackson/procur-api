@@ -59,13 +59,87 @@ async function listTemplates(): Promise<GraphTemplate[]> {
   return items;
 }
 
+function sanitizeBodyText(text: string, tplName: string, lang: string): string {
+  const rawLines = text.split('\n');
+  const lines = rawLines.map((raw) => {
+    const t = raw.trim();
+    const starts = t.startsWith('{{');
+    const ends = t.endsWith('}}');
+    let adjusted = t;
+    if (starts) {
+      adjusted = `Note: ${adjusted}`;
+      console.warn(
+        `Adjusted leading param for ${tplName}/${lang}: "${t}" -> "${adjusted}"`,
+      );
+    }
+    if (ends) {
+      adjusted = `${adjusted}.`;
+      console.warn(
+        `Adjusted trailing param for ${tplName}/${lang}: "${t}" -> "${adjusted}"`,
+      );
+    }
+    return adjusted;
+  });
+  // Ensure the first non-empty line doesn't start with '{{'
+  const firstIdx = lines.findIndex((l) => l.trim().length > 0);
+  if (firstIdx >= 0 && lines[firstIdx].trim().startsWith('{{')) {
+    lines[firstIdx] = `Note: ${lines[firstIdx].trim()}`;
+    console.warn(
+      `Adjusted first line leading param for ${tplName}/${lang}: line ${firstIdx}`,
+    );
+  }
+  // Ensure the last non-empty line doesn't end with '}}'
+  let lastIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim().length > 0) {
+      lastIdx = i;
+      break;
+    }
+  }
+  if (lastIdx >= 0 && lines[lastIdx].trim().endsWith('}}')) {
+    lines[lastIdx] = `${lines[lastIdx].trim()}.`;
+    console.warn(
+      `Adjusted last line trailing param for ${tplName}/${lang}: line ${lastIdx}`,
+    );
+  }
+  const finalText = lines.join('\n');
+  console.log(`[TPL] ${tplName}/${lang} BODY:`, finalText);
+  return finalText;
+}
+
+function sanitizeComponents(
+  components: Component[],
+  tplName: string,
+  lang: string,
+): Component[] {
+  return components.map((c) => {
+    if (c.type === 'BODY' && typeof c.text === 'string') {
+      return { ...c, text: sanitizeBodyText(c.text, tplName, lang) };
+    }
+    return c;
+  });
+}
+
 async function createTemplate(input: {
   name: string;
   category: string;
   language: string;
   components: Component[];
 }) {
-  return axios.post(`${API}/message_templates`, input, {
+  const payload = {
+    ...input,
+    components: sanitizeComponents(
+      input.components,
+      input.name,
+      input.language,
+    ),
+  };
+  console.log('Creating template', {
+    name: payload.name,
+    language: payload.language,
+    category: payload.category,
+  });
+  return axios.post(`${API}/message_templates`, payload, {
     headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
   });
 }
@@ -96,12 +170,86 @@ async function ensureTemplates(specPath: string) {
         (x) => x.name === tpl.name && x.language === lang.code,
       );
       if (!found) {
-        await createTemplate({
-          name: tpl.name,
-          category: tpl.category,
-          language: lang.code,
-          components: lang.components,
-        });
+        // Create with retry/backoff for category transition errors (e.g., 2388025)
+        try {
+          await createTemplate({
+            name: tpl.name,
+            category: tpl.category,
+            language: lang.code,
+            components: lang.components,
+          });
+        } catch (e: any) {
+          const subcode =
+            e?.response?.data?.error?.error_subcode ||
+            e?.response?.data?.error_subcode;
+          const msg: string =
+            e?.response?.data?.error?.error_user_msg ||
+            e?.response?.data?.error?.message ||
+            '';
+          if (subcode === 2388025 || /category is invalid/i.test(msg)) {
+            // Wait briefly and retry once; if it still fails, fall back to MARKETING category
+            await sleep(60000);
+            try {
+              await createTemplate({
+                name: tpl.name,
+                category: tpl.category,
+                language: lang.code,
+                components: lang.components,
+              });
+            } catch {
+              await createTemplate({
+                name: tpl.name,
+                category: 'MARKETING',
+                language: lang.code,
+                components: lang.components,
+              });
+            }
+          } else if (
+            subcode === 2388023 ||
+            /language is being deleted/i.test(msg)
+          ) {
+            // Language variant still being deleted; retry then create a versioned name
+            await sleep(60000);
+            try {
+              await createTemplate({
+                name: tpl.name,
+                category: tpl.category,
+                language: lang.code,
+                components: lang.components,
+              });
+            } catch {
+              const versioned = `${tpl.name}_${lang.code}_v2`;
+              try {
+                await createTemplate({
+                  name: versioned,
+                  category: tpl.category,
+                  language: lang.code,
+                  components: lang.components,
+                });
+              } catch (e2: any) {
+                const subcode2 =
+                  e2?.response?.data?.error?.error_subcode ||
+                  e2?.response?.data?.error_subcode;
+                const msg2: string =
+                  e2?.response?.data?.error?.error_user_msg ||
+                  e2?.response?.data?.error?.message ||
+                  '';
+                if (subcode2 === 2388025 || /category is invalid/i.test(msg2)) {
+                  await createTemplate({
+                    name: versioned,
+                    category: 'MARKETING',
+                    language: lang.code,
+                    components: lang.components,
+                  });
+                } else {
+                  throw e2;
+                }
+              }
+            }
+          } else {
+            throw e;
+          }
+        }
         continue;
       }
       const same =
@@ -127,21 +275,170 @@ async function ensureTemplates(specPath: string) {
             (x) => x.name === tpl.name && x.language === lang.code,
           );
           const createName = still ? `${tpl.name}_v2` : tpl.name;
-          await createTemplate({
-            name: createName,
-            category: tpl.category,
-            language: lang.code,
-            components: lang.components,
-          });
+          // Attempt recreate with fallback to MARKETING on category transition error
+          try {
+            await createTemplate({
+              name: createName,
+              category: tpl.category,
+              language: lang.code,
+              components: lang.components,
+            });
+          } catch (e: any) {
+            const subcode =
+              e?.response?.data?.error?.error_subcode ||
+              e?.response?.data?.error_subcode;
+            const msg: string =
+              e?.response?.data?.error?.error_user_msg ||
+              e?.response?.data?.error?.message ||
+              '';
+            if (subcode === 2388025 || /category is invalid/i.test(msg)) {
+              await sleep(60000);
+              try {
+                await createTemplate({
+                  name: createName,
+                  category: tpl.category,
+                  language: lang.code,
+                  components: lang.components,
+                });
+              } catch {
+                await createTemplate({
+                  name: createName,
+                  category: 'MARKETING',
+                  language: lang.code,
+                  components: lang.components,
+                });
+              }
+            } else if (
+              subcode === 2388023 ||
+              /language is being deleted/i.test(msg)
+            ) {
+              await sleep(60000);
+              try {
+                await createTemplate({
+                  name: createName,
+                  category: tpl.category,
+                  language: lang.code,
+                  components: lang.components,
+                });
+              } catch {
+                const createName2 = `${createName}_${lang.code}_v2`;
+                try {
+                  await createTemplate({
+                    name: createName2,
+                    category: tpl.category,
+                    language: lang.code,
+                    components: lang.components,
+                  });
+                } catch (e2: any) {
+                  const subcode2 =
+                    e2?.response?.data?.error?.error_subcode ||
+                    e2?.response?.data?.error_subcode;
+                  const msg2: string =
+                    e2?.response?.data?.error?.error_user_msg ||
+                    e2?.response?.data?.error?.message ||
+                    '';
+                  if (
+                    subcode2 === 2388025 ||
+                    /category is invalid/i.test(msg2)
+                  ) {
+                    await createTemplate({
+                      name: createName2,
+                      category: 'MARKETING',
+                      language: lang.code,
+                      components: lang.components,
+                    });
+                  } else {
+                    throw e2;
+                  }
+                }
+              }
+            } else {
+              throw e;
+            }
+          }
         } else {
           // Category same, safe to replace by delete/recreate
           await deleteTemplate(tpl.name, lang.code);
-          await createTemplate({
-            name: tpl.name,
-            category: tpl.category,
-            language: lang.code,
-            components: lang.components,
-          });
+          try {
+            await createTemplate({
+              name: tpl.name,
+              category: tpl.category,
+              language: lang.code,
+              components: lang.components,
+            });
+          } catch (e: any) {
+            const subcode =
+              e?.response?.data?.error?.error_subcode ||
+              e?.response?.data?.error_subcode;
+            const msg: string =
+              e?.response?.data?.error?.error_user_msg ||
+              e?.response?.data?.error?.message ||
+              '';
+            if (subcode === 2388025 || /category is invalid/i.test(msg)) {
+              await sleep(60000);
+              try {
+                await createTemplate({
+                  name: tpl.name,
+                  category: tpl.category,
+                  language: lang.code,
+                  components: lang.components,
+                });
+              } catch {
+                await createTemplate({
+                  name: tpl.name,
+                  category: 'MARKETING',
+                  language: lang.code,
+                  components: lang.components,
+                });
+              }
+            } else if (
+              subcode === 2388023 ||
+              /language is being deleted/i.test(msg)
+            ) {
+              await sleep(60000);
+              try {
+                await createTemplate({
+                  name: tpl.name,
+                  category: tpl.category,
+                  language: lang.code,
+                  components: lang.components,
+                });
+              } catch {
+                const versioned = `${tpl.name}_${lang.code}_v2`;
+                try {
+                  await createTemplate({
+                    name: versioned,
+                    category: tpl.category,
+                    language: lang.code,
+                    components: lang.components,
+                  });
+                } catch (e2: any) {
+                  const subcode2 =
+                    e2?.response?.data?.error?.error_subcode ||
+                    e2?.response?.data?.error_subcode;
+                  const msg2: string =
+                    e2?.response?.data?.error?.error_user_msg ||
+                    e2?.response?.data?.error?.message ||
+                    '';
+                  if (
+                    subcode2 === 2388025 ||
+                    /category is invalid/i.test(msg2)
+                  ) {
+                    await createTemplate({
+                      name: versioned,
+                      category: 'MARKETING',
+                      language: lang.code,
+                      components: lang.components,
+                    });
+                  } else {
+                    throw e2;
+                  }
+                }
+              }
+            } else {
+              throw e;
+            }
+          }
         }
       }
     }

@@ -35,6 +35,8 @@ async function bootstrap() {
       'http://localhost:3001',
       'http://localhost:3000',
       'https://procur-ui-eight.vercel.app',
+      'http://localhost:3002',
+      'https://procur-admin-ui.vercel.app/',
     ],
     credentials: true,
   });
@@ -43,6 +45,9 @@ async function bootstrap() {
   const apiPrefix = configService.get<string>('app.apiPrefix');
   const apiVersion = configService.get<string>('app.apiVersion');
   app.setGlobalPrefix(`${apiPrefix}/${apiVersion}`);
+  // Also attach raw parser to the prefixed webhook path to satisfy Stripe signature verification
+  const prefixedWebhook = `/${apiPrefix}/${apiVersion}/payments/stripe/webhook`;
+  app.use(prefixedWebhook, raw({ type: '*/*' }));
 
   // Swagger documentation
   const config = new DocumentBuilder()

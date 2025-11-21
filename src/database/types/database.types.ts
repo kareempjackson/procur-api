@@ -40,6 +40,8 @@ export interface DatabaseOrganization {
   business_registration_number?: string;
   tax_id?: string;
   farmers_id?: string;
+  farmers_id_verified?: boolean;
+  farm_verified?: boolean;
   payment_details?: any;
   logo_url?: string;
   government_level?: string;

@@ -1592,6 +1592,30 @@ export class WhatsappService {
       ]);
       return;
     }
+    // One-tap accept/reject from CTA buttons: oa_accept_<orderId> / oa_reject_<orderId>
+    if (choice.startsWith('oa_accept_') || choice.startsWith('oa_reject_')) {
+      const parts = choice.split('_');
+      const action = parts[1]; // accept or reject
+      const orderId = parts.slice(2).join('_');
+      if (!orderId) {
+        await this.sendText(to, 'Missing order id. Please try again.');
+        return;
+      }
+      this.sessions.set(to, { data: { order_id: orderId } });
+      if (action === 'accept') {
+        this.sessions.set(to, { flow: 'order_accept_eta' });
+        await this.sendText(
+          to,
+          'Estimated delivery date? (YYYY-MM-DD or write a date range)',
+        );
+        return;
+      }
+      if (action === 'reject') {
+        this.sessions.set(to, { flow: 'order_reject_reason' });
+        await this.sendText(to, 'Reason for rejection?');
+        return;
+      }
+    }
     if (choice.startsWith('faq_')) {
       const s2 = this.sessions.get(to);
       if (!s2.user?.orgId) {

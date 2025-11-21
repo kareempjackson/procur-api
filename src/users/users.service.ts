@@ -97,9 +97,8 @@ export class UsersService {
       organizationId: user.organizationId,
       organizationRole: user.organizationRole,
       permissions: user.permissions,
-      phone: (dbUser as any)?.phone ?? null,
-      firstName: (dbUser as any)?.first_name ?? null,
-      lastName: (dbUser as any)?.last_name ?? null,
+      phone_number: (dbUser as any)?.phone_number ?? null,
+      fullname: (dbUser as any)?.fullname ?? null,
       avatarUrl: profileAvatarUrl,
       organization,
     };

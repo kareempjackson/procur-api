@@ -3,12 +3,14 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TemplateService } from '../whatsapp/templates/template.service';
 import { EmailService } from '../email/email.service';
 import { SupabaseService } from '../database/supabase.service';
 import { ConversationsService } from '../messages/services/conversations.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   // Cart DTOs
   AddToCartDto,
@@ -75,12 +77,14 @@ import {
 
 @Injectable()
 export class BuyersService {
+  private readonly logger = new Logger(BuyersService.name);
   constructor(
     private readonly supabase: SupabaseService,
     private readonly conversationsService: ConversationsService,
     private readonly waTemplates: TemplateService,
     private readonly emailService: EmailService,
     private readonly config: ConfigService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ==================== MARKETPLACE METHODS ====================
@@ -1485,6 +1489,9 @@ export class BuyersService {
     buyerUserId: string,
     createDto: CreateOrderDto,
   ): Promise<BuyerOrderResponseDto> {
+    this.logger.log(
+      `createOrder start buyer_org=${buyerOrgId} buyer_user=${buyerUserId} items=${createDto.items?.length || 0}`,
+    );
     // Validate shipping address
     const { data: shippingAddress } = await this.supabase
       .getClient()
@@ -1521,6 +1528,9 @@ export class BuyersService {
     const sellerGroups = new Map<string, any[]>();
 
     for (const item of createDto.items) {
+      this.logger.debug(
+        `Validating product ${item.product_id} quantity=${item.quantity}`,
+      );
       const { data: product } = await this.supabase
         .getClient()
         .from('products')
@@ -1572,6 +1582,9 @@ export class BuyersService {
     const createdOrders: any[] = [];
 
     for (const [sellerOrgId, items] of sellerGroups) {
+      this.logger.log(
+        `Creating order for seller ${sellerOrgId} with ${items.length} item(s)`,
+      );
       const orderSubtotal = items.reduce(
         (sum, item) => sum + item.total_price,
         0,
@@ -1614,6 +1627,9 @@ export class BuyersService {
 
       // Create order items
       for (const item of items) {
+        this.logger.debug(
+          `Inserting order_item product=${item.product_id} qty=${item.quantity} unit=${item.unit_price}`,
+        );
         const { error: itemError } = await this.supabase
           .getClient()
           .from('order_items')
@@ -1634,6 +1650,9 @@ export class BuyersService {
           );
 
         // Update product stock
+        this.logger.debug(
+          `Updating stock for product ${item.product_id} -${item.quantity}`,
+        );
         await this.supabase
           .getClient()
           .from('products')
@@ -1645,6 +1664,7 @@ export class BuyersService {
       }
 
       // Create order timeline entry
+      this.logger.debug(`Creating order timeline entry for order ${order.id}`);
       await this.supabase
         .getClient()
         .from('order_timeline')
@@ -1658,6 +1678,7 @@ export class BuyersService {
 
       // Auto-create conversation for this order
       try {
+        this.logger.debug(`Auto-creating conversation for order ${order.id}`);
         await this.conversationsService.createOrGetConversation({
           type: 'contextual',
           contextType: 'order',
@@ -1670,6 +1691,44 @@ export class BuyersService {
       } catch (convError) {
         // Log but don't fail the order creation
         console.error('Failed to create conversation for order:', convError);
+      }
+
+      // Emit in-app notification asking seller to accept the order
+      try {
+        const client = this.supabase.getClient();
+        const { data: sellerUsers } = await client
+          .from('organization_users')
+          .select('user_id')
+          .eq('organization_id', sellerOrgId);
+        const recipients = (sellerUsers || []).map((r: any) => r.user_id);
+        if (recipients.length) {
+          this.logger.log(
+            `Emitting order_created notification to ${recipients.length} user(s) for seller_org=${sellerOrgId}`,
+          );
+          await this.notifications.emitEvent({
+            eventType: 'order_created',
+            organizationId: sellerOrgId,
+            payload: {
+              title: `New order received`,
+              body: `You have a new order ${orderNumber}. Review the order details, accept the order, then prepare and pack the items for shipment.`,
+              order_id: order.id,
+              order_number: orderNumber,
+              recipients,
+              category: 'orders',
+              priority: 'high',
+              cta_url:
+                (this.config.get<string>('frontend.url') ||
+                  process.env.FRONTEND_URL ||
+                  'http://localhost:3001') + `/seller/orders/${order.id}`,
+            },
+          });
+        }
+      } catch (notifyErr) {
+        this.logger.error(
+          `Failed to emit order_created notification: ${String(
+            (notifyErr as any)?.message || notifyErr,
+          )}`,
+        );
       }
 
       // Notify the specific seller via WhatsApp if they are paired (signed up using WhatsApp)
@@ -1727,6 +1786,11 @@ export class BuyersService {
               currency,
               manageUrl,
               'en',
+            );
+            // Send interactive Accept/Reject buttons
+            await this.waTemplates.sendOrderAcceptButtons(
+              String(sellerUser.phone_number),
+              String(order.id),
             );
           }
         }
@@ -1800,12 +1864,48 @@ Manage this order: ${link}`;
     }
 
     // Clear cart after successful order creation
+    this.logger.log(
+      `Clearing cart for buyer_org=${buyerOrgId} buyer_user=${buyerUserId}`,
+    );
     await this.clearCart(buyerOrgId, buyerUserId);
 
     // Return the first order (or combine if needed)
     const firstOrder = createdOrders[0];
     const firstOrderItems = sellerGroups.get(firstOrder.seller_org_id) || [];
 
+    // Email receipt to buyer (non-card path)
+    try {
+      const { data: buyer } = await this.supabase
+        .getClient()
+        .from('users')
+        .select('email, fullname')
+        .eq('id', buyerUserId)
+        .single();
+
+      if (buyer?.email) {
+        const frontendUrl =
+          this.config.get<string>('frontend.url') ||
+          process.env.FRONTEND_URL ||
+          'http://localhost:3001';
+        const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
+        await this.emailService.sendBasicEmail(
+          buyer.email,
+          'Your order receipt',
+          `<p>Thanks for your order!</p><p>You can view your order receipt here: <a href="${link}">${link}</a></p>`,
+          `Thanks for your order! View your receipt: ${link}`,
+        );
+      }
+    } catch (emailErr) {
+      this.logger.warn(
+        `Buyer receipt email failed for order ${firstOrder?.id}: ${String(
+          (emailErr as any)?.message || emailErr,
+        )}`,
+      );
+    }
+
+    this.logger.log(
+      `createOrder complete. first_order=${firstOrder?.id} items=${firstOrderItems?.length || 0}`,
+    );
     return this.transformOrderToResponse(firstOrder, firstOrderItems);
   }
 

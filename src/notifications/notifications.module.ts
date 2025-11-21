@@ -12,6 +12,7 @@ import { EmailProvider } from './providers/email.provider';
 import { PushProvider } from './providers/push.provider';
 import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
+import { startNotificationWorker } from './queue/notification.worker';
 
 @Global()
 @Module({
@@ -53,6 +54,22 @@ import { Queue } from 'bullmq';
       inject: ['REDIS'],
       useFactory: (redis: IORedis) => {
         return new Queue('notification-delivery', { connection: redis });
+      },
+    },
+    {
+      provide: 'NOTIFICATIONS_WORKER',
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const redisUrl = config.get<string>('redis.url') || '';
+        const supabaseUrl = config.get<string>('database.supabaseUrl') || '';
+        const supabaseServiceKey =
+          config.get<string>('database.supabaseServiceRoleKey') || '';
+        // Start a worker in the API process; safe to start multiple (BullMQ handles concurrency)
+        return startNotificationWorker({
+          redisUrl,
+          supabaseUrl,
+          supabaseServiceKey,
+        });
       },
     },
   ],

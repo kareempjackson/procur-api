@@ -26,6 +26,7 @@ import { AccountType } from '../common/enums/account-type.enum';
 import { BusinessType } from '../common/enums/business-types.enum';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { SendService as WaSendService } from '../whatsapp/send/send.service';
 import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
 
@@ -245,6 +246,36 @@ export class AuthService {
       },
     };
   }
+  async changePassword(
+    userCtx: { id: string },
+    dto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    const { currentPassword, newPassword } = dto;
+    if (!currentPassword || !newPassword) {
+      throw new BadRequestException('Current and new password are required');
+    }
+    if (newPassword.length < 8) {
+      throw new BadRequestException(
+        'New password must be at least 8 characters',
+      );
+    }
+    const user = await this.supabaseService.findUserById(userCtx.id);
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+    const isPasswordValid = await bcrypt.compare(
+      currentPassword,
+      user.password,
+    );
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+    await this.supabaseService.updateUserPassword(user.id, hashedPassword);
+    this.logger.log(`Password updated for user ${user.email}`);
+    return { message: 'Password updated successfully' };
+  }
   async signin(signinDto: SigninDto): Promise<AuthResponseDto> {
     const { email, password } = signinDto;
 
@@ -260,7 +291,23 @@ export class AuthService {
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    let isPasswordValid = false;
+
+    const nodeEnv = this.configService.get<string>('nodeEnv') || 'development';
+
+    // Dev-only override for Kareem's super admin account to unblock local admin access
+    if (
+      nodeEnv !== 'production' &&
+      email === 'kareem+admin@ghostsavvy.com' &&
+      password === '123456789'
+    ) {
+      isPasswordValid = true;
+      this.logger.log(
+        `Dev override sign-in for super admin ${email} in ${nodeEnv} mode`,
+      );
+    } else {
+      isPasswordValid = await bcrypt.compare(password, user.password);
+    }
     if (!isPasswordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }

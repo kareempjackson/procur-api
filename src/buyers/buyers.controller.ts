@@ -25,6 +25,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { BuyersService } from './buyers.service';
+import { Logger } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
@@ -100,6 +101,7 @@ import {
 @UseGuards(JwtAuthGuard, EmailVerifiedGuard, AccountTypeGuard, PermissionsGuard)
 @AccountTypes(AccountType.BUYER)
 export class BuyersController {
+  private readonly logger = new Logger(BuyersController.name);
   constructor(private readonly buyersService: BuyersService) {}
 
   // ==================== MARKETPLACE ENDPOINTS ====================
@@ -745,6 +747,7 @@ export class BuyersController {
   async getAddresses(
     @CurrentUser() user: UserContext,
   ): Promise<AddressResponseDto[]> {
+    this.logger.log(`GET /buyers/addresses buyer_org=${user.organizationId}`);
     return this.buyersService.getAddresses(user.organizationId!);
   }
 
@@ -765,6 +768,9 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Body() createDto: CreateAddressDto,
   ): Promise<AddressResponseDto> {
+    this.logger.log(
+      `POST /buyers/addresses buyer_org=${user.organizationId} city=${createDto?.city} street_present=${Boolean(createDto?.street_address)}`,
+    );
     return this.buyersService.createAddress(user.organizationId!, createDto);
   }
 

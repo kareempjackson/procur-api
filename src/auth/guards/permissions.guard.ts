@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { UserContext } from '../../common/interfaces/jwt-payload.interface';
-
+import { UserRole } from '../../common/enums/user-role.enum';
 @Injectable()
 export class PermissionsGuard implements CanActivate {
   private readonly logger = new Logger(PermissionsGuard.name);
@@ -44,6 +44,11 @@ export class PermissionsGuard implements CanActivate {
 
     if (!user) {
       throw new ForbiddenException('User not authenticated');
+    }
+
+    // Platform super admins always have full access to all permissions
+    if (user.role === UserRole.SUPER_ADMIN) {
+      return true;
     }
 
     // Organization admins have full access within their org by default

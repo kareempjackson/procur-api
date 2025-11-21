@@ -6,6 +6,15 @@ import { SendService } from '../send/send.service';
 @Injectable()
 export class TemplateService {
   private readonly logger = new Logger(TemplateService.name);
+  // Versioned template names with optional env overrides for future rotations
+  private readonly TPL_NEW_ORDER =
+    process.env.WA_TEMPLATE_NEW_ORDER || 'new_order_to_seller_v1';
+  private readonly TPL_UPDATE_WITH_TRACKING =
+    process.env.WA_TEMPLATE_UPDATE_WITH_TRACKING ||
+    'order_update_with_tracking_v1';
+  private readonly TPL_UPDATE_NO_TRACKING =
+    process.env.WA_TEMPLATE_UPDATE_NO_TRACKING || 'order_update_no_tracking_v1';
+  private readonly TPL_OTP = process.env.WA_TEMPLATE_OTP || 'otp_verify';
   constructor(
     private readonly send: SendService,
     private readonly redis: IORedis,
@@ -32,31 +41,24 @@ export class TemplateService {
     manageUrl: string,
     locale: string,
   ) {
-    const outside = await this.isOutside24h(to);
-    if (outside) {
-      await this.sendTemplate(
-        to,
-        'new_order_to_seller',
-        [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: orderNumber },
-              { type: 'text', text: buyerName },
-              { type: 'text', text: String(totalAmount.toFixed(2)) },
-              { type: 'text', text: currency },
-              { type: 'text', text: manageUrl },
-            ],
-          },
-        ],
-        this.getTemplateLang(locale),
-      );
-    } else {
-      const text = `New order ${orderNumber} from ${buyerName}. Total: ${currency} ${totalAmount.toFixed(
-        2,
-      )}\nManage: ${manageUrl}`;
-      await this.send.text(to, text);
-    }
+    // Templates are allowed at any time in WhatsApp Cloud; always use template
+    await this.sendTemplate(
+      to,
+      this.TPL_NEW_ORDER,
+      [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: orderNumber },
+            { type: 'text', text: buyerName },
+            { type: 'text', text: String(totalAmount.toFixed(2)) },
+            { type: 'text', text: currency },
+            { type: 'text', text: manageUrl },
+          ],
+        },
+      ],
+      this.getTemplateLang(locale),
+    );
   }
 
   /**
@@ -74,11 +76,24 @@ export class TemplateService {
     locale: string,
   ) {
     const stored = await this.redis.get(`wa:fp:${userId}`);
-    if (!stored) return;
+    if (!stored) {
+      this.logger.warn(
+        `WA pairing missing for user ${userId}; skipping WhatsApp`,
+      );
+      return;
+    }
     const fp = this.fpForPhone(phoneE164);
-    if (stored !== fp) return;
+    if (stored !== fp) {
+      this.logger.warn(
+        `WA fingerprint mismatch for user ${userId}; ensure E.164 has + and matches stored pairing`,
+      );
+      return;
+    }
 
     const to = phoneE164.replace(/^\+/, '');
+    this.logger.log(
+      `Sending WA new_order_to_seller to user=${userId} to=${to} order=${orderNumber}`,
+    );
     await this.sendNewOrderToSeller(
       to,
       orderNumber,
@@ -99,7 +114,7 @@ export class TemplateService {
     if (outside) {
       await this.sendTemplate(
         to,
-        'otp_verify',
+        this.TPL_OTP,
         [{ type: 'body', parameters: [{ type: 'text', text: otp }] }],
         this.getTemplateLang(locale),
       );
@@ -115,12 +130,11 @@ export class TemplateService {
     tracking: string | undefined,
     locale: string,
   ) {
-    const outside = await this.isOutside24h(to);
-    if (!outside) return;
+    // Templates are allowed at any time in WhatsApp Cloud; do not suppress
     if (tracking) {
       await this.sendTemplate(
         to,
-        'order_update_with_tracking',
+        this.TPL_UPDATE_WITH_TRACKING,
         [
           {
             type: 'body',
@@ -136,7 +150,7 @@ export class TemplateService {
     } else {
       await this.sendTemplate(
         to,
-        'order_update_no_tracking',
+        this.TPL_UPDATE_NO_TRACKING,
         [
           {
             type: 'body',
@@ -164,10 +178,23 @@ export class TemplateService {
     locale: string,
   ) {
     const stored = await this.redis.get(`wa:fp:${userId}`);
-    if (!stored) return;
+    if (!stored) {
+      this.logger.warn(
+        `WA pairing missing for user ${userId}; skipping order update`,
+      );
+      return;
+    }
     const fp = this.fpForPhone(phoneE164);
-    if (stored !== fp) return;
+    if (stored !== fp) {
+      this.logger.warn(
+        `WA fingerprint mismatch for user ${userId}; ensure E.164 has + and matches stored pairing`,
+      );
+      return;
+    }
     const to = phoneE164.replace(/^\+/, '');
+    this.logger.log(
+      `Sending WA order_update to user=${userId} to=${to} order=${orderNumber} status=${status}`,
+    );
     await this.sendOrderUpdate(to, orderNumber, status, tracking, locale);
   }
 
@@ -194,6 +221,38 @@ export class TemplateService {
         },
       },
       meta: { template: name, language: languageCode, outside24h: true },
+    });
+  }
+
+  /**
+   * Send Accept / Reject CTA buttons for a specific order.
+   * Button ids: oa_accept_<orderId> / oa_reject_<orderId>
+   */
+  async sendOrderAcceptButtons(to: string, orderId: string) {
+    const dest = to.replace(/^\+/, '');
+    await this.send['queue'].enqueueSendMessage({
+      payload: {
+        messaging_product: 'whatsapp',
+        to: dest,
+        type: 'interactive',
+        interactive: {
+          type: 'button',
+          body: { text: `Please accept or reject order ${orderId}.` },
+          action: {
+            buttons: [
+              {
+                type: 'reply',
+                reply: { id: `oa_accept_${orderId}`, title: 'Accept' },
+              },
+              {
+                type: 'reply',
+                reply: { id: `oa_reject_${orderId}`, title: 'Reject' },
+              },
+            ],
+          },
+        },
+      },
+      meta: { kind: 'buttons', purpose: 'order_accept_reject' },
     });
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
 import Stripe from 'stripe';
 import { EmailService } from '../email/email.service';
@@ -11,6 +11,7 @@ export class PaymentsService {
   private stripe: Stripe;
   private currency: string;
   private webhookSecret: string | undefined;
+  private readonly logger = new Logger(PaymentsService.name);
 
   constructor(
     private readonly supabase: SupabaseService,
@@ -26,6 +27,28 @@ export class PaymentsService {
     this.stripe = new Stripe(apiKey, { apiVersion: '2024-06-20' as any });
     this.currency = process.env.STRIPE_CURRENCY || 'usd';
     this.webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  }
+
+  // ============== IDEMPOTENCY HELPERS ==============
+  private async hasProcessedEvent(eventId: string): Promise<boolean> {
+    this.logger.debug(`Checking idempotency for event ${eventId}`);
+    const client = this.supabase.getClient();
+    const { data } = await client
+      .from('stripe_events_processed')
+      .select('id')
+      .eq('id', eventId)
+      .single();
+    return Boolean(data);
+  }
+
+  private async recordProcessedEvent(event: Stripe.Event): Promise<void> {
+    this.logger.debug(`Recording processed event ${event.id} (${event.type})`);
+    const client = this.supabase.getClient();
+    await client.from('stripe_events_processed').insert({
+      id: event.id,
+      type: event.type,
+      payload: event as any,
+    });
   }
 
   async createCartPaymentIntent(
@@ -165,6 +188,105 @@ export class PaymentsService {
         });
       }
 
+      // WhatsApp notify seller immediately (new order + accept/reject) on card path
+      try {
+        const frontendUrl =
+          this.config.get<string>('frontend.url') ||
+          process.env.FRONTEND_URL ||
+          'http://localhost:3001';
+        const manageUrl = `${frontendUrl}/seller/orders/${order.id}`;
+        const orderNum = String(order.order_number || order.id);
+        const currency = (this.currency || 'usd').toUpperCase();
+        const buyerName =
+          (shippingAddressSnapshot as any)?.contact_name ||
+          (shippingAddressSnapshot as any)?.name ||
+          'Buyer';
+
+        // Prefer product creator from any order item snapshot
+        const { data: anyItem } = await client
+          .from('order_items')
+          .select('product_snapshot')
+          .eq('order_id', order.id)
+          .limit(1)
+          .single();
+        let targetSellerUserId: string | null =
+          anyItem?.product_snapshot?.created_by || null;
+
+        if (!targetSellerUserId) {
+          const { data: owner } = await client
+            .from('organization_users')
+            .select('user_id, joined_at')
+            .eq('organization_id', sellerOrgId)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .single();
+          targetSellerUserId = owner?.user_id ?? null;
+        }
+
+        let notifyPhone: string | null = null;
+        if (targetSellerUserId) {
+          const { data: sellerUser } = await client
+            .from('users')
+            .select('id, phone_number')
+            .eq('id', targetSellerUserId)
+            .not('phone_number', 'is', null)
+            .single();
+          if (sellerUser?.phone_number) {
+            notifyPhone = String(sellerUser.phone_number);
+            // Send template (new order)
+            await this.waTemplates.sendNewOrderToSeller(
+              notifyPhone.replace(/^\+/, ''),
+              orderNum,
+              buyerName,
+              Number(total.toFixed(2)),
+              currency,
+              manageUrl,
+              'en',
+            );
+            // Send Accept/Reject buttons
+            await this.waTemplates.sendOrderAcceptButtons(
+              notifyPhone,
+              String(order.id),
+            );
+          }
+        }
+
+        if (!notifyPhone) {
+          // Try organization phone as last resort
+          const { data: org } = await client
+            .from('organizations')
+            .select('phone_number')
+            .eq('id', sellerOrgId)
+            .single();
+          if (org?.phone_number) {
+            const orgPhone = String(org.phone_number);
+            await this.waTemplates.sendNewOrderToSeller(
+              orgPhone.replace(/^\+/, ''),
+              orderNum,
+              buyerName,
+              Number(total.toFixed(2)),
+              currency,
+              manageUrl,
+              'en',
+            );
+            await this.waTemplates.sendOrderAcceptButtons(
+              orgPhone,
+              String(order.id),
+            );
+          } else {
+            this.logger.warn(
+              `No seller phone found for seller_org=${sellerOrgId}; skipping WA for order ${order.id}`,
+            );
+          }
+        }
+      } catch (waErr) {
+        this.logger.warn(
+          `Card path WA notify seller (new order) failed for order ${order.id}: ${String(
+            (waErr as any)?.message || waErr,
+          )}`,
+        );
+      }
+
       const cents = Math.round(total * 100);
       splits[sellerOrgId] = (splits[sellerOrgId] || 0) + cents;
       totalCents += cents;
@@ -204,16 +326,28 @@ export class PaymentsService {
       signature,
       this.webhookSecret,
     );
+    this.logger.log(`Stripe webhook received: ${event.type} (${event.id})`);
+
+    // Idempotency: if we've already processed this event, ACK 200 with no-op
+    if (await this.hasProcessedEvent(event.id)) {
+      this.logger.warn(`Duplicate event ${event.id}, skipping`);
+      return;
+    }
 
     if (event.type === 'payment_intent.succeeded') {
       const pi = event.data.object as Stripe.PaymentIntent;
+      this.logger.log(`Handling payment_intent.succeeded for PI ${pi.id}`);
       await this.onPaymentSucceeded(pi);
     }
 
     if (event.type === 'payment_intent.payment_failed') {
       const pi = event.data.object as Stripe.PaymentIntent;
+      this.logger.log(`Handling payment_intent.payment_failed for PI ${pi.id}`);
       await this.onPaymentFailed(pi);
     }
+
+    // Record event as processed
+    await this.recordProcessedEvent(event);
   }
 
   private async onPaymentSucceeded(pi: Stripe.PaymentIntent) {
@@ -236,10 +370,85 @@ export class PaymentsService {
           paid_at: new Date().toISOString(),
         })
         .in('id', orderIds);
+
+      // Decrement product stock for all items in these paid orders
+      try {
+        this.logger.log(
+          `Updating product stock levels for paid orders: ${orderIds.join(', ')}`,
+        );
+
+        const { data: orderItems, error: orderItemsError } = await client
+          .from('order_items')
+          .select('product_id, quantity')
+          .in('order_id', orderIds);
+
+        if (orderItemsError) {
+          this.logger.error(
+            `Failed to load order_items for stock update: ${orderItemsError.message}`,
+          );
+        } else if (orderItems && orderItems.length > 0) {
+          // Aggregate quantity per product in case there are multiple items
+          const productTotals = new Map<string, number>();
+
+          for (const item of orderItems as any[]) {
+            const productId = item.product_id as string | null;
+            const qty = Number(item.quantity || 0);
+            if (!productId || qty <= 0) continue;
+            productTotals.set(
+              productId,
+              (productTotals.get(productId) || 0) + qty,
+            );
+          }
+
+          for (const [productId, totalQty] of productTotals.entries()) {
+            const { data: product, error: productError } = await client
+              .from('products')
+              .select('stock_quantity')
+              .eq('id', productId)
+              .single();
+
+            if (productError) {
+              this.logger.error(
+                `Failed to load product ${productId} for stock update: ${productError.message}`,
+              );
+              continue;
+            }
+
+            const currentStock = Number(product?.stock_quantity || 0);
+            const newStock = Math.max(0, currentStock - Number(totalQty || 0));
+
+            this.logger.debug(
+              `Updating stock for product ${productId}: ${currentStock} -> ${newStock}`,
+            );
+
+            const { error: updateError } = await client
+              .from('products')
+              .update({ stock_quantity: newStock })
+              .eq('id', productId);
+
+            if (updateError) {
+              this.logger.error(
+                `Failed to update stock for product ${productId}: ${updateError.message}`,
+              );
+            }
+          }
+        }
+      } catch (stockErr) {
+        this.logger.error(
+          `Unexpected error while updating product stock for paid orders: ${String(
+            (stockErr as any)?.message || stockErr,
+          )}`,
+        );
+      }
     }
 
     // Create transactions and credit balances per seller
     for (const [sellerOrgId, amountCents] of Object.entries(splits || {})) {
+      this.logger.log(
+        `Creating transaction for seller ${sellerOrgId}: $${(
+          Number(amountCents) / 100
+        ).toFixed(2)}`,
+      );
       await client.from('transactions').insert({
         transaction_number: `TX-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
         seller_org_id: sellerOrgId,
@@ -281,8 +490,11 @@ export class PaymentsService {
       }
     }
 
-    // Notify buyer via email
+    // Notify buyer via email (card path receipt)
     if (buyerUserId) {
+      this.logger.log(
+        `Sending order confirmation email to buyer ${buyerUserId}`,
+      );
       const { data: buyer } = await client
         .from('users')
         .select('email, fullname')
@@ -294,34 +506,68 @@ export class PaymentsService {
         const link = `${frontendUrl}/buyer/order-confirmation/${firstOrderId}`;
         await this.emailService.sendBasicEmail(
           buyer.email,
-          'Your order has been placed',
-          `<p>Thanks for your order!</p><p>You can view your order here: <a href="${link}">${link}</a></p>`,
-          `Thanks for your order! View: ${link}`,
+          'Your order receipt',
+          `<p>Thanks for your order!</p><p>You can view your order receipt here: <a href="${link}">${link}</a></p>`,
+          `Thanks for your order! View your receipt: ${link}`,
         );
       }
     }
 
-    // Notify sellers (basic notification event)
+    // Notify sellers (basic notification event, one per seller org)
     const sellerOrgIds = Object.keys(splits || {});
     if (sellerOrgIds.length) {
-      const { data: sellerUsers } = await client
-        .from('organization_users')
-        .select('user_id')
-        .in('organization_id', sellerOrgIds);
-      const recipients = (sellerUsers || []).map((r: any) => r.user_id);
-      if (recipients.length) {
-        await this.notifications.emitEvent({
-          eventType: 'order_paid',
-          organizationId: buyerOrgId,
-          payload: {
-            title: 'New paid order',
-            body: 'An order has been paid and is ready to fulfill.',
-            order_ids: orderIds,
-            recipients,
-            category: 'orders',
-            priority: 'high',
-          },
-        });
+      try {
+        const frontendUrl =
+          this.config.get<string>('frontend.url') ||
+          process.env.FRONTEND_URL ||
+          'http://localhost:3001';
+
+        for (const sellerOrgId of sellerOrgIds) {
+          // Find users for this specific seller organization
+          const { data: sellerUsers } = await client
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', sellerOrgId);
+          const recipients = (sellerUsers || []).map((r: any) => r.user_id);
+          if (!recipients.length) continue;
+
+          // Find the order for this seller among the paid orderIds
+          const { data: ord } = await client
+            .from('orders')
+            .select('id')
+            .in('id', orderIds)
+            .eq('seller_org_id', sellerOrgId)
+            .limit(1)
+            .single();
+
+          const sellerOrderId = ord?.id as string | undefined;
+
+          this.logger.log(
+            `Emitting order_paid notification event for seller_org=${sellerOrgId} order=${sellerOrderId}`,
+          );
+
+          await this.notifications.emitEvent({
+            eventType: 'order_paid',
+            organizationId: sellerOrgId,
+            payload: {
+              title: 'New paid order',
+              body: 'An order has been paid and is ready to fulfill. Review the order, pack the items, add tracking details, and mark it as shipped.',
+              order_ids: sellerOrderId ? [sellerOrderId] : [],
+              recipients,
+              category: 'orders',
+              priority: 'high',
+              cta_url: sellerOrderId
+                ? `${frontendUrl}/seller/orders/${sellerOrderId}`
+                : `${frontendUrl}/seller/orders`,
+            },
+          });
+        }
+      } catch (notifyErr) {
+        this.logger.error(
+          `Notifications emitEvent failed; continuing without blocking: ${String(
+            (notifyErr as any)?.message || notifyErr,
+          )}`,
+        );
       }
     }
 
@@ -371,6 +617,9 @@ export class PaymentsService {
             .single();
           if (sellerUser?.phone_number) {
             const orderNumber = String(ord.order_number || ord.id);
+            this.logger.log(
+              `Sending WA paid update to seller user ${sellerUser.id} for order ${orderNumber}`,
+            );
             await this.waTemplates.sendOrderUpdateIfPaired(
               sellerUser.id,
               String(sellerUser.phone_number),
@@ -390,6 +639,9 @@ export class PaymentsService {
 
     // Clear the buyer's shopping cart after successful payment
     try {
+      this.logger.log(
+        `Clearing cart for buyer_org_id=${buyerOrgId}, buyer_user_id=${buyerUserId}`,
+      );
       const { data: cart } = await client
         .from('shopping_carts')
         .select('id')
@@ -402,6 +654,7 @@ export class PaymentsService {
           .from('shopping_carts')
           .update({ updated_at: new Date().toISOString() })
           .eq('id', cart.id);
+        this.logger.log(`Cleared cart ${cart.id}`);
       }
     } catch (e) {
       // non-fatal
@@ -411,7 +664,30 @@ export class PaymentsService {
   }
 
   private async onPaymentFailed(_pi: Stripe.PaymentIntent) {
-    // Optionally mark orders as payment_failed
+    // Mark orders as payment_failed if we have metadata
+    const client = this.supabase.getClient();
+    const orderIds = safeParseArray(_pi.metadata?.order_ids);
+    if (orderIds.length > 0) {
+      this.logger.warn(
+        `Marking orders as payment_failed for PI ${_pi.id}: ${orderIds.join(',')}`,
+      );
+      await client
+        .from('orders')
+        .update({
+          payment_status: 'payment_failed',
+          updated_at: new Date().toISOString(),
+        })
+        .in('id', orderIds);
+      // Optionally append timeline entries
+      for (const id of orderIds) {
+        await client.from('order_timeline').insert({
+          order_id: id,
+          event_type: 'payment_failed',
+          description: 'Payment failed via Stripe',
+          metadata: { stripe_pi: _pi.id },
+        });
+      }
+    }
   }
 }
 

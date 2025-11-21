@@ -1,6 +1,7 @@
 import { Worker, QueueEvents, Job, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { createClient } from '@supabase/supabase-js';
+import { WebsocketProvider } from '../providers/websocket.provider';
 
 export function startNotificationWorker(env: {
   redisUrl: string;
@@ -72,7 +73,11 @@ export function startNotificationWorker(env: {
 
       try {
         if (channel === 'websocket') {
-          // The API process will deliver via gateway; here we only log attempt.
+          // Fan out to connected clients via the NestJS gateway
+          await WebsocketProvider.sendToUser(
+            notif.recipient_user_id as string,
+            notif,
+          );
         } else if (channel === 'email') {
           // integrate email provider in API process or here via Postmark
         } else if (channel === 'push') {
