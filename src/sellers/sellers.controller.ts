@@ -69,6 +69,8 @@ import {
   CreateHarvestBuyerRequestDto,
   HarvestBuyerRequestDto,
   AcknowledgeHarvestBuyerRequestDto,
+  CreateFarmVisitRequestDto,
+  FarmVisitRequestDto,
 } from './dto';
 
 @ApiTags('Sellers')
@@ -888,6 +890,49 @@ export class SellersController {
       requestId,
       user.id,
       dto,
+    );
+  }
+
+  // ==================== FARM VISIT REQUESTS ====================
+
+  @Post('farm-visit-requests')
+  @ApiOperation({
+    summary: 'Book farm visit for verification',
+    description:
+      'Allow a seller to request a farm visit so an admin can verify their farm on-site.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Farm visit request created',
+    type: FarmVisitRequestDto,
+  })
+  async createFarmVisitRequest(
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateFarmVisitRequestDto,
+  ): Promise<FarmVisitRequestDto> {
+    return (this.sellersService as any).createFarmVisitRequest(
+      user.organizationId!,
+      user.id,
+      dto,
+    );
+  }
+
+  @Get('farm-visit-requests/latest')
+  @ApiOperation({
+    summary: 'Get latest farm visit request for this seller',
+    description:
+      'Returns the most recent farm visit request so the seller can see its status.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Latest farm visit request retrieved successfully',
+    type: FarmVisitRequestDto,
+  })
+  async getLatestFarmVisitRequest(
+    @CurrentUser() user: UserContext,
+  ): Promise<FarmVisitRequestDto | null> {
+    return (this.sellersService as any).getLatestFarmVisitRequest(
+      user.organizationId!,
     );
   }
 

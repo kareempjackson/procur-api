@@ -27,6 +27,7 @@ import {
 } from './dto/admin-product.dto';
 import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
+import { CreateFarmVisitRequestDto } from '../sellers/dto';
 
 export interface AdminOrganizationSummary {
   id: string;
@@ -842,6 +843,17 @@ export class AdminService {
     organization: AdminOrganizationSummary;
     members: AdminBuyerMemberSummary[];
     recentOrders: AdminOrderSummary[];
+    latestFarmVisitRequest?: {
+      id: string;
+      status: string;
+      preferredDate: string | null;
+      preferredTimeWindow: string | null;
+      notes: string | null;
+      scheduledFor: string | null;
+      adminNotes: string | null;
+      createdAt: string;
+      updatedAt: string;
+    } | null;
   }> {
     const organization = await this.getOrganizationById('seller', orgId);
     const client = this.supabase.getClient();
@@ -963,11 +975,87 @@ export class AdminService {
         createdAt: o.created_at as string,
       })) ?? [];
 
+    // Latest farm visit request for this seller (if any)
+    const { data: farmVisits, error: farmVisitError } = await client
+      .from('farm_visit_requests')
+      .select(
+        'id, status, preferred_date, preferred_time_window, notes, scheduled_for, admin_notes, created_at, updated_at',
+      )
+      .eq('seller_org_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (farmVisitError) {
+      throw new BadRequestException(
+        `Failed to load farm visit requests: ${farmVisitError.message}`,
+      );
+    }
+
+    const latestFarmVisitRaw = farmVisits?.[0] as
+      | {
+          id: string;
+          status: string;
+          preferred_date: string | null;
+          preferred_time_window: string | null;
+          notes: string | null;
+          scheduled_for: string | null;
+          admin_notes: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+
+    const latestFarmVisit =
+      latestFarmVisitRaw == null
+        ? null
+        : {
+            id: latestFarmVisitRaw.id,
+            status: latestFarmVisitRaw.status,
+            preferredDate: latestFarmVisitRaw.preferred_date,
+            preferredTimeWindow: latestFarmVisitRaw.preferred_time_window,
+            notes: latestFarmVisitRaw.notes,
+            scheduledFor: latestFarmVisitRaw.scheduled_for,
+            adminNotes: latestFarmVisitRaw.admin_notes,
+            createdAt: latestFarmVisitRaw.created_at,
+            updatedAt: latestFarmVisitRaw.updated_at,
+          };
+
     return {
       organization,
       members,
       recentOrders,
+      latestFarmVisitRequest: latestFarmVisit,
     };
+  }
+
+  /**
+   * Create a farm visit request on behalf of a seller organization.
+   * This is used from the admin panel so staff can book a visit even
+   * if the seller hasn't initiated the request from their dashboard.
+   */
+  async createSellerFarmVisitRequest(
+    orgId: string,
+    requestedByUserId: string,
+    dto: CreateFarmVisitRequestDto,
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { error } = await client.from('farm_visit_requests').insert({
+      seller_org_id: orgId,
+      requested_by_user_id: requestedByUserId,
+      preferred_date: dto.preferred_date ?? null,
+      preferred_time_window: dto.preferred_time_window ?? null,
+      notes: dto.notes ?? null,
+      status: 'pending',
+    });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create farm visit request: ${error.message}`,
+      );
+    }
+
+    return { success: true };
   }
 
   async updateSellerFarmersIdVerification(

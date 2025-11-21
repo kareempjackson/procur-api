@@ -50,6 +50,9 @@ import {
   UpdateFarmVerificationDto,
   UpdateFarmersIdVerificationDto,
 } from './dto/admin-org-verification.dto';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { UserContext } from '../common/interfaces/jwt-payload.interface';
+import { CreateFarmVisitRequestDto } from '../sellers/dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth('JWT-auth')
@@ -465,6 +468,26 @@ export class AdminController {
     @Body() dto: UpdateFarmVerificationDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.updateSellerFarmVerification(id, dto.verified);
+  }
+
+  // ===== Seller farm visit requests (admin-managed) =====
+
+  @Post('sellers/:id/farm-visit-requests')
+  @ApiOperation({
+    summary: 'Create farm visit request for seller (admin)',
+    description:
+      'Allow an admin to create a farm visit request on behalf of a seller organization.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Farm visit request created successfully',
+  })
+  async createSellerFarmVisitRequest(
+    @Param('id') orgId: string,
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateFarmVisitRequestDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.createSellerFarmVisitRequest(orgId, user.id, dto);
   }
 
   // ===== Platform admin users (staff) =====

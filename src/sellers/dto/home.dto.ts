@@ -2,6 +2,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import { DashboardMetricsDto } from './analytics.dto';
 import { ProductResponseDto } from './product.dto';
 import { OrderResponseDto } from './order.dto';
+import { FarmVisitRequestDto } from './farm-visit.dto';
 
 export class BuyerRequestSummaryDto {
   @ApiProperty({ description: 'Request ID' })
@@ -50,4 +51,12 @@ export class SellerHomeResponseDto {
 
   @ApiProperty({ description: 'Open buyer requests visible to this seller' })
   buyer_requests: BuyerRequestSummaryDto[];
+
+  @ApiProperty({
+    description:
+      'Most recent farm visit request for this seller (if any) so they can see verification progress',
+    required: false,
+    type: () => FarmVisitRequestDto,
+  })
+  latest_farm_visit_request?: FarmVisitRequestDto | null;
 }

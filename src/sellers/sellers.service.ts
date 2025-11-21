@@ -5,6 +5,8 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
+import { OrganizationStatus } from '../common/enums/organization-status.enum';
+import { SellerBusinessType } from '../common/enums/seller-business-type.enum';
 import {
   CreateProductDto,
   UpdateProductDto,
@@ -31,6 +33,10 @@ import {
 } from './dto';
 import { SellerHomeResponseDto, BuyerRequestSummaryDto } from './dto/home.dto';
 import {
+  CreateFarmVisitRequestDto,
+  FarmVisitRequestDto,
+} from './dto/farm-visit.dto';
+import {
   CreateSellerHarvestDto,
   HarvestRequestResponseDto,
   HarvestFeedItemDto,
@@ -56,6 +62,71 @@ import {
 export class SellersService {
   constructor(private readonly supabaseService: SupabaseService) {}
 
+  /**
+   * Ensure the seller organization is allowed to sell / earn on the platform.
+   * - Organization must exist and be a seller
+   * - Organization status must be ACTIVE (not pending_verification / suspended)
+   * - For farmer sellers, both farmers_id_verified and farm_verified must be true
+   */
+  private async assertSellerVerified(sellerOrgId: string): Promise<void> {
+    const client = this.supabaseService.getClient();
+
+    const { data: org, error } = await client
+      .from('organizations')
+      .select(
+        'id, account_type, business_type, status, farmers_id_verified, farm_verified',
+      )
+      .eq('id', sellerOrgId)
+      .single();
+
+    if (error || !org) {
+      throw new ForbiddenException(
+        'Seller organization not found. Please contact support.',
+      );
+    }
+
+    if ((org.account_type as string) !== 'seller') {
+      throw new ForbiddenException(
+        'Only seller organizations can access seller features.',
+      );
+    }
+
+    const status = org.status as OrganizationStatus | string;
+    if (status === OrganizationStatus.SUSPENDED) {
+      throw new ForbiddenException(
+        'Your seller account is suspended. Please contact support.',
+      );
+    }
+
+    if (status !== OrganizationStatus.ACTIVE) {
+      // Includes pending_verification or any other non-active state
+      throw new ForbiddenException(
+        'Your seller account is pending admin review. An administrator must activate your business before you can sell on Procur.',
+      );
+    }
+
+    const businessType = org.business_type as
+      | SellerBusinessType
+      | string
+      | null;
+    if (businessType === SellerBusinessType.FARMERS) {
+      const farmersIdVerified = Boolean(
+        (org as any).farmers_id_verified ?? false,
+      );
+      const farmVerified = Boolean((org as any).farm_verified ?? false);
+
+      if (!farmersIdVerified || !farmVerified) {
+        const missing: string[] = [];
+        if (!farmersIdVerified) missing.push('farmer ID');
+        if (!farmVerified) missing.push('farm');
+        const label = missing.join(' and ');
+        throw new ForbiddenException(
+          `Your ${label} must be verified by an admin before you can list products, accept orders, or receive payments.`,
+        );
+      }
+    }
+  }
+
   // ==================== PRODUCT MANAGEMENT ====================
 
   async createProduct(
@@ -63,6 +134,7 @@ export class SellersService {
     createProductDto: CreateProductDto,
     userId: string,
   ): Promise<ProductResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Generate slug if not provided
@@ -128,6 +200,7 @@ export class SellersService {
     page: number;
     limit: number;
   }> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
     const {
       page = 1,
@@ -202,6 +275,7 @@ export class SellersService {
     sellerOrgId: string,
     productId: string,
   ): Promise<ProductResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data, error } = await client
@@ -224,6 +298,7 @@ export class SellersService {
     updateProductDto: UpdateProductDto,
     userId: string,
   ): Promise<ProductResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if product exists and belongs to seller
@@ -260,6 +335,7 @@ export class SellersService {
   }
 
   async deleteProduct(sellerOrgId: string, productId: string): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if product exists and belongs to seller
@@ -283,6 +359,7 @@ export class SellersService {
     productId: string,
     imageDto: ProductImageDto,
   ): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if product exists and belongs to seller
@@ -305,6 +382,7 @@ export class SellersService {
     productId: string,
     imageId: string,
   ): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if product exists and belongs to seller
@@ -334,6 +412,7 @@ export class SellersService {
     page: number;
     limit: number;
   }> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
     const {
       page = 1,
@@ -415,6 +494,7 @@ export class SellersService {
     sellerOrgId: string,
     orderId: string,
   ): Promise<OrderResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data, error } = await client
@@ -444,6 +524,7 @@ export class SellersService {
     acceptOrderDto: AcceptOrderDto,
     userId: string,
   ): Promise<OrderResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if order exists and belongs to seller
@@ -490,6 +571,7 @@ export class SellersService {
     rejectOrderDto: RejectOrderDto,
     userId: string,
   ): Promise<OrderResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if order exists and belongs to seller
@@ -534,6 +616,7 @@ export class SellersService {
     updateOrderStatusDto: UpdateOrderStatusDto,
     userId: string,
   ): Promise<OrderResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if order exists and belongs to seller
@@ -568,6 +651,7 @@ export class SellersService {
   }
 
   async getOrderTimeline(sellerOrgId: string, orderId: string): Promise<any[]> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if order exists and belongs to seller
@@ -600,6 +684,7 @@ export class SellersService {
     page: number;
     limit: number;
   }> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
     const {
       page = 1,
@@ -696,6 +781,7 @@ export class SellersService {
     sellerOrgId: string,
     transactionId: string,
   ): Promise<TransactionResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data, error } = await client
@@ -716,6 +802,7 @@ export class SellersService {
     sellerOrgId: string,
     query: AnalyticsQueryDto,
   ): Promise<TransactionSummaryDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
     const { period_start, period_end } = this.getPeriodDates(
       query.period,
@@ -753,6 +840,7 @@ export class SellersService {
     createPostDto: CreateScheduledPostDto,
     userId: string,
   ): Promise<ScheduledPostResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const postData: CreateScheduledPostData = {
@@ -785,6 +873,7 @@ export class SellersService {
     page: number;
     limit: number;
   }> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
     const {
       page = 1,
@@ -863,6 +952,7 @@ export class SellersService {
     sellerOrgId: string,
     postId: string,
   ): Promise<ScheduledPostResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data, error } = await client
@@ -885,6 +975,7 @@ export class SellersService {
     updatePostDto: UpdateScheduledPostDto,
     userId: string,
   ): Promise<ScheduledPostResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if post exists and belongs to seller
@@ -914,6 +1005,7 @@ export class SellersService {
     sellerOrgId: string,
     postId: string,
   ): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if post exists and belongs to seller
@@ -936,6 +1028,7 @@ export class SellersService {
     sellerOrgId: string,
     postId: string,
   ): Promise<ScheduledPostResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if post exists and belongs to seller
@@ -965,6 +1058,7 @@ export class SellersService {
     sellerOrgId: string,
     query: AnalyticsQueryDto,
   ): Promise<DashboardMetricsDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const { period_start, period_end } = this.getPeriodDates(
       query.period,
       query.start_date,
@@ -1365,6 +1459,7 @@ export class SellersService {
     sellerOrgId: string,
     query: AnalyticsQueryDto,
   ): Promise<SellerHomeResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Metrics
@@ -1443,18 +1538,23 @@ export class SellersService {
       }),
     );
 
+    // Latest farm visit request (if any) to surface on seller dashboard
+    const latestFarmVisit = await this.getLatestFarmVisitRequest(sellerOrgId);
+
     return {
       metrics,
       featured_products: featured,
       inventory,
       recent_orders: orders,
       buyer_requests: requests,
+      latest_farm_visit_request: latestFarmVisit,
     };
   }
 
   // ==================== INSIGHTS ====================
 
   async getSellerInsights(sellerOrgId: string) {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const sevenDaysAgo = new Date();
@@ -1538,6 +1638,7 @@ export class SellersService {
     dto: CreateSellerHarvestDto,
     userId: string,
   ): Promise<HarvestRequestResponseDto> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data, error } = await client
@@ -1579,7 +1680,72 @@ export class SellersService {
     };
   }
 
+  // ==================== FARM VISIT REQUESTS ====================
+
+  /**
+   * Create a farm visit request so an admin can verify the seller's farm.
+   * Note: this endpoint is intentionally allowed BEFORE full seller verification,
+   * so we do NOT call assertSellerVerified here.
+   */
+  async createFarmVisitRequest(
+    sellerOrgId: string,
+    userId: string,
+    dto: CreateFarmVisitRequestDto,
+  ): Promise<FarmVisitRequestDto> {
+    const client = this.supabaseService.getClient();
+
+    const { data, error } = await client
+      .from('farm_visit_requests')
+      .insert({
+        seller_org_id: sellerOrgId,
+        requested_by_user_id: userId,
+        preferred_date: dto.preferred_date ?? null,
+        preferred_time_window: dto.preferred_time_window ?? null,
+        notes: dto.notes ?? null,
+        status: 'pending',
+      })
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to create farm visit request: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    return this.mapFarmVisitToDto(data);
+  }
+
+  /**
+   * Get the latest farm visit request for this seller (if any).
+   * This is used on the seller dashboard so they can see current status.
+   */
+  async getLatestFarmVisitRequest(
+    sellerOrgId: string,
+  ): Promise<FarmVisitRequestDto | null> {
+    const client = this.supabaseService.getClient();
+
+    const { data, error } = await client
+      .from('farm_visit_requests')
+      .select('*')
+      .eq('seller_org_id', sellerOrgId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to load farm visit requests: ${error.message}`,
+      );
+    }
+
+    const row = data?.[0];
+    if (!row) return null;
+
+    return this.mapFarmVisitToDto(row);
+  }
+
   async getHarvestFeed(sellerOrgId: string): Promise<HarvestFeedItemDto[]> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data: harvests, error } = await client
@@ -1829,6 +1995,7 @@ export class SellersService {
     page: number;
     limit: number;
   }> {
+    await this.assertSellerVerified(sellerOrgId);
     const { page = 1, limit = 20, status, search, category } = query;
     const offset = (page - 1) * limit;
 
@@ -1984,6 +2151,7 @@ export class SellersService {
     createDto: any,
     userId: string,
   ): Promise<any> {
+    await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     // Check if request exists and is still open
@@ -2054,6 +2222,23 @@ export class SellersService {
     return {
       id: quote.id,
       message: 'Quote submitted successfully',
+    };
+  }
+
+  private mapFarmVisitToDto(row: any): FarmVisitRequestDto {
+    return {
+      id: row.id as string,
+      seller_org_id: row.seller_org_id as string,
+      requested_by_user_id: row.requested_by_user_id as string,
+      preferred_date: (row.preferred_date as string | null) ?? null,
+      preferred_time_window:
+        (row.preferred_time_window as string | null) ?? null,
+      notes: (row.notes as string | null) ?? null,
+      status: (row.status as string) ?? 'pending',
+      scheduled_for: (row.scheduled_for as string | null) ?? null,
+      admin_notes: (row.admin_notes as string | null) ?? null,
+      created_at: row.created_at as string,
+      updated_at: row.updated_at as string,
     };
   }
 }
