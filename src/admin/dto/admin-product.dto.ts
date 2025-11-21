@@ -2,14 +2,48 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsArray,
   IsBoolean,
+  IsEnum,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
-  IsUUID,
   MaxLength,
   Min,
 } from 'class-validator';
+
+export enum ProductUnit {
+  KG = 'kg',
+  LB = 'lb',
+  G = 'g',
+  OZ = 'oz',
+  L = 'l',
+  ML = 'ml',
+  GAL = 'gal',
+  PIECE = 'piece',
+  DOZEN = 'dozen',
+  BOX = 'box',
+  BAG = 'bag',
+  BUNCH = 'bunch',
+  CASE = 'case',
+}
+
+export enum ProductCategory {
+  FRUITS = 'Fruits',
+  VEGETABLES = 'Vegetables',
+  HERBS = 'Herbs & Spices',
+  GRAINS = 'Grains & Cereals',
+  DAIRY = 'Dairy & Eggs',
+  MEAT = 'Meat & Poultry',
+  SEAFOOD = 'Seafood',
+  BAKERY = 'Bakery',
+  BEVERAGES = 'Beverages',
+  OILS = 'Oils & Fats',
+  CONDIMENTS = 'Condiments & Sauces',
+  SNACKS = 'Snacks',
+  FROZEN = 'Frozen Foods',
+  CANNED = 'Canned Goods',
+  OTHER = 'Other',
+}
 
 export class AdminProductResponseDto {
   @ApiProperty()
@@ -18,11 +52,11 @@ export class AdminProductResponseDto {
   @ApiProperty()
   name: string;
 
-  @ApiPropertyOptional()
-  category?: string | null;
+  @ApiPropertyOptional({ enum: ProductCategory })
+  category?: ProductCategory | null;
 
-  @ApiProperty()
-  unit: string;
+  @ApiProperty({ enum: ProductUnit })
+  unit: ProductUnit;
 
   @ApiProperty()
   basePrice: number;
@@ -53,11 +87,10 @@ export class CreateAdminProductDto {
   @MaxLength(255)
   name: string;
 
-  @ApiProperty()
-  @IsString()
+  @ApiProperty({ enum: ProductUnit })
+  @IsEnum(ProductUnit)
   @IsNotEmpty()
-  @MaxLength(50)
-  unit: string;
+  unit: ProductUnit;
 
   @ApiProperty()
   @IsNumber()
@@ -68,11 +101,10 @@ export class CreateAdminProductDto {
   @IsNumber()
   markupPercent: number;
 
-  @ApiPropertyOptional()
-  @IsString()
+  @ApiPropertyOptional({ enum: ProductCategory })
+  @IsEnum(ProductCategory)
   @IsOptional()
-  @MaxLength(100)
-  category?: string;
+  category?: ProductCategory;
 
   @ApiPropertyOptional()
   @IsString()
@@ -99,11 +131,10 @@ export class UpdateAdminProductDto {
   @MaxLength(255)
   name?: string;
 
-  @ApiPropertyOptional()
-  @IsString()
+  @ApiPropertyOptional({ enum: ProductUnit })
+  @IsEnum(ProductUnit)
   @IsOptional()
-  @MaxLength(50)
-  unit?: string;
+  unit?: ProductUnit;
 
   @ApiPropertyOptional()
   @IsNumber()
@@ -116,11 +147,10 @@ export class UpdateAdminProductDto {
   @IsOptional()
   markupPercent?: number;
 
-  @ApiPropertyOptional()
-  @IsString()
+  @ApiPropertyOptional({ enum: ProductCategory })
+  @IsEnum(ProductCategory)
   @IsOptional()
-  @MaxLength(100)
-  category?: string;
+  category?: ProductCategory;
 
   @ApiPropertyOptional()
   @IsString()
@@ -146,25 +176,25 @@ export class UpdateAdminProductDto {
 }
 
 export class AdminProductQueryDto {
-  @ApiPropertyOptional({ description: 'Search by name or category' })
+  @ApiPropertyOptional()
   @IsString()
   @IsOptional()
   search?: string;
 
-  @ApiPropertyOptional({ description: 'Filter by category' })
-  @IsString()
+  @ApiPropertyOptional({ enum: ProductCategory })
+  @IsEnum(ProductCategory)
   @IsOptional()
-  category?: string;
+  category?: ProductCategory;
 
-  @ApiPropertyOptional({ description: 'Page number', default: 1 })
+  @ApiPropertyOptional()
   @IsNumber()
+  @Min(1)
   @IsOptional()
   page?: number;
 
-  @ApiPropertyOptional({ description: 'Items per page', default: 20 })
+  @ApiPropertyOptional()
   @IsNumber()
+  @Min(1)
   @IsOptional()
   limit?: number;
 }
-
-

@@ -26,6 +26,7 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { AiModule } from './ai/ai.module';
 import { HealthController } from './health.controller';
 import { AdminModule } from './admin/admin.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { AdminModule } from './admin/admin.module';
     WhatsappModule,
     AiModule,
     AdminModule,
+    AuditModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

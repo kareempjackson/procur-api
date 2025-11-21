@@ -24,6 +24,7 @@ import { AdminService } from './admin.service';
 import type {
   AdminDashboardSummary,
   AdminDashboardCharts,
+  AdminAuditLogItem,
 } from './admin.service';
 import { AdminOrgQueryDto } from './dto/admin-org-query.dto';
 import { AdminOrderQueryDto } from './dto/admin-order-query.dto';
@@ -42,7 +43,9 @@ import {
   CreateAdminProductDto,
   UpdateAdminProductDto,
 } from './dto/admin-product.dto';
+import { AdminUserResponseDto, CreateAdminUserDto } from './dto/admin-user.dto';
 import { UpdateAdminOrganizationStatusDto } from './dto/admin-org-status.dto';
+import { AdminAuditLogQueryDto } from './dto/admin-audit.dto';
 import {
   UpdateFarmVerificationDto,
   UpdateFarmersIdVerificationDto,
@@ -256,7 +259,9 @@ export class AdminController {
     status: 200,
     description: 'Admin product deleted successfully',
   })
-  async deleteAdminProduct(@Param('id') id: string): Promise<{ success: boolean }> {
+  async deleteAdminProduct(
+    @Param('id') id: string,
+  ): Promise<{ success: boolean }> {
     return this.adminService.deleteAdminProduct(id);
   }
 
@@ -368,6 +373,28 @@ export class AdminController {
     return this.adminService.getDashboardCharts();
   }
 
+  // ===== Audit log =====
+
+  @Get('audit/logs')
+  @ApiOperation({
+    summary: 'List audit log entries',
+    description:
+      'Paginated system-wide audit log of HTTP/API requests, filterable by actor, action, route and time range.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Audit logs retrieved successfully',
+    type: Object,
+  })
+  async listAuditLogs(@Query() query: AdminAuditLogQueryDto): Promise<{
+    items: AdminAuditLogItem[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    return this.adminService.listAuditLogs(query);
+  }
+
   // ===== Organization status (verification) =====
 
   @Patch('buyers/:id/status')
@@ -438,5 +465,24 @@ export class AdminController {
     @Body() dto: UpdateFarmVerificationDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.updateSellerFarmVerification(id, dto.verified);
+  }
+
+  // ===== Platform admin users (staff) =====
+
+  @Post('admins')
+  @ApiOperation({
+    summary: 'Create platform admin user',
+    description:
+      'Create a new platform-level admin or super admin account. Only SUPER_ADMIN can call this endpoint.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Admin user created successfully',
+    type: AdminUserResponseDto,
+  })
+  async createAdminUser(
+    @Body() dto: CreateAdminUserDto,
+  ): Promise<AdminUserResponseDto> {
+    return this.adminService.createAdminUser(dto);
   }
 }

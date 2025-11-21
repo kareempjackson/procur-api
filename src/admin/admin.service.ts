@@ -15,11 +15,15 @@ import {
   CreateDriverDto,
   UpdateDriverDto,
 } from './dto/driver.dto';
+import { AdminUserResponseDto, CreateAdminUserDto } from './dto/admin-user.dto';
+import { UserRole } from '../common/enums/user-role.enum';
 import {
   AdminProductResponseDto,
   AdminProductQueryDto,
   CreateAdminProductDto,
   UpdateAdminProductDto,
+  ProductCategory,
+  ProductUnit,
 } from './dto/admin-product.dto';
 import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
@@ -88,6 +92,24 @@ export interface AdminDashboardCharts {
   revenueOverTime: { date: string; amount: number }[];
   popularItems: { name: string; quantity: number; totalAmount: number }[];
   currency: string;
+}
+
+export interface AdminAuditLogItem {
+  id: string;
+  userId: string | null;
+  organizationId: string | null;
+  actorEmail: string | null;
+  actorRole: string | null;
+  actorAccountType: string | null;
+  action: string;
+  resource: string | null;
+  resourceId: string | null;
+  route: string | null;
+  method: string | null;
+  statusCode: number | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
 }
 
 @Injectable()
@@ -477,6 +499,120 @@ export class AdminService {
       revenueOverTime,
       popularItems,
       currency,
+    };
+  }
+
+  async listAuditLogs(query: {
+    page?: number;
+    limit?: number;
+    userId?: string;
+    method?: string;
+    statusCode?: number;
+    action?: string;
+    routeContains?: string;
+    search?: string;
+    from?: string;
+    to?: string;
+  }): Promise<{
+    items: AdminAuditLogItem[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const {
+      page = 1,
+      limit = 50,
+      userId,
+      method,
+      statusCode,
+      action,
+      routeContains,
+      search,
+      from,
+      to,
+    } = query;
+
+    const fromIdx = (page - 1) * limit;
+    const toIdx = fromIdx + limit - 1;
+
+    const client = this.supabase.getClient();
+
+    let builder = client
+      .from('audit_log')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(fromIdx, toIdx);
+
+    if (userId) {
+      builder = builder.eq('user_id', userId);
+    }
+    if (method) {
+      builder = builder.eq('method', method.toUpperCase());
+    }
+    if (typeof statusCode === 'number') {
+      builder = builder.eq('status_code', statusCode);
+    }
+    if (action) {
+      builder = builder.ilike('action', `%${action}%`);
+    }
+    if (routeContains) {
+      builder = builder.ilike('route', `%${routeContains}%`);
+    }
+    if (from) {
+      builder = builder.gte('created_at', from);
+    }
+    if (to) {
+      builder = builder.lte('created_at', to);
+    }
+    if (search) {
+      builder = builder.or(
+        [
+          `actor_email.ilike.%${search}%`,
+          `action.ilike.%${search}%`,
+          `resource.ilike.%${search}%`,
+          `route.ilike.%${search}%`,
+        ].join(','),
+      );
+    }
+
+    const { data, error, count } = await builder;
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to list audit logs: ${error.message}`,
+      );
+    }
+
+    const items: AdminAuditLogItem[] =
+      (data || []).map((row: any) => ({
+        // eslint-disable-line @typescript-eslint/no-explicit-any
+        id: row.id as string,
+        userId: (row.user_id as string | null) ?? null,
+        organizationId: (row.organization_id as string | null) ?? null,
+        actorEmail: (row.actor_email as string | null) ?? null,
+        actorRole: (row.actor_role as string | null) ?? null,
+        actorAccountType: (row.actor_account_type as string | null) ?? null,
+        action: (row.action as string) ?? '',
+        resource: (row.resource as string | null) ?? null,
+        resourceId: (row.resource_id as string | null) ?? null,
+        route: (row.route as string | null) ?? null,
+        method: (row.method as string | null) ?? null,
+        statusCode:
+          typeof row.status_code === 'number'
+            ? (row.status_code as number)
+            : row.status_code
+              ? Number(row.status_code)
+              : null,
+        ipAddress: (row.ip_address as string | null) ?? null,
+        userAgent: (row.user_agent as string | null) ?? null,
+        createdAt: (row.created_at as string) ?? '',
+      })) ?? [];
+
+    return {
+      items,
+      total: count || 0,
+      page,
+      limit,
     };
   }
 
@@ -1189,9 +1325,7 @@ export class AdminService {
 
   // ===== Admin products (catalog) =====
 
-  async listAdminProducts(
-    query: AdminProductQueryDto,
-  ): Promise<{
+  async listAdminProducts(query: AdminProductQueryDto): Promise<{
     items: AdminProductResponseDto[];
     total: number;
     page: number;
@@ -1215,9 +1349,7 @@ export class AdminService {
       builder = builder.ilike('name', `%${search}%`);
     }
 
-    builder = builder
-      .order('created_at', { ascending: false })
-      .range(from, to);
+    builder = builder.order('created_at', { ascending: false }).range(from, to);
 
     const { data, error, count } = await builder;
 
@@ -1231,8 +1363,8 @@ export class AdminService {
       (data || []).map((p: any) => ({
         id: p.id as string,
         name: p.name as string,
-        category: (p.category as string | null) ?? null,
-        unit: p.unit as string,
+        category: (p.category as ProductCategory | null) ?? null,
+        unit: p.unit as ProductUnit,
         basePrice: Number(p.base_price ?? 0),
         markupPercent: Number(p.markup_percent ?? 0),
         shortDescription: (p.short_description as string | null) ?? null,
@@ -1266,8 +1398,8 @@ export class AdminService {
     return {
       id: data.id as string,
       name: data.name as string,
-      category: (data.category as string | null) ?? null,
-      unit: data.unit as string,
+      category: (data.category as ProductCategory | null) ?? null,
+      unit: data.unit as ProductUnit,
       basePrice: Number(data.base_price ?? 0),
       markupPercent: Number(data.markup_percent ?? 0),
       shortDescription: (data.short_description as string | null) ?? null,
@@ -1313,8 +1445,8 @@ export class AdminService {
     return {
       id: data.id as string,
       name: data.name as string,
-      category: (data.category as string | null) ?? null,
-      unit: data.unit as string,
+      category: (data.category as ProductCategory | null) ?? null,
+      unit: data.unit as ProductUnit,
       basePrice: Number(data.base_price ?? 0),
       markupPercent: Number(data.markup_percent ?? 0),
       shortDescription: (data.short_description as string | null) ?? null,
@@ -1362,8 +1494,8 @@ export class AdminService {
     return {
       id: data.id as string,
       name: data.name as string,
-      category: (data.category as string | null) ?? null,
-      unit: data.unit as string,
+      category: (data.category as ProductCategory | null) ?? null,
+      unit: data.unit as ProductUnit,
       basePrice: Number(data.base_price ?? 0),
       markupPercent: Number(data.markup_percent ?? 0),
       shortDescription: (data.short_description as string | null) ?? null,
@@ -1555,5 +1687,60 @@ export class AdminService {
     }
 
     return { success: true };
+  }
+
+  // ===== Platform admin users (staff) =====
+
+  async createAdminUser(
+    dto: CreateAdminUserDto,
+  ): Promise<AdminUserResponseDto> {
+    const client = this.supabase.getClient();
+
+    // Only allow admin or super_admin roles to be created via this endpoint
+    if (dto.role !== UserRole.ADMIN && dto.role !== UserRole.SUPER_ADMIN) {
+      throw new BadRequestException(
+        'Only admin or super_admin roles can be created via this endpoint',
+      );
+    }
+
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(dto.password, saltRounds);
+
+    const { data, error } = await client
+      .from('users')
+      .insert({
+        email: dto.email,
+        password: hashedPassword,
+        fullname: dto.fullname,
+        phone_number: dto.phoneNumber ?? null,
+        role: dto.role,
+        email_verified: true,
+        is_active: true,
+      })
+      .select('id, email, fullname, role, is_active, created_at')
+      .single();
+
+    if (error || !data) {
+      // Map unique constraint violation to a friendlier message
+      const pgCode = (error as any)?.code as string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
+      if (pgCode === '23505') {
+        throw new BadRequestException('A user with this email already exists');
+      }
+
+      throw new BadRequestException(
+        `Failed to create admin user: ${
+          (error as any)?.message ?? 'Unknown error'
+        }`,
+      );
+    }
+
+    return {
+      id: data.id as string,
+      email: data.email as string,
+      fullname: data.fullname as string,
+      role: data.role as UserRole,
+      isActive: Boolean(data.is_active),
+      createdAt: data.created_at as string,
+    };
   }
 }
