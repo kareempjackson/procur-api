@@ -469,6 +469,21 @@ export class AdminController {
 
   // ===== Platform admin users (staff) =====
 
+  @Get('admins')
+  @ApiOperation({
+    summary: 'List platform admin users',
+    description:
+      'List all platform-level admin and super admin accounts that can access the Procur admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin users listed successfully',
+    type: [AdminUserResponseDto],
+  })
+  async listAdminUsers(): Promise<AdminUserResponseDto[]> {
+    return this.adminService.listAdminUsers();
+  }
+
   @Post('admins')
   @ApiOperation({
     summary: 'Create platform admin user',

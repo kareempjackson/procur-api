@@ -51,7 +51,7 @@ export class AuditInterceptor implements NestInterceptor {
     if (!req) return;
 
     // Basic request info
-    const method = req.method;
+    const method = (req.method || 'GET').toUpperCase();
     const url = (req as any).originalUrl || req.url; // eslint-disable-line @typescript-eslint/no-explicit-any
     const path = req.path || url;
 
@@ -69,12 +69,23 @@ export class AuditInterceptor implements NestInterceptor {
     const controller = context.getClass()?.name ?? '';
     const handler = context.getHandler()?.name ?? '';
 
-    const action = `${method} ${controller}.${handler}`.trim();
-
     const { resource, resourceId } = this.deriveResource(path, req);
+
+    const action = this.buildActionDescription({
+      method,
+      path,
+      controller,
+      handler,
+      resource,
+      resourceId,
+      statusCode,
+      durationMs,
+      user,
+    });
 
     const meta: Record<string, any> = {
       // eslint-disable-line @typescript-eslint/no-explicit-any
+      summary: action,
       params: req.params,
       query: req.query,
       durationMs,
@@ -111,6 +122,72 @@ export class AuditInterceptor implements NestInterceptor {
       userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
       meta,
     });
+  }
+
+  private buildActionDescription(input: {
+    method: string;
+    path: string;
+    controller: string;
+    handler: string;
+    resource: string | null;
+    resourceId: string | null;
+    statusCode: number;
+    durationMs: number;
+    user?: UserContext;
+  }): string {
+    const {
+      method,
+      path,
+      controller,
+      handler,
+      resource,
+      resourceId,
+      statusCode,
+      durationMs,
+      user,
+    } = input;
+
+    const cleanController = controller.replace(/Controller$/u, '');
+    const cleanHandler = handler || 'handler';
+
+    const prettyResource = (resource || cleanController || 'request')
+      .replace(/[_-]+/gu, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+
+    let verb: string;
+    switch (method) {
+      case 'GET':
+        verb = resourceId ? 'View' : 'List';
+        break;
+      case 'POST':
+        verb = 'Create';
+        break;
+      case 'PUT':
+      case 'PATCH':
+        verb = 'Update';
+        break;
+      case 'DELETE':
+        verb = 'Delete';
+        break;
+      default:
+        verb = method;
+    }
+
+    const actor = user?.email ?? user?.id ?? 'anonymous';
+    const roleFragment = user?.role ? ` as ${user.role}` : '';
+
+    const resourceFragment = resourceId
+      ? `${prettyResource} (${resourceId})`
+      : prettyResource;
+
+    const base = `${verb} ${resourceFragment}`.trim();
+
+    const technicalRef =
+      cleanController && cleanHandler
+        ? ` – ${cleanController}.${cleanHandler}`
+        : '';
+
+    return `${actor}${roleFragment}: ${base} [${method} ${path}] → ${statusCode} in ${durationMs}ms${technicalRef}`;
   }
 
   private deriveResource(

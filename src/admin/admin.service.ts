@@ -1691,6 +1691,34 @@ export class AdminService {
 
   // ===== Platform admin users (staff) =====
 
+  async listAdminUsers(): Promise<AdminUserResponseDto[]> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('users')
+      .select('id, email, fullname, role, is_active, created_at')
+      .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to list admin users: ${error.message}`,
+      );
+    }
+
+    return (
+      data?.map((u: any) => ({
+        // eslint-disable-line @typescript-eslint/no-explicit-any
+        id: u.id as string,
+        email: u.email as string,
+        fullname: u.fullname as string,
+        role: u.role as UserRole,
+        isActive: Boolean(u.is_active),
+        createdAt: u.created_at as string,
+      })) ?? []
+    );
+  }
+
   async createAdminUser(
     dto: CreateAdminUserDto,
   ): Promise<AdminUserResponseDto> {
