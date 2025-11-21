@@ -36,6 +36,12 @@ import {
   AssignDriverDto,
   UpdateAdminOrderStatusDto,
 } from './dto/admin-order-status.dto';
+import {
+  AdminProductResponseDto,
+  AdminProductQueryDto,
+  CreateAdminProductDto,
+  UpdateAdminProductDto,
+} from './dto/admin-product.dto';
 import { UpdateAdminOrganizationStatusDto } from './dto/admin-org-status.dto';
 import {
   UpdateFarmVerificationDto,
@@ -172,6 +178,86 @@ export class AdminController {
     @Body() dto: AssignDriverDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.assignDriver(id, dto.driverId);
+  }
+
+  // ===== Admin products (catalog) =====
+
+  @Get('products')
+  @ApiOperation({
+    summary: 'List admin catalog products',
+    description:
+      'List platform-managed products that sellers can reference when creating products.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin products listed successfully',
+    type: Object,
+  })
+  async listAdminProducts(@Query() query: AdminProductQueryDto) {
+    return this.adminService.listAdminProducts(query);
+  }
+
+  @Get('products/:id')
+  @ApiOperation({
+    summary: 'Get admin catalog product',
+    description: 'Fetch a single admin product definition by id.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin product retrieved successfully',
+    type: AdminProductResponseDto,
+  })
+  async getAdminProduct(
+    @Param('id') id: string,
+  ): Promise<AdminProductResponseDto> {
+    return this.adminService.getAdminProductById(id);
+  }
+
+  @Post('products')
+  @ApiOperation({
+    summary: 'Create admin catalog product',
+    description:
+      'Create a new platform-managed product that sellers can select from.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Admin product created successfully',
+    type: AdminProductResponseDto,
+  })
+  async createAdminProduct(
+    @Body() dto: CreateAdminProductDto,
+  ): Promise<AdminProductResponseDto> {
+    return this.adminService.createAdminProduct(dto);
+  }
+
+  @Patch('products/:id')
+  @ApiOperation({
+    summary: 'Update admin catalog product',
+    description: 'Update fields on an admin-managed product.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin product updated successfully',
+    type: AdminProductResponseDto,
+  })
+  async updateAdminProduct(
+    @Param('id') id: string,
+    @Body() dto: UpdateAdminProductDto,
+  ): Promise<AdminProductResponseDto> {
+    return this.adminService.updateAdminProduct(id, dto);
+  }
+
+  @Delete('products/:id')
+  @ApiOperation({
+    summary: 'Delete admin catalog product',
+    description: 'Soft-delete an admin product (marks it inactive).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin product deleted successfully',
+  })
+  async deleteAdminProduct(@Param('id') id: string): Promise<{ success: boolean }> {
+    return this.adminService.deleteAdminProduct(id);
   }
 
   // ===== Drivers =====

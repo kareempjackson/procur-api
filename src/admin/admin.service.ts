@@ -15,6 +15,12 @@ import {
   CreateDriverDto,
   UpdateDriverDto,
 } from './dto/driver.dto';
+import {
+  AdminProductResponseDto,
+  AdminProductQueryDto,
+  CreateAdminProductDto,
+  UpdateAdminProductDto,
+} from './dto/admin-product.dto';
 import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
 
@@ -1175,6 +1181,210 @@ export class AdminService {
     if (error || !data) {
       throw new BadRequestException(
         `Failed to assign driver: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    return { success: true };
+  }
+
+  // ===== Admin products (catalog) =====
+
+  async listAdminProducts(
+    query: AdminProductQueryDto,
+  ): Promise<{
+    items: AdminProductResponseDto[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const { search, category, page = 1, limit = 20 } = query;
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    const client = this.supabase.getClient();
+
+    let builder = client
+      .from('admin_products')
+      .select('*', { count: 'exact' })
+      .eq('is_active', true);
+
+    if (category) {
+      builder = builder.eq('category', category);
+    }
+    if (search) {
+      builder = builder.ilike('name', `%${search}%`);
+    }
+
+    builder = builder
+      .order('created_at', { ascending: false })
+      .range(from, to);
+
+    const { data, error, count } = await builder;
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to list admin products: ${error.message}`,
+      );
+    }
+
+    const items: AdminProductResponseDto[] =
+      (data || []).map((p: any) => ({
+        id: p.id as string,
+        name: p.name as string,
+        category: (p.category as string | null) ?? null,
+        unit: p.unit as string,
+        basePrice: Number(p.base_price ?? 0),
+        markupPercent: Number(p.markup_percent ?? 0),
+        shortDescription: (p.short_description as string | null) ?? null,
+        longDescription: (p.long_description as string | null) ?? null,
+        imageUrls: (p.image_urls as string[] | null) ?? [],
+        isActive: Boolean(p.is_active),
+        createdAt: p.created_at as string,
+      })) ?? [];
+
+    return {
+      items,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  async getAdminProductById(id: string): Promise<AdminProductResponseDto> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('admin_products')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('Admin product not found');
+    }
+
+    return {
+      id: data.id as string,
+      name: data.name as string,
+      category: (data.category as string | null) ?? null,
+      unit: data.unit as string,
+      basePrice: Number(data.base_price ?? 0),
+      markupPercent: Number(data.markup_percent ?? 0),
+      shortDescription: (data.short_description as string | null) ?? null,
+      longDescription: (data.long_description as string | null) ?? null,
+      imageUrls: (data.image_urls as string[] | null) ?? [],
+      isActive: Boolean(data.is_active),
+      createdAt: data.created_at as string,
+    };
+  }
+
+  async createAdminProduct(
+    dto: CreateAdminProductDto,
+  ): Promise<AdminProductResponseDto> {
+    const client = this.supabase.getClient();
+
+    const imageUrls =
+      (dto.imageUrls && dto.imageUrls.length > 0
+        ? dto.imageUrls.slice(0, 5)
+        : []) ?? [];
+
+    const { data, error } = await client
+      .from('admin_products')
+      .insert({
+        name: dto.name,
+        category: dto.category ?? null,
+        unit: dto.unit,
+        base_price: dto.basePrice,
+        markup_percent: dto.markupPercent,
+        short_description: dto.shortDescription ?? null,
+        long_description: dto.longDescription ?? null,
+        image_urls: imageUrls,
+        is_active: true,
+      })
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to create admin product: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    return {
+      id: data.id as string,
+      name: data.name as string,
+      category: (data.category as string | null) ?? null,
+      unit: data.unit as string,
+      basePrice: Number(data.base_price ?? 0),
+      markupPercent: Number(data.markup_percent ?? 0),
+      shortDescription: (data.short_description as string | null) ?? null,
+      longDescription: (data.long_description as string | null) ?? null,
+      imageUrls: (data.image_urls as string[] | null) ?? [],
+      isActive: Boolean(data.is_active),
+      createdAt: data.created_at as string,
+    };
+  }
+
+  async updateAdminProduct(
+    id: string,
+    dto: UpdateAdminProductDto,
+  ): Promise<AdminProductResponseDto> {
+    const client = this.supabase.getClient();
+
+    const patch: Record<string, unknown> = {};
+    if (dto.name !== undefined) patch.name = dto.name;
+    if (dto.category !== undefined) patch.category = dto.category;
+    if (dto.unit !== undefined) patch.unit = dto.unit;
+    if (dto.basePrice !== undefined) patch.base_price = dto.basePrice;
+    if (dto.markupPercent !== undefined)
+      patch.markup_percent = dto.markupPercent;
+    if (dto.shortDescription !== undefined)
+      patch.short_description = dto.shortDescription;
+    if (dto.longDescription !== undefined)
+      patch.long_description = dto.longDescription;
+    if (dto.imageUrls !== undefined)
+      patch.image_urls = dto.imageUrls ? dto.imageUrls.slice(0, 5) : [];
+    if (dto.isActive !== undefined) patch.is_active = dto.isActive;
+
+    const { data, error } = await client
+      .from('admin_products')
+      .update(patch)
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to update admin product: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    return {
+      id: data.id as string,
+      name: data.name as string,
+      category: (data.category as string | null) ?? null,
+      unit: data.unit as string,
+      basePrice: Number(data.base_price ?? 0),
+      markupPercent: Number(data.markup_percent ?? 0),
+      shortDescription: (data.short_description as string | null) ?? null,
+      longDescription: (data.long_description as string | null) ?? null,
+      imageUrls: (data.image_urls as string[] | null) ?? [],
+      isActive: Boolean(data.is_active),
+      createdAt: data.created_at as string,
+    };
+  }
+
+  async deleteAdminProduct(id: string): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { error } = await client
+      .from('admin_products')
+      .update({ is_active: false })
+      .eq('id', id);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete admin product: ${error.message}`,
       );
     }
 
