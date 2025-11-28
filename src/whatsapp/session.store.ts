@@ -49,6 +49,7 @@ export type ExtendedFlow =
   | 'order_reject_reason'
   | 'order_update_status'
   | 'order_update_tracking'
+  | 'checkout_select_address'
   // Transactions
   | 'tx_check_id'
   // Security

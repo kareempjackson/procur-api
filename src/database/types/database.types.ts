@@ -148,6 +148,7 @@ export interface DatabaseProduct {
   is_featured: boolean;
   is_organic: boolean;
   is_local: boolean;
+  admin_product_id?: string;
   meta_title?: string;
   meta_description?: string;
   slug?: string;
@@ -219,6 +220,25 @@ export interface DatabaseOrder {
   rejected_at?: string;
   shipped_at?: string;
   delivered_at?: string;
+  // Direct-deposit clearing / inspection workflow
+  inspection_status?: string;
+  approved_at?: string;
+  approved_by_admin_id?: string;
+  approval_notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DatabaseFarmerBankInfo {
+  id: string;
+  farmer_org_id: string;
+  token: string;
+  encrypted_account_number: string;
+  encrypted_account_name: string;
+  encrypted_bank_name: string;
+  encrypted_bank_branch?: string | null;
+  created_by?: string;
+  updated_by?: string;
   created_at: string;
   updated_at: string;
 }
@@ -303,6 +323,7 @@ export interface CreateProductData {
   is_featured?: boolean;
   is_organic?: boolean;
   is_local?: boolean;
+  admin_product_id?: string;
   meta_title?: string;
   meta_description?: string;
   slug?: string;
@@ -336,6 +357,7 @@ export interface UpdateProductData {
   is_featured?: boolean;
   is_organic?: boolean;
   is_local?: boolean;
+  admin_product_id?: string;
   meta_title?: string;
   meta_description?: string;
   slug?: string;

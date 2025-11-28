@@ -3,6 +3,7 @@ import {
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../database/supabase.service';
 import { AdminOrgQueryDto } from './dto/admin-org-query.dto';
 import { AdminOrderQueryDto } from './dto/admin-order-query.dto';
@@ -10,6 +11,8 @@ import {
   DatabaseOrderItem,
   DatabaseOrderTimeline,
 } from '../database/types/database.types';
+import { OrderClearingService } from '../finance/order-clearing.service';
+import { TemplateService } from '../whatsapp/templates/template.service';
 import {
   AdminDriverResponseDto,
   CreateDriverDto,
@@ -115,7 +118,16 @@ export interface AdminAuditLogItem {
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly clearing: OrderClearingService,
+    private readonly waTemplates: TemplateService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  private get privateBucket(): string {
+    return this.configService.get<string>('storage.privateBucket') || 'private';
+  }
 
   private async getOrganizationAdminContact(orgId: string): Promise<{
     adminEmail: string | null;
@@ -269,7 +281,7 @@ export class AdminService {
               } else {
                 try {
                   const signed = await this.supabase.createSignedDownloadUrl(
-                    'private',
+                    this.privateBucket,
                     farmersIdPath,
                     60 * 60,
                   );
@@ -675,7 +687,7 @@ export class AdminService {
       } else {
         try {
           const signed = await this.supabase.createSignedDownloadUrl(
-            'private',
+            this.privateBucket,
             farmersIdPath,
             60 * 60,
           );
@@ -1218,6 +1230,205 @@ export class AdminService {
     };
   }
 
+  async approveOrderInspection(
+    orderId: string,
+    input: {
+      inspectionStatus: 'approved' | 'rejected';
+      approvalNotes?: string;
+      adminUserId: string;
+      itemAdjustments?: {
+        id: string;
+        unit_price?: number;
+        quantity?: number;
+      }[];
+    },
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    // Load order
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    // Only allow approval once order is at least accepted/processing/shipped
+    const status = (order.status as string) ?? 'pending';
+    if (!['accepted', 'processing', 'shipped', 'delivered'].includes(status)) {
+      throw new BadRequestException(
+        `Order must be accepted or in transit before inspection approval (current status: ${status})`,
+      );
+    }
+
+    // Load items
+    const { data: items, error: itemsError } = await client
+      .from('order_items')
+      .select('*')
+      .eq('order_id', orderId);
+
+    if (itemsError) {
+      throw new BadRequestException(
+        `Failed to load order items: ${itemsError.message}`,
+      );
+    }
+
+    const itemsArray = (items || []) as any[];
+
+    // Apply optional per-line adjustments and recompute totals
+    const adjustmentsById = new Map<
+      string,
+      { unit_price?: number; quantity?: number }
+    >();
+    (input.itemAdjustments || []).forEach((adj) => {
+      adjustmentsById.set(adj.id, {
+        unit_price: adj.unit_price,
+        quantity: adj.quantity,
+      });
+    });
+
+    let newSubtotal = 0;
+
+    for (const item of itemsArray) {
+      const adj = adjustmentsById.get(item.id as string);
+      const unitPrice =
+        typeof adj?.unit_price === 'number' ? adj.unit_price : item.unit_price;
+      const quantity =
+        typeof adj?.quantity === 'number' ? adj.quantity : item.quantity;
+      const totalPrice = Number(unitPrice) * Number(quantity);
+
+      newSubtotal += totalPrice;
+
+      if (adj) {
+        const { error: updateError } = await client
+          .from('order_items')
+          .update({
+            unit_price: unitPrice,
+            quantity,
+            total_price: totalPrice,
+          })
+          .eq('id', item.id);
+
+        if (updateError) {
+          throw new BadRequestException(
+            `Failed to update order item: ${updateError.message}`,
+          );
+        }
+      }
+    }
+
+    // If no adjustments were provided, keep existing subtotal
+    if (!input.itemAdjustments || input.itemAdjustments.length === 0) {
+      newSubtotal = Number(order.subtotal ?? 0);
+    }
+
+    const taxAmount = Number(order.tax_amount ?? 0);
+    const shippingAmount = Number(order.shipping_amount ?? 0);
+    const discountAmount = Number(order.discount_amount ?? 0);
+    const newTotal = newSubtotal + taxAmount + shippingAmount - discountAmount;
+
+    const nowIso = new Date().toISOString();
+
+    const { error: updateOrderError } = await client
+      .from('orders')
+      .update({
+        subtotal: newSubtotal,
+        total_amount: newTotal,
+        inspection_status: input.inspectionStatus,
+        approved_at: nowIso,
+        approved_by_admin_id: input.adminUserId,
+        approval_notes: input.approvalNotes ?? null,
+      })
+      .eq('id', orderId);
+
+    if (updateOrderError) {
+      throw new BadRequestException(
+        `Failed to update order with inspection approval: ${updateOrderError.message}`,
+      );
+    }
+
+    // Append timeline entry
+    const title =
+      input.inspectionStatus === 'approved'
+        ? 'Inspection approved'
+        : 'Inspection rejected';
+
+    const description =
+      input.inspectionStatus === 'approved'
+        ? 'Admin approved delivery after inspection'
+        : 'Admin rejected delivery after inspection';
+
+    const { error: timelineError } = await client
+      .from('order_timeline')
+      .insert({
+        order_id: orderId,
+        event_type: 'inspection_' + input.inspectionStatus,
+        title,
+        description,
+        actor_user_id: input.adminUserId,
+        actor_type: 'admin',
+        metadata: {
+          subtotal_before: Number(order.subtotal ?? 0),
+          subtotal_after: newSubtotal,
+          total_before: Number(order.total_amount ?? 0),
+          total_after: newTotal,
+        },
+        is_visible_to_buyer: true,
+        is_visible_to_seller: true,
+      });
+
+    if (timelineError) {
+      throw new BadRequestException(
+        `Failed to append order timeline: ${timelineError.message}`,
+      );
+    }
+
+    // Create clearing transactions (buyer settlement + farmer payout)
+    await this.clearing.createClearingTransactions(orderId);
+
+    return { success: true };
+  }
+
+  async listBuyerSettlements(query: {
+    status?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    return this.clearing.listBuyerSettlements(query);
+  }
+
+  async listFarmerPayouts(query: {
+    status?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    return this.clearing.listFarmerPayouts(query);
+  }
+
+  async markBuyerSettlementCompleted(
+    transactionId: string,
+    input: { bank_reference?: string; proof_url?: string },
+  ): Promise<{ success: boolean }> {
+    return this.clearing.markBuyerSettlementCompleted({
+      transactionId,
+      bankReference: input.bank_reference,
+      proofUrl: input.proof_url,
+    });
+  }
+
+  async markFarmerPayoutCompleted(
+    transactionId: string,
+    input: { proof_url?: string },
+  ): Promise<{ success: boolean }> {
+    return this.clearing.markFarmerPayoutCompleted({
+      transactionId,
+      proofUrl: input.proof_url,
+    });
+  }
+
   async getOrderDetail(orderId: string): Promise<{
     order: AdminOrderSummary & {
       subtotal: number;
@@ -1368,6 +1579,82 @@ export class AdminService {
     return { success: true };
   }
 
+  async updateOrderPaymentStatus(
+    orderId: string,
+    dto: { payment_status: string; note?: string; reference?: string },
+    adminUserId: string,
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { data: existing, error: loadError } = await client
+      .from('orders')
+      .select('id, order_number, payment_status, buyer_user_id')
+      .eq('id', orderId)
+      .single();
+
+    if (loadError || !existing) {
+      throw new BadRequestException('Order not found');
+    }
+
+    const nowIso = new Date().toISOString();
+    const update: Record<string, any> = {
+      payment_status: dto.payment_status,
+    };
+
+    if (dto.payment_status === 'paid') {
+      update.paid_at = nowIso;
+    }
+
+    const { error: updateError } = await client
+      .from('orders')
+      .update(update)
+      .eq('id', orderId);
+
+    if (updateError) {
+      throw new BadRequestException(
+        `Failed to update order payment status: ${updateError.message}`,
+      );
+    }
+
+    await client.from('order_timeline').insert({
+      order_id: orderId,
+      event_type: 'payment_status_updated_admin',
+      description: `Payment status updated to ${dto.payment_status} by admin`,
+      metadata: {
+        previous: existing.payment_status,
+        next: dto.payment_status,
+        admin_user_id: adminUserId,
+        note: dto.note ?? null,
+        reference: dto.reference ?? null,
+      },
+    });
+
+    // Notify buyer via WhatsApp when payment becomes paid (if paired)
+    if (dto.payment_status === 'paid' && existing.buyer_user_id) {
+      const { data: buyer } = await client
+        .from('users')
+        .select('id, phone_number')
+        .eq('id', existing.buyer_user_id as string)
+        .not('phone_number', 'is', null)
+        .single();
+
+      if (buyer?.phone_number) {
+        const phoneE164 = String(buyer.phone_number);
+        const orderNumber = String(existing.order_number || orderId);
+        await this.waTemplates.sendOrderUpdateIfPaired(
+          buyer.id,
+          phoneE164,
+          orderNumber,
+          'paid',
+          undefined,
+          'en',
+        );
+      }
+    }
+
+    return { success: true };
+  }
+
   async assignDriver(
     orderId: string,
     driverId: string,
@@ -1455,6 +1742,10 @@ export class AdminService {
         unit: p.unit as ProductUnit,
         basePrice: Number(p.base_price ?? 0),
         markupPercent: Number(p.markup_percent ?? 0),
+        minSellerPrice:
+          p.min_seller_price != null ? Number(p.min_seller_price) : null,
+        maxSellerPrice:
+          p.max_seller_price != null ? Number(p.max_seller_price) : null,
         shortDescription: (p.short_description as string | null) ?? null,
         longDescription: (p.long_description as string | null) ?? null,
         imageUrls: (p.image_urls as string[] | null) ?? [],
@@ -1490,6 +1781,10 @@ export class AdminService {
       unit: data.unit as ProductUnit,
       basePrice: Number(data.base_price ?? 0),
       markupPercent: Number(data.markup_percent ?? 0),
+      minSellerPrice:
+        data.min_seller_price != null ? Number(data.min_seller_price) : null,
+      maxSellerPrice:
+        data.max_seller_price != null ? Number(data.max_seller_price) : null,
       shortDescription: (data.short_description as string | null) ?? null,
       longDescription: (data.long_description as string | null) ?? null,
       imageUrls: (data.image_urls as string[] | null) ?? [],
@@ -1516,6 +1811,8 @@ export class AdminService {
         unit: dto.unit,
         base_price: dto.basePrice,
         markup_percent: dto.markupPercent,
+        min_seller_price: dto.minSellerPrice ?? null,
+        max_seller_price: dto.maxSellerPrice ?? null,
         short_description: dto.shortDescription ?? null,
         long_description: dto.longDescription ?? null,
         image_urls: imageUrls,
@@ -1558,6 +1855,12 @@ export class AdminService {
     if (dto.basePrice !== undefined) patch.base_price = dto.basePrice;
     if (dto.markupPercent !== undefined)
       patch.markup_percent = dto.markupPercent;
+    if (dto.minSellerPrice !== undefined) {
+      patch.min_seller_price = dto.minSellerPrice;
+    }
+    if (dto.maxSellerPrice !== undefined) {
+      patch.max_seller_price = dto.maxSellerPrice;
+    }
     if (dto.shortDescription !== undefined)
       patch.short_description = dto.shortDescription;
     if (dto.longDescription !== undefined)
@@ -1784,7 +2087,7 @@ export class AdminService {
 
     const { data, error } = await client
       .from('users')
-      .select('id, email, fullname, role, is_active, created_at')
+      .select('id, email, fullname, role, is_active, created_at, last_login')
       .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
       .order('created_at', { ascending: false });
 
@@ -1803,6 +2106,7 @@ export class AdminService {
         role: u.role as UserRole,
         isActive: Boolean(u.is_active),
         createdAt: u.created_at as string,
+        lastLogin: (u.last_login as string | null) ?? null,
       })) ?? []
     );
   }

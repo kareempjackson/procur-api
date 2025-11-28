@@ -1,16 +1,17 @@
 import {
-  Controller,
-  Get,
-  Post,
-  Patch,
-  Delete,
+  BadRequestException,
   Body,
-  Param,
-  Query,
-  UseGuards,
+  Controller,
+  Delete,
+  Get,
   HttpCode,
   HttpStatus,
+  Param,
   ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -25,6 +26,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { SellersService } from './sellers.service';
+import { BankInfoService } from '../bank-info/bank-info.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
@@ -71,6 +73,7 @@ import {
   AcknowledgeHarvestBuyerRequestDto,
   CreateFarmVisitRequestDto,
   FarmVisitRequestDto,
+  SellerCatalogProductDto,
 } from './dto';
 
 @ApiTags('Sellers')
@@ -79,7 +82,10 @@ import {
 @UseGuards(JwtAuthGuard, EmailVerifiedGuard, AccountTypeGuard, PermissionsGuard)
 @AccountTypes(AccountType.SELLER)
 export class SellersController {
-  constructor(private readonly sellersService: SellersService) {}
+  constructor(
+    private readonly sellersService: SellersService,
+    private readonly bankInfoService: BankInfoService,
+  ) {}
 
   // ==================== PRODUCT MANAGEMENT ====================
 
@@ -137,6 +143,24 @@ export class SellersController {
     @Query() query: ProductQueryDto,
   ) {
     return this.sellersService.getProducts(user.organizationId!, query);
+  }
+
+  @Get('catalog-products')
+  @RequirePermissions('view_products')
+  @ApiOperation({
+    summary: 'List catalog products available to sellers',
+    description:
+      'Returns active admin catalog products (with optional price ranges) that sellers can reference when creating products.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Catalog products retrieved successfully',
+    type: [SellerCatalogProductDto],
+  })
+  async getCatalogProducts(
+    @CurrentUser() user: UserContext,
+  ): Promise<SellerCatalogProductDto[]> {
+    return this.sellersService.listCatalogProducts(user.organizationId!);
   }
 
   @Get('products/:id')
@@ -934,6 +958,31 @@ export class SellersController {
     return (this.sellersService as any).getLatestFarmVisitRequest(
       user.organizationId!,
     );
+  }
+
+  // ==================== BANK INFO / PAYOUT SETTINGS ====================
+
+  @Get('bank-info')
+  @ApiOperation({
+    summary: 'Get masked bank information for this seller',
+    description:
+      'Returns masked payout bank information for the current seller organization.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Bank information retrieved successfully',
+  })
+  async getBankInfo(@CurrentUser() user: UserContext): Promise<{
+    account_name: string | null;
+    bank_name: string | null;
+    account_last4: string | null;
+    bank_branch: string | null;
+    has_bank_info: boolean;
+  }> {
+    if (!user.organizationId) {
+      throw new BadRequestException('Missing organization context');
+    }
+    return this.bankInfoService.getMaskedBankInfo(user.organizationId);
   }
 
   // ==================== PRODUCT REQUESTS ENDPOINTS ====================

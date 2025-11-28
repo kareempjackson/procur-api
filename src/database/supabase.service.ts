@@ -17,6 +17,7 @@ import {
 export class SupabaseService {
   private readonly logger = new Logger(SupabaseService.name);
   private supabase: SupabaseClient;
+  private readonly supabaseUrl: string;
 
   constructor(private configService: ConfigService) {
     const supabaseUrl = this.configService.get<string>('database.supabaseUrl');
@@ -28,6 +29,7 @@ export class SupabaseService {
       throw new Error('Supabase configuration is missing');
     }
 
+    this.supabaseUrl = supabaseUrl;
     this.supabase = createClient(supabaseUrl, supabaseServiceKey, {
       auth: {
         autoRefreshToken: false,
@@ -40,6 +42,10 @@ export class SupabaseService {
 
   getClient(): SupabaseClient {
     return this.supabase;
+  }
+
+  getPublicUrl(bucket: string, path: string): string {
+    return `${this.supabaseUrl}/storage/v1/object/public/${bucket}/${path}`;
   }
 
   // Storage helpers

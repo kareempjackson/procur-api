@@ -227,9 +227,13 @@ export class TemplateService {
   /**
    * Send Accept / Reject CTA buttons for a specific order.
    * Button ids: oa_accept_<orderId> / oa_reject_<orderId>
+   * Optionally include a short human-readable summary of the order.
    */
-  async sendOrderAcceptButtons(to: string, orderId: string) {
+  async sendOrderAcceptButtons(to: string, orderId: string, summary?: string) {
     const dest = to.replace(/^\+/, '');
+    const text = summary
+      ? `Please accept or reject order ${orderId} for ${summary}.`
+      : `Please accept or reject order ${orderId}.`;
     await this.send['queue'].enqueueSendMessage({
       payload: {
         messaging_product: 'whatsapp',
@@ -237,7 +241,7 @@ export class TemplateService {
         type: 'interactive',
         interactive: {
           type: 'button',
-          body: { text: `Please accept or reject order ${orderId}.` },
+          body: { text },
           action: {
             buttons: [
               {

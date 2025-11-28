@@ -4,6 +4,22 @@ import { Transform } from 'class-transformer';
 
 export class UpdateUserProfileDto {
   @ApiPropertyOptional({
+    description: 'User full name',
+    example: 'Kevin Durant',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 200)
+  fullname?: string;
+
+  @ApiPropertyOptional({
     description: 'User phone number',
     example: '+1-555-123-4567',
   })
@@ -222,6 +238,55 @@ export class UpdateUserProfileDto {
   @IsString()
   @Length(1, 2048)
   farmersIdPath?: string;
+
+  @ApiPropertyOptional({
+    description: 'Organization tax ID or business number',
+    example: '123-456-789',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 100)
+  taxId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Organization registration number',
+    example: 'BRN-987654',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 100)
+  registrationNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Private storage path for organization logo (in public bucket)',
+    example: 'logos/organizations/<orgId>/<uuid>.jpg',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 2048)
+  logoPath?: string;
 
   @ApiPropertyOptional({
     description: "Private storage path for user's avatar (preferred)",

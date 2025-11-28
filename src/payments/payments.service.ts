@@ -234,6 +234,25 @@ export class PaymentsService {
           if (sellerUser?.phone_number) {
             notifyPhone = String(sellerUser.phone_number);
             // Send template (new order)
+            const summary =
+              items && items.length
+                ? (() => {
+                    const first = items[0];
+                    const unit =
+                      (first.product_snapshot as any)?.unit_of_measurement ||
+                      '';
+                    const qty = first.quantity ?? 0;
+                    const name =
+                      (first.product_snapshot as any)?.name || 'items';
+                    return qty && unit
+                      ? `${qty} ${unit} of ${name} for ${currency} ${total.toFixed(
+                          2,
+                        )}`
+                      : `${items.length} item(s) for ${currency} ${total.toFixed(
+                          2,
+                        )}`;
+                  })()
+                : `${currency} ${total.toFixed(2)}`;
             await this.waTemplates.sendNewOrderToSeller(
               notifyPhone.replace(/^\+/, ''),
               orderNum,
@@ -247,6 +266,7 @@ export class PaymentsService {
             await this.waTemplates.sendOrderAcceptButtons(
               notifyPhone,
               String(order.id),
+              summary,
             );
           }
         }
@@ -260,6 +280,25 @@ export class PaymentsService {
             .single();
           if (org?.phone_number) {
             const orgPhone = String(org.phone_number);
+            const summary =
+              items && items.length
+                ? (() => {
+                    const first = items[0];
+                    const unit =
+                      (first.product_snapshot as any)?.unit_of_measurement ||
+                      '';
+                    const qty = first.quantity ?? 0;
+                    const name =
+                      (first.product_snapshot as any)?.name || 'items';
+                    return qty && unit
+                      ? `${qty} ${unit} of ${name} for ${currency} ${total.toFixed(
+                          2,
+                        )}`
+                      : `${items.length} item(s) for ${currency} ${total.toFixed(
+                          2,
+                        )}`;
+                  })()
+                : `${currency} ${total.toFixed(2)}`;
             await this.waTemplates.sendNewOrderToSeller(
               orgPhone.replace(/^\+/, ''),
               orderNum,
@@ -272,6 +311,7 @@ export class PaymentsService {
             await this.waTemplates.sendOrderAcceptButtons(
               orgPhone,
               String(order.id),
+              summary,
             );
           } else {
             this.logger.warn(

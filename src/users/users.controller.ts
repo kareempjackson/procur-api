@@ -27,6 +27,10 @@ import {
   CreateFarmersIdUploadUrlDto,
   FarmersIdUploadUrlResponseDto,
 } from './dto/farmers-id-upload.dto';
+import {
+  CreateLogoUploadUrlDto,
+  LogoUploadUrlResponseDto,
+} from './dto/logo-upload.dto';
 
 @ApiTags('Users')
 @ApiBearerAuth('JWT-auth')
@@ -152,5 +156,29 @@ export class UsersController {
       signedUrl: upload.signedUrl,
       token: upload.token,
     };
+  }
+
+  @Patch('logo/signed-upload')
+  @ApiOperation({
+    summary: 'Create signed upload URL for organization logo (public bucket)',
+  })
+  @ApiResponse({ status: 200, description: 'Signed URL created' })
+  async createLogoSignedUpload(
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateLogoUploadUrlDto,
+  ): Promise<LogoUploadUrlResponseDto> {
+    const service: {
+      createLogoSignedUpload: (
+        user: UserContext,
+        dto: CreateLogoUploadUrlDto,
+      ) => Promise<LogoUploadUrlResponseDto>;
+    } = this.usersService as unknown as {
+      createLogoSignedUpload: (
+        user: UserContext,
+        dto: CreateLogoUploadUrlDto,
+      ) => Promise<LogoUploadUrlResponseDto>;
+    };
+    const upload = await service.createLogoSignedUpload(user, dto);
+    return upload;
   }
 }

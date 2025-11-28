@@ -1606,12 +1606,13 @@ export class BuyersService {
           buyer_user_id: buyerUserId,
           status: 'pending',
           payment_status: 'pending',
+          payment_method: 'offline',
           subtotal: orderSubtotal,
           tax_amount: taxAmount,
           shipping_amount: shippingAmount,
           discount_amount: 0,
           total_amount: totalAmount,
-          currency: 'USD',
+          currency: 'XCD',
           shipping_address: shippingAddress,
           billing_address: billingAddress,
           buyer_notes: createDto.buyer_notes,
@@ -1778,6 +1779,17 @@ export class BuyersService {
             const totalAmt = Number(order.total_amount || 0);
 
             const to = String(sellerUser.phone_number).replace(/^\+/, '');
+            const firstItem = items[0];
+            const unit =
+              (firstItem?.product_snapshot as any)?.unit_of_measurement || '';
+            const qty = firstItem?.quantity ?? 0;
+            const productName = firstItem?.product_name || 'items';
+            const summary =
+              qty && unit
+                ? `${qty} ${unit} of ${productName} for ${currency} ${totalAmt.toFixed(
+                    2,
+                  )}`
+                : `${items.length} item(s) for ${currency} ${totalAmt.toFixed(2)}`;
             await this.waTemplates.sendNewOrderToSeller(
               to,
               orderNum,
@@ -1791,6 +1803,7 @@ export class BuyersService {
             await this.waTemplates.sendOrderAcceptButtons(
               String(sellerUser.phone_number),
               String(order.id),
+              summary,
             );
           }
         }

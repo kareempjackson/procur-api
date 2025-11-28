@@ -37,6 +37,13 @@ import {
   AssignDriverDto,
   UpdateAdminOrderStatusDto,
 } from './dto/admin-order-status.dto';
+import { UpdateAdminOrderPaymentStatusDto } from './dto/admin-order-payment-status.dto';
+import { AdminOrderInspectionApprovalDto } from './dto/admin-order-inspection.dto';
+import {
+  AdminPaymentsQueryDto,
+  MarkBuyerSettlementCompletedDto,
+  MarkFarmerPayoutCompletedDto,
+} from './dto/admin-payments.dto';
 import {
   AdminProductResponseDto,
   AdminProductQueryDto,
@@ -167,6 +174,99 @@ export class AdminController {
     @Body() dto: UpdateAdminOrderStatusDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.updateOrderStatus(id, dto.status);
+  }
+
+  @Patch('orders/:id/payment-status')
+  @ApiOperation({
+    summary: 'Update order payment status (admin)',
+    description:
+      'Update the payment_status (and paid_at when marking paid) for an order from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Order payment status updated successfully',
+  })
+  async updateOrderPaymentStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateAdminOrderPaymentStatusDto,
+    @CurrentUser() user: UserContext,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.updateOrderPaymentStatus(id, dto, user.id);
+  }
+
+  @Patch('orders/:id/inspection-approval')
+  @ApiOperation({
+    summary: 'Record post-inspection approval or rejection (admin)',
+    description:
+      'Admin records supermarket inspection outcome, optional line adjustments, and approval notes.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Inspection approval saved successfully',
+  })
+  async approveOrderInspection(
+    @Param('id') id: string,
+    @Body() dto: AdminOrderInspectionApprovalDto,
+    @CurrentUser() user: UserContext,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.approveOrderInspection(id, {
+      inspectionStatus: dto.inspection_status,
+      approvalNotes: dto.approval_notes,
+      adminUserId: user.id,
+      itemAdjustments: dto.items?.map((i) => ({
+        id: i.id,
+        unit_price: i.unit_price,
+        quantity: i.quantity,
+      })),
+    });
+  }
+
+  // ===== Payments (direct-deposit clearing) =====
+
+  @Get('payments/buyer-settlements')
+  @ApiOperation({
+    summary: 'List buyer settlements (direct-deposit clearing)',
+    description:
+      'Lists buyer-side settlement transactions for the direct-deposit clearing flow.',
+  })
+  async listBuyerSettlements(@Query() query: AdminPaymentsQueryDto) {
+    return this.adminService.listBuyerSettlements(query);
+  }
+
+  @Get('payments/farmer-payouts')
+  @ApiOperation({
+    summary: 'List farmer payouts (direct-deposit clearing)',
+    description:
+      'Lists farmer payout transactions for the direct-deposit clearing flow.',
+  })
+  async listFarmerPayouts(@Query() query: AdminPaymentsQueryDto) {
+    return this.adminService.listFarmerPayouts(query);
+  }
+
+  @Patch('payments/buyer-settlements/:id/mark-completed')
+  @ApiOperation({
+    summary: 'Mark buyer settlement as completed',
+    description:
+      'Marks a buyer settlement (supermarket → Procur) as completed and records reference / proof.',
+  })
+  async markBuyerSettlementCompleted(
+    @Param('id') id: string,
+    @Body() body: MarkBuyerSettlementCompletedDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.markBuyerSettlementCompleted(id, body);
+  }
+
+  @Patch('payments/farmer-payouts/:id/mark-completed')
+  @ApiOperation({
+    summary: 'Mark farmer payout as completed',
+    description:
+      'Marks a farmer payout (Procur → farmer) as completed and records proof, updating order payment status.',
+  })
+  async markFarmerPayoutCompleted(
+    @Param('id') id: string,
+    @Body() body: MarkFarmerPayoutCompletedDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.markFarmerPayoutCompleted(id, body);
   }
 
   @Patch('orders/:id/driver')

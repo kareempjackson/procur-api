@@ -10,6 +10,7 @@ import {
   Max,
   Length,
   ValidateNested,
+  IsUUID,
 } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -163,6 +164,14 @@ export class CreateProductDto {
   @ValidateNested({ each: true })
   @Type(() => ProductImageDto)
   images?: ProductImageDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Linked admin catalog product ID (for price range and mapping)',
+  })
+  @IsOptional()
+  @IsUUID()
+  admin_product_id?: string;
 }
 
 export class UpdateProductDto {
@@ -318,6 +327,14 @@ export class UpdateProductDto {
   @IsBoolean()
   is_organic?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Linked admin catalog product ID (for price range and mapping)',
+  })
+  @IsOptional()
+  @IsUUID()
+  admin_product_id?: string;
+
   @ApiPropertyOptional({ description: 'Is this a locally sourced product?' })
   @IsOptional()
   @IsBoolean()
@@ -425,6 +442,42 @@ export class ProductQueryDto {
   sort_order?: 'asc' | 'desc' = 'desc';
 }
 
+export class SellerCatalogProductDto {
+  @ApiProperty({ description: 'Admin catalog product ID' })
+  id: string;
+
+  @ApiProperty({ description: 'Catalog product name' })
+  name: string;
+
+  @ApiPropertyOptional({ description: 'Catalog product category' })
+  category?: string | null;
+
+  @ApiProperty({ description: 'Unit of measurement used in catalog' })
+  unit: string;
+
+  @ApiProperty({
+    description: 'Suggested base price used by platform (for reference)',
+  })
+  basePrice: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Minimum seller price allowed for products linked to this catalog item',
+  })
+  minSellerPrice?: number | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Maximum seller price allowed for products linked to this catalog item',
+  })
+  maxSellerPrice?: number | null;
+
+  @ApiPropertyOptional({
+    description: 'Short description for display in picker lists',
+  })
+  shortDescription?: string | null;
+}
+
 export class ProductResponseDto {
   @ApiProperty({ description: 'Product ID' })
   id: string;
@@ -530,4 +583,9 @@ export class ProductResponseDto {
     type: [ProductImageDto],
   })
   images?: ProductImageDto[];
+
+  @ApiPropertyOptional({
+    description: 'Linked admin catalog product ID (if based on admin catalog)',
+  })
+  admin_product_id?: string | null;
 }

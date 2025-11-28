@@ -27,6 +27,7 @@ import { AiModule } from './ai/ai.module';
 import { HealthController } from './health.controller';
 import { AdminModule } from './admin/admin.module';
 import { AuditModule } from './audit/audit.module';
+import { BankInfoModule } from './bank-info/bank-info.module';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { AuditModule } from './audit/audit.module';
     AiModule,
     AdminModule,
     AuditModule,
+    BankInfoModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

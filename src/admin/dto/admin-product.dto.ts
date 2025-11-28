@@ -65,6 +65,12 @@ export class AdminProductResponseDto {
   markupPercent: number;
 
   @ApiPropertyOptional()
+  minSellerPrice?: number | null;
+
+  @ApiPropertyOptional()
+  maxSellerPrice?: number | null;
+
+  @ApiPropertyOptional()
   shortDescription?: string | null;
 
   @ApiPropertyOptional()
@@ -100,6 +106,18 @@ export class CreateAdminProductDto {
   @ApiProperty()
   @IsNumber()
   markupPercent: number;
+
+  @ApiPropertyOptional()
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  minSellerPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  maxSellerPrice?: number;
 
   @ApiPropertyOptional({ enum: ProductCategory })
   @IsEnum(ProductCategory)
@@ -146,6 +164,18 @@ export class UpdateAdminProductDto {
   @IsNumber()
   @IsOptional()
   markupPercent?: number;
+
+  @ApiPropertyOptional()
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  minSellerPrice?: number;
+
+  @ApiPropertyOptional()
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  maxSellerPrice?: number;
 
   @ApiPropertyOptional({ enum: ProductCategory })
   @IsEnum(ProductCategory)

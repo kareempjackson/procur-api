@@ -27,6 +27,12 @@ export class AdminUserResponseDto {
 
   @ApiProperty()
   createdAt: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Last time this admin user logged in (ISO 8601), null if never',
+  })
+  lastLogin?: string | null;
 }
 
 export class CreateAdminUserDto {

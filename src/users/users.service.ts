@@ -7,6 +7,10 @@ import {
   CreateFarmersIdUploadUrlDto,
   FarmersIdUploadUrlResponseDto,
 } from './dto/farmers-id-upload.dto';
+import {
+  CreateLogoUploadUrlDto,
+  LogoUploadUrlResponseDto,
+} from './dto/logo-upload.dto';
 
 @Injectable()
 export class UsersService {
@@ -39,7 +43,7 @@ export class UsersService {
               const signed = await this.supabase.createSignedDownloadUrl(
                 this.privateBucket,
                 farmersIdPath,
-                60 * 60, // 1 hour
+                60 * 60, // 1 hour,
               );
               farmersIdUrl = signed.signedUrl;
             } catch {
@@ -64,6 +68,8 @@ export class UsersService {
           logoUrl: (org as any).logo_url ?? null,
           farmersIdUrl,
           farmersIdPath: farmersIdPath,
+          farmersIdVerified: Boolean((org as any).farmers_id_verified ?? false),
+          farmVerified: Boolean((org as any).farm_verified ?? false),
         };
       }
     }
@@ -108,8 +114,10 @@ export class UsersService {
     const orgUpdates: Record<string, any> = {};
     const userUpdates: Record<string, any> = {};
 
+    if (typeof updateData?.fullname === 'string')
+      userUpdates.fullname = updateData.fullname;
     if (typeof updateData?.phone === 'string')
-      userUpdates.phone = updateData.phone;
+      userUpdates.phone_number = updateData.phone;
     if (typeof updateData?.firstName === 'string')
       userUpdates.first_name = updateData.firstName;
     if (typeof updateData?.lastName === 'string')
@@ -137,6 +145,20 @@ export class UsersService {
       orgUpdates.farmers_id = (updateData as any).farmersIdPath;
     else if (typeof (updateData as any)?.farmersIdUrl === 'string')
       orgUpdates.farmers_id = (updateData as any).farmersIdUrl;
+
+    if (typeof (updateData as any)?.taxId === 'string')
+      orgUpdates.tax_id = (updateData as any).taxId;
+    if (typeof (updateData as any)?.registrationNumber === 'string')
+      orgUpdates.business_registration_number = (
+        updateData as any
+      ).registrationNumber;
+
+    if (typeof (updateData as any)?.logoPath === 'string') {
+      const bucket = 'public';
+      const path = (updateData as any).logoPath as string;
+      const publicUrl = this.supabase.getPublicUrl(bucket, path);
+      orgUpdates.logo_url = publicUrl;
+    }
 
     // Support avatar path update (stored in users.profile_img)
     if (typeof (updateData as any)?.avatarPath === 'string') {
@@ -212,6 +234,40 @@ export class UsersService {
       : 'jpg';
     const bucket = this.privateBucket;
     const objectPath = `ids/farmers/${dto.organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e: any) {
+      const status = typeof e?.status === 'number' ? e.status : 400;
+      throw new HttpException('Failed to create signed upload URL', status);
+    }
+  }
+
+  async createLogoSignedUpload(
+    user: UserContext,
+    dto: CreateLogoUploadUrlDto,
+  ): Promise<LogoUploadUrlResponseDto> {
+    if (!user.organizationId || user.organizationId !== dto.organizationId) {
+      throw new BadRequestException('Invalid organization context');
+    }
+
+    const ext = dto.filename.includes('.')
+      ? dto.filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = 'public';
+    const objectPath = `logos/organizations/${dto.organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    // Ensure bucket exists and is public
+    await this.supabase.ensureBucketExists(bucket, true);
 
     try {
       const signed = await this.supabase.createSignedUploadUrl(

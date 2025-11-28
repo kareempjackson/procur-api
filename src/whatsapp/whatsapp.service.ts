@@ -1335,9 +1335,17 @@ export class WhatsappService {
         this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
-      this.sessions.set(to, { flow: 'orders_list', data: { orders_page: 1 } });
-      await this.listPendingOrders(to);
-      return;
+      if (s.user.accountType === 'buyer') {
+        await this.listBuyerOrders(to);
+        return;
+      } else {
+        this.sessions.set(to, {
+          flow: 'orders_list',
+          data: { orders_page: 1 },
+        });
+        await this.listPendingOrders(to);
+        return;
+      }
     }
     if (choice === 'menu_transactions') {
       const s = this.sessions.get(to);
@@ -1824,6 +1832,25 @@ export class WhatsappService {
       await this.showCart(to);
       return;
     }
+    if (choice === 'cart_checkout_later') {
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || !user?.id) {
+        await this.sendText(to, 'Sign up to continue.');
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      if (user.accountType !== 'buyer') {
+        await this.sendText(
+          to,
+          'Checkout is only available for buyer accounts. Please sign up or sign in as a buyer.',
+        );
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      await this.startCartCheckoutLater(to);
+      return;
+    }
     if (choice === 'inv_next' || choice === 'inv_prev') {
       const s = this.sessions.get(to);
       const cur = Number(s.data.inv_page || 1);
@@ -1880,6 +1907,26 @@ export class WhatsappService {
     }
     if (choice === 'menu_login') {
       await this.startLoginFlow(to);
+      return;
+    }
+    if (choice.startsWith('addr_')) {
+      const addressId = choice.substring(5);
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || !user?.id) {
+        await this.sendText(to, 'Sign up to continue.');
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      if (user.accountType !== 'buyer') {
+        await this.sendText(
+          to,
+          'Checkout is only available for buyer accounts. Please sign up or sign in as a buyer.',
+        );
+        this.sessions.set(to, { flow: 'signup_name' });
+        return;
+      }
+      await this.completeCartCheckoutWithAddress(to, addressId);
       return;
     }
     await this.showMenu(to);
@@ -2466,8 +2513,8 @@ export class WhatsappService {
         `Total: ${cart.total} ${cart.currency}`,
       );
       await this.sendText(to, lines.join('\n'));
-      // Checkout requires a shipping address; steer users accordingly for now
       await this.sendButtons(to, 'Next:', [
+        { id: 'cart_checkout_later', title: 'Place order (Pay later)' },
         { id: 'menu_market', title: 'Continue browsing' },
       ]);
     } catch (e) {
@@ -2634,6 +2681,41 @@ export class WhatsappService {
     }
   }
 
+  private async listBuyerOrders(to: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId || user.accountType !== 'buyer') {
+      await this.sendText(
+        to,
+        'Buyer orders are only available for buyer accounts.',
+      );
+      return;
+    }
+    try {
+      const { orders } = await this.buyers.getOrders(user.orgId, {
+        page: 1,
+        limit: 5,
+      } as any);
+      if (!orders || !orders.length) {
+        await this.sendText(to, 'You have no recent orders.');
+        return;
+      }
+      const lines: string[] = ['Your recent orders:'];
+      for (const o of orders) {
+        lines.push(
+          `• ${o.order_number}: ${o.total_amount} ${o.currency} • ${o.status} • payment: ${o.payment_status}`,
+        );
+      }
+      await this.sendText(to, lines.join('\n'));
+    } catch (e) {
+      this.logger.error('List buyer orders failed', e as any);
+      await this.sendText(
+        to,
+        'Failed to load your orders. Please try again or use the buyer web app.',
+      );
+    }
+  }
+
   private async listRecentTransactions(to: string) {
     const s = this.sessions.get(to);
     const user = s.user;
@@ -2662,6 +2744,205 @@ export class WhatsappService {
         ...(hasNext ? [{ id: 'tx_next', title: 'Next' }] : []),
       ];
       await this.sendButtons(to, `Page ${page}`, buttons as any);
+    }
+  }
+
+  private async startCartCheckoutLater(to: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId || !user?.id) {
+      await this.sendText(to, 'Sign up to continue.');
+      this.sessions.set(to, { flow: 'signup_name' });
+      return;
+    }
+    try {
+      const client = this.supabase.getClient();
+      const { data: addresses, error } = await client
+        .from('buyer_addresses')
+        .select('*')
+        .eq('buyer_org_id', user.orgId)
+        .order('is_default', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        this.logger.error('Checkout: load addresses failed', error);
+        await this.sendText(
+          to,
+          'Failed to load your addresses. Please try again or use the buyer web app.',
+        );
+        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.showMenu(to);
+        return;
+      }
+
+      if (!addresses || addresses.length === 0) {
+        await this.sendText(
+          to,
+          'To place an order, please add a shipping address in the buyer web app, then reply "menu" here.',
+        );
+        this.sessions.set(to, { flow: 'menu', data: {} });
+        return;
+      }
+
+      if (addresses.length === 1) {
+        await this.completeCartCheckoutWithAddress(to, addresses[0].id);
+        return;
+      }
+
+      this.sessions.set(to, { flow: 'checkout_select_address' });
+      const rows = addresses.slice(0, 10).map((a: any) => {
+        const title = this.truncate(a.label || a.contact_name || 'Address', 24);
+        const parts = [
+          a.street_address || a.address_line1 || '',
+          a.city || '',
+          a.country || '',
+        ].filter(Boolean);
+        const description = this.truncate(parts.join(', '), 60);
+        return { id: `addr_${a.id}`, title, description };
+      });
+
+      await this.waQueue.enqueueSendMessage({
+        payload: {
+          messaging_product: 'whatsapp',
+          to,
+          type: 'interactive',
+          interactive: {
+            type: 'list',
+            header: { type: 'text', text: 'Choose shipping address' },
+            body: { text: 'Select where this order should be delivered.' },
+            action: {
+              button: 'Addresses',
+              sections: [{ title: 'Saved addresses', rows }],
+            },
+          },
+        },
+      });
+    } catch (e) {
+      this.logger.error('Checkout: startCartCheckoutLater failed', e as any);
+      await this.sendText(
+        to,
+        'Failed to start checkout. Please try again or use the buyer web app.',
+      );
+      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.showMenu(to);
+    }
+  }
+
+  private async completeCartCheckoutWithAddress(to: string, addressId: string) {
+    const s = this.sessions.get(to);
+    const user = s.user;
+    if (!user?.orgId || !user?.id) {
+      await this.sendText(to, 'Sign up to continue.');
+      this.sessions.set(to, { flow: 'signup_name' });
+      return;
+    }
+    const lockKey = `wa:checkout_lock:${user.orgId}:${user.id}`;
+    const acquired = await this.redis.set(lockKey, '1', 'EX', 60, 'NX');
+    if (!acquired) {
+      await this.sendText(
+        to,
+        'An order is already being placed. Please wait a moment and check your orders.',
+      );
+      return;
+    }
+    try {
+      const client = this.supabase.getClient();
+      // Resolve current cart id using same RPC as BuyersService
+      const { data: cartId, error: cartIdError } = await client.rpc(
+        'get_or_create_cart',
+        {
+          p_buyer_org_id: user.orgId,
+          p_buyer_user_id: user.id,
+        },
+      );
+      if (cartIdError) {
+        this.logger.error('Checkout: get_or_create_cart failed', cartIdError);
+        await this.sendText(
+          to,
+          'Failed to load your cart. Please try again or use the buyer web app.',
+        );
+        return;
+      }
+      if (!cartId) {
+        await this.sendText(to, 'Your cart is empty.');
+        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.showMenu(to);
+        return;
+      }
+
+      const { data: cartItems, error: cartItemsError } = await client
+        .from('cart_items')
+        .select('product_id, quantity')
+        .eq('cart_id', cartId);
+
+      if (cartItemsError) {
+        this.logger.error('Checkout: load cart_items failed', cartItemsError);
+        await this.sendText(
+          to,
+          'Failed to load your cart. Please try again or use the buyer web app.',
+        );
+        return;
+      }
+
+      if (!cartItems || cartItems.length === 0) {
+        await this.sendText(to, 'Your cart is empty.');
+        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.showMenu(to);
+        return;
+      }
+
+      const nonZeroItems = cartItems.filter(
+        (it: any) => Number(it.quantity) > 0,
+      );
+      if (!nonZeroItems.length) {
+        await this.sendText(
+          to,
+          'Your cart has no items with a positive quantity. Please update your cart and try again.',
+        );
+        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.showMenu(to);
+        return;
+      }
+
+      const items = nonZeroItems.map((it: any) => ({
+        product_id: it.product_id as string,
+        quantity: Number(it.quantity) || 0,
+      }));
+
+      const dto: any = {
+        items,
+        shipping_address_id: addressId,
+      };
+
+      const firstOrder = await this.buyers.createOrder(
+        user.orgId,
+        user.id,
+        dto,
+      );
+
+      await this.sendText(
+        to,
+        `Order placed ✅\nOrder: ${firstOrder.order_number}\nTotal: ${firstOrder.total_amount} ${firstOrder.currency}\nPayment: pending (offline, will be marked as paid by admin).`,
+      );
+      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.showMenu(to);
+    } catch (e) {
+      this.logger.error(
+        'Checkout: completeCartCheckoutWithAddress failed',
+        e as any,
+      );
+      await this.sendText(
+        to,
+        'Failed to place your order. Please try again or use the buyer web app.',
+      );
+    } finally {
+      try {
+        await this.redis.del(lockKey);
+      } catch {
+        // ignore
+      }
+      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.showMenu(to);
     }
   }
 

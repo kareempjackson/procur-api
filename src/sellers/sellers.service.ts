@@ -31,6 +31,7 @@ import {
   AnalyticsQueryDto,
   ProductImageDto,
 } from './dto';
+import { SellerCatalogProductDto } from './dto/product.dto';
 import { SellerHomeResponseDto, BuyerRequestSummaryDto } from './dto/home.dto';
 import {
   CreateFarmVisitRequestDto,
@@ -137,6 +138,41 @@ export class SellersService {
     await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
+    // If linked to an admin catalog product, enforce configured price range
+    if (createProductDto.admin_product_id) {
+      const { data: adminProduct, error: adminError } = await client
+        .from('admin_products')
+        .select('id, is_active, min_seller_price, max_seller_price')
+        .eq('id', createProductDto.admin_product_id)
+        .single();
+
+      if (adminError || !adminProduct || adminProduct.is_active === false) {
+        throw new BadRequestException(
+          'Invalid or inactive admin catalog product reference',
+        );
+      }
+
+      const price = createProductDto.base_price;
+      const minSellerPrice = adminProduct.min_seller_price as number | null;
+      const maxSellerPrice = adminProduct.max_seller_price as number | null;
+
+      if (minSellerPrice != null && price < Number(minSellerPrice)) {
+        throw new BadRequestException(
+          `Price must be at least ${Number(minSellerPrice).toFixed(
+            2,
+          )} for this catalog product`,
+        );
+      }
+
+      if (maxSellerPrice != null && price > Number(maxSellerPrice)) {
+        throw new BadRequestException(
+          `Price must be at most ${Number(maxSellerPrice).toFixed(
+            2,
+          )} for this catalog product`,
+        );
+      }
+    }
+
     // Generate slug if not provided
     const slug = await this.generateProductSlug(createProductDto.name);
 
@@ -147,6 +183,7 @@ export class SellersService {
       ...productCore,
       created_by: userId,
       slug,
+      admin_product_id: createProductDto.admin_product_id,
     };
 
     const { data, error } = await client
@@ -271,6 +308,44 @@ export class SellersService {
     };
   }
 
+  async listCatalogProducts(
+    sellerOrgId: string,
+  ): Promise<SellerCatalogProductDto[]> {
+    await this.assertSellerVerified(sellerOrgId);
+    const client = this.supabaseService.getClient();
+
+    const { data, error } = await client
+      .from('admin_products')
+      .select(
+        'id, name, category, unit, base_price, min_seller_price, max_seller_price, short_description',
+      )
+      .eq('is_active', true)
+      .order('name', { ascending: true });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to load catalog products: ${error.message}`,
+      );
+    }
+
+    return (
+      data?.map(
+        (p: any): SellerCatalogProductDto => ({
+          id: p.id as string,
+          name: p.name as string,
+          category: (p.category as string | null) ?? null,
+          unit: p.unit as string,
+          basePrice: Number(p.base_price ?? 0),
+          minSellerPrice:
+            p.min_seller_price != null ? Number(p.min_seller_price) : null,
+          maxSellerPrice:
+            p.max_seller_price != null ? Number(p.max_seller_price) : null,
+          shortDescription: (p.short_description as string | null) ?? null,
+        }),
+      ) ?? []
+    );
+  }
+
   async getProductById(
     sellerOrgId: string,
     productId: string,
@@ -301,12 +376,63 @@ export class SellersService {
     await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
-    // Check if product exists and belongs to seller
-    await this.getProductById(sellerOrgId, productId);
+    // Check if product exists and belongs to seller, and load current admin_product_id / base_price
+    const { data: existing, error: existingError } = await client
+      .from('products')
+      .select('id, seller_org_id, admin_product_id, base_price')
+      .eq('id', productId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (existingError || !existing) {
+      throw new NotFoundException('Product not found');
+    }
+
+    // Determine which admin_product_id to validate against (existing or updated)
+    const nextAdminProductId =
+      updateProductDto.admin_product_id !== undefined
+        ? updateProductDto.admin_product_id
+        : ((existing.admin_product_id as string | null) ?? null);
+
+    // If there is an admin catalog mapping and price is being changed, enforce range
+    if (nextAdminProductId && updateProductDto.base_price !== undefined) {
+      const { data: adminProduct, error: adminError } = await client
+        .from('admin_products')
+        .select('id, is_active, min_seller_price, max_seller_price')
+        .eq('id', nextAdminProductId)
+        .single();
+
+      if (adminError || !adminProduct || adminProduct.is_active === false) {
+        throw new BadRequestException(
+          'Invalid or inactive admin catalog product reference',
+        );
+      }
+
+      const price = updateProductDto.base_price;
+      const minSellerPrice = adminProduct.min_seller_price as number | null;
+      const maxSellerPrice = adminProduct.max_seller_price as number | null;
+
+      if (minSellerPrice != null && price < Number(minSellerPrice)) {
+        throw new BadRequestException(
+          `Price must be at least ${Number(minSellerPrice).toFixed(
+            2,
+          )} for this catalog product`,
+        );
+      }
+
+      if (maxSellerPrice != null && price > Number(maxSellerPrice)) {
+        throw new BadRequestException(
+          `Price must be at most ${Number(maxSellerPrice).toFixed(
+            2,
+          )} for this catalog product`,
+        );
+      }
+    }
 
     const updateData: UpdateProductData = {
       ...updateProductDto,
       updated_by: userId,
+      admin_product_id: nextAdminProductId ?? undefined,
     };
 
     // Generate new slug if name is being updated
