@@ -1,4 +1,13 @@
-import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -127,6 +136,85 @@ export class UsersController {
   @ApiForbiddenResponse({ description: 'Insufficient permissions' })
   async getUsersList(@CurrentUser() user: UserContext) {
     return this.usersService.getUsersList(user);
+  }
+
+  @Get('org-members')
+  @ApiOperation({
+    summary: 'List organization team members',
+    description:
+      'Return active users for the current organization, including basic role metadata. Used by seller Business → Team tab.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Organization members listed successfully',
+  })
+  async listOrgMembers(@CurrentUser() user: UserContext) {
+    return this.usersService.listOrganizationMembers(user);
+  }
+
+  @Post('org-members/invite')
+  @ApiOperation({
+    summary: 'Add existing user to organization team',
+    description:
+      'Adds an existing Procur user (by email) to the current organization. The user must already have an account.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Team member added successfully',
+  })
+  async inviteOrgMember(
+    @CurrentUser() user: UserContext,
+    @Body() body: { email: string; roleName?: string },
+  ) {
+    return this.usersService.inviteOrganizationMember(user, body);
+  }
+
+  @Get('org-invitations')
+  @ApiOperation({
+    summary: 'List pending organization invitations',
+    description:
+      'Return pending invitations for the current organization for display in the Team tab.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Organization invitations listed successfully',
+  })
+  async listOrgInvitations(@CurrentUser() user: UserContext) {
+    return this.usersService.listOrganizationInvitations(user);
+  }
+
+  @Delete('org-invitations/:id')
+  @ApiOperation({
+    summary: 'Revoke organization invitation',
+    description:
+      'Delete a pending invitation so that the invite link can no longer be used.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Invitation revoked successfully',
+  })
+  async revokeOrgInvitation(
+    @CurrentUser() user: UserContext,
+    @Param('id') id: string,
+  ) {
+    return this.usersService.cancelOrganizationInvitation(user, id);
+  }
+
+  @Delete('org-members/:id')
+  @ApiOperation({
+    summary: 'Remove organization team member',
+    description:
+      'Soft-removes a team member from the current organization by setting is_active = false on the organization_users row.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Team member removed successfully',
+  })
+  async removeOrgMember(
+    @CurrentUser() user: UserContext,
+    @Param('id') id: string,
+  ) {
+    return this.usersService.removeOrganizationMember(user, id);
   }
 
   @Patch('farmers-id/signed-upload')

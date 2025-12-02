@@ -32,6 +32,7 @@ import {
 import { Public } from './decorators/public.decorator';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -244,6 +245,21 @@ export class AuthController {
     @Body(ValidationPipe) dto: VerifyOtpDto,
   ): Promise<AuthResponseDto> {
     return this.authService.verifyOtp(dto);
+  }
+
+  @Public()
+  @Post('accept-invitation')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Accept organization invitation',
+    description:
+      'Accept an organization invitation using the token from the email, create or attach a user account, and return an authenticated session.',
+  })
+  @ApiBody({ type: AcceptInvitationDto })
+  async acceptInvitation(
+    @Body(ValidationPipe) dto: AcceptInvitationDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.acceptInvitation(dto);
   }
 
   @Post('change-password')

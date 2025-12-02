@@ -1016,7 +1016,20 @@ export class WhatsappService {
             metadata: { status: 'accepted', type: 'order' },
           });
           await this.sendText(from, `Order accepted ✅`);
-          await this.sendOrderUpdateTemplate(from, String(orderId), 'accepted');
+          // Send a template update to the seller number for consistency with other channels.
+          await this.tmplSvc.sendOrderUpdate(
+            from,
+            String(orderId),
+            'accepted',
+            undefined,
+            this.getLocale(from),
+          );
+          // Notify buyer via template if paired
+          await this.notifyBuyerOrderUpdate(
+            user.orgId,
+            String(orderId),
+            'accepted',
+          );
           this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
@@ -1054,7 +1067,19 @@ export class WhatsappService {
             metadata: { status: 'rejected', type: 'order' },
           });
           await this.sendText(from, `Order rejected ❌`);
-          await this.sendOrderUpdateTemplate(from, String(orderId), 'rejected');
+          await this.tmplSvc.sendOrderUpdate(
+            from,
+            String(orderId),
+            'rejected',
+            undefined,
+            this.getLocale(from),
+          );
+          // Notify buyer via template if paired
+          await this.notifyBuyerOrderUpdate(
+            user.orgId,
+            String(orderId),
+            'rejected',
+          );
           this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
@@ -1109,8 +1134,16 @@ export class WhatsappService {
             metadata: { status, type: 'order' },
           });
           await this.sendText(from, `Order updated to ${status} ✅`);
-          await this.sendOrderUpdateTemplate(
+          await this.tmplSvc.sendOrderUpdate(
             from,
+            String(orderId),
+            status,
+            tracking || undefined,
+            this.getLocale(from),
+          );
+          // Notify buyer via template if paired
+          await this.notifyBuyerOrderUpdate(
+            user.orgId,
             String(orderId),
             status,
             tracking || undefined,
@@ -1590,6 +1623,70 @@ export class WhatsappService {
       await this.sendText(to, 'Optional message? (type "skip" to continue)');
       return;
     }
+    if (choice.startsWith('bord_')) {
+      const orderId = choice.substring(5);
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || user.accountType !== 'buyer') {
+        await this.sendText(
+          to,
+          'Order details are only available for buyer accounts.',
+        );
+        return;
+      }
+      try {
+        const order = await this.buyers.getOrderById(user.orgId, orderId);
+        const lines: string[] = [
+          `Order ${order.order_number}`,
+          `${order.total_amount} ${order.currency}`,
+          `Status: ${order.status}`,
+          `Payment: ${order.payment_status}`,
+        ];
+        if (order.estimated_delivery_date) {
+          lines.push(`ETA: ${order.estimated_delivery_date}`);
+        }
+        if (order.tracking_number) {
+          lines.push(`Tracking: ${order.tracking_number}`);
+        }
+        await this.sendText(to, lines.join('\n'));
+        // If order is cancellable, offer a cancel button
+        if (order.status === 'pending' || order.status === 'confirmed') {
+          await this.sendButtons(to, 'Order options:', [
+            { id: `bord_cancel_${order.id}`, title: 'Cancel order' },
+          ]);
+        }
+      } catch (e) {
+        this.logger.error('Buyer order details failed', e as any);
+        await this.sendText(
+          to,
+          'Failed to load order details. Please try again or use the buyer web app.',
+        );
+      }
+      return;
+    }
+    if (choice.startsWith('bord_cancel_')) {
+      const orderId = choice.substring('bord_cancel_'.length);
+      const s = this.sessions.get(to);
+      const user = s.user;
+      if (!user?.orgId || user.accountType !== 'buyer') {
+        await this.sendText(
+          to,
+          'Order cancellation is only available for buyer accounts.',
+        );
+        return;
+      }
+      try {
+        await this.buyers.cancelOrder(user.orgId, orderId);
+        await this.sendText(to, 'Your order has been cancelled ✅');
+      } catch (e) {
+        this.logger.error('Buyer cancel order failed', e as any);
+        await this.sendText(
+          to,
+          'Order could not be cancelled. It may already be processed or shipped.',
+        );
+      }
+      return;
+    }
     if (choice.startsWith('ord_')) {
       const orderId = choice.substring(4);
       this.sessions.set(to, { data: { order_id: orderId } });
@@ -2049,6 +2146,19 @@ export class WhatsappService {
             status: 'active',
           } as any);
         } catch {}
+      }
+      // On successful OTP verification, pair this WhatsApp number with the user
+      const userId = current.user?.id;
+      if (userId) {
+        const e164 = `+${from}`;
+        const fp = crypto.createHash('sha256').update(e164).digest('hex');
+        await this.redis.set(`wa:fp:${userId}`, fp, 'EX', 60 * 60 * 24 * 90);
+        await this.redis.set(
+          `wa:last_active:${userId}`,
+          String(Date.now()),
+          'EX',
+          60 * 60 * 24 * 60,
+        );
       }
       await this.sendText(from, '✅ Verified! Your Procur account is ready.');
       this.sessions.set(from, { flow: 'menu', data: {} });
@@ -2700,13 +2810,30 @@ export class WhatsappService {
         await this.sendText(to, 'You have no recent orders.');
         return;
       }
-      const lines: string[] = ['Your recent orders:'];
-      for (const o of orders) {
-        lines.push(
-          `• ${o.order_number}: ${o.total_amount} ${o.currency} • ${o.status} • payment: ${o.payment_status}`,
+      const rows = orders.map((o: any) => {
+        const title = this.truncate(`${o.order_number}`, 24);
+        const description = this.truncate(
+          `${o.total_amount} ${o.currency} • ${o.status} • payment: ${o.payment_status}`,
+          60,
         );
-      }
-      await this.sendText(to, lines.join('\n'));
+        return { id: `bord_${o.id}`, title, description };
+      });
+      await this.waQueue.enqueueSendMessage({
+        payload: {
+          messaging_product: 'whatsapp',
+          to,
+          type: 'interactive',
+          interactive: {
+            type: 'list',
+            header: { type: 'text', text: 'Your recent orders' },
+            body: { text: 'Select an order to view details' },
+            action: {
+              button: 'Orders',
+              sections: [{ title: 'Recent', rows }],
+            },
+          },
+        },
+      });
     } catch (e) {
       this.logger.error('List buyer orders failed', e as any);
       await this.sendText(
@@ -3204,49 +3331,6 @@ export class WhatsappService {
     }
   }
 
-  private async sendOrderUpdateTemplate(
-    to: string,
-    orderNumber: string,
-    status: string,
-    tracking?: string,
-  ) {
-    const outside = await this.isOutside24h(to);
-    if (!outside) return;
-    const locale = this.getLocale(to);
-    if (tracking) {
-      await this.sendTemplate(
-        to,
-        'order_update_with_tracking',
-        [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: orderNumber },
-              { type: 'text', text: status },
-              { type: 'text', text: tracking },
-            ],
-          },
-        ],
-        this.getTemplateLang(locale),
-      );
-    } else {
-      await this.sendTemplate(
-        to,
-        'order_update_no_tracking',
-        [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: orderNumber },
-              { type: 'text', text: status },
-            ],
-          },
-        ],
-        this.getTemplateLang(locale),
-      );
-    }
-  }
-
   private async sendLanguageList(to: string) {
     await this.waQueue.enqueueSendMessage({
       payload: {
@@ -3272,6 +3356,57 @@ export class WhatsappService {
         },
       },
     });
+  }
+
+  /**
+   * Notify the buyer about an order status change via WhatsApp template,
+   * if the buyer has a paired WhatsApp number.
+   */
+  private async notifyBuyerOrderUpdate(
+    sellerOrgId: string,
+    orderId: string,
+    status: string,
+    tracking?: string,
+  ) {
+    try {
+      const client = this.supabase.getClient();
+      // Fetch order with buyer_user_id and buyer phone
+      const { data: order } = await client
+        .from('orders')
+        .select(
+          `
+          id,
+          order_number,
+          buyer_user_id,
+          buyer_org_id,
+          users:buyer_user_id ( id, phone_number )
+        `,
+        )
+        .eq('id', orderId)
+        .eq('seller_org_id', sellerOrgId)
+        .single();
+
+      const users = order?.users as any;
+      if (!order?.buyer_user_id || !users?.phone_number) {
+        return;
+      }
+
+      const buyerUserId = String(users.id || order.buyer_user_id);
+      const phoneE164 = String(users.phone_number);
+      const orderNumber = String(order.order_number || order.id);
+      const locale = 'en'; // TODO: derive from buyer/org preferences when available
+
+      await this.tmplSvc.sendOrderUpdateIfPaired(
+        buyerUserId,
+        phoneE164,
+        orderNumber,
+        status,
+        tracking,
+        locale,
+      );
+    } catch (e) {
+      this.logger.error('notifyBuyerOrderUpdate failed', e as any);
+    }
   }
 
   private async sendTemplate(

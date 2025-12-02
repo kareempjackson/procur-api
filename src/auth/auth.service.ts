@@ -1,9 +1,9 @@
 import {
-  Injectable,
-  ConflictException,
-  UnauthorizedException,
   BadRequestException,
+  ConflictException,
+  Injectable,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -29,6 +29,7 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { SendService as WaSendService } from '../whatsapp/send/send.service';
 import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
+import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 
 @Injectable()
 export class AuthService {
@@ -617,5 +618,172 @@ export class AuthService {
     }
 
     return { organizationId, organizationName, organizationRole, accountType };
+  }
+
+  async acceptInvitation(dto: AcceptInvitationDto): Promise<AuthResponseDto> {
+    const { token, fullname, password } = dto;
+    if (!token || !fullname || !password) {
+      throw new BadRequestException(
+        'Token, fullname and password are required',
+      );
+    }
+    if (password.length < 8) {
+      throw new BadRequestException(
+        'Password must be at least 8 characters long',
+      );
+    }
+
+    const client = this.supabaseService.getClient();
+    const nowIso = new Date().toISOString();
+
+    // 1) Look up invitation
+    const { data: invite, error: inviteError } = await client
+      .from('organization_invitations')
+      .select('*')
+      .eq('token', token)
+      .gt('expires_at', nowIso)
+      .is('accepted_at', null)
+      .single();
+
+    if (inviteError || !invite) {
+      throw new BadRequestException('Invalid or expired invitation');
+    }
+
+    const email: string = invite.email;
+    const organizationId: string = invite.organization_id;
+    const roleId: string = invite.role_id;
+
+    // 2) Check if user already exists
+    let user = await this.supabaseService.findUserByEmail(email);
+
+    if (!user) {
+      // Create new user account
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+      const userData = {
+        email,
+        password: hashedPassword,
+        fullname,
+        individual_account_type: undefined,
+        phone_number: undefined,
+        country: undefined,
+        // Invitation-based accounts skip separate email verification
+        email_verification_token: null as any,
+        email_verification_expires: new Date(),
+      };
+
+      user = await this.supabaseService.createUser(userData as any);
+
+      // Mark email as verified
+      await this.supabaseService.updateUser(user.id, {
+        email_verified: true,
+      });
+    } else {
+      if (!user.is_active) {
+        throw new BadRequestException(
+          'This account is deactivated. Contact support to reactivate.',
+        );
+      }
+    }
+
+    // 3) Ensure membership in organization with the invited role
+    const supabase = this.supabaseService.getClient();
+    const { data: existingMembership, error: membershipErr } = await supabase
+      .from('organization_users')
+      .select('*')
+      .eq('organization_id', organizationId)
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (membershipErr) {
+      this.logger.error('Error checking existing membership:', membershipErr);
+      throw new BadRequestException('Failed to attach user to organization');
+    }
+
+    if (!existingMembership) {
+      const { error: createErr } = await supabase
+        .from('organization_users')
+        .insert({
+          user_id: user.id,
+          organization_id: organizationId,
+          role_id: roleId,
+          is_active: true,
+        });
+      if (createErr) {
+        this.logger.error(
+          'Error creating membership from invitation:',
+          createErr,
+        );
+        throw new BadRequestException('Failed to attach user to organization');
+      }
+    } else if (!existingMembership.is_active) {
+      const { error: reactivateErr } = await supabase
+        .from('organization_users')
+        .update({ is_active: true, role_id: roleId })
+        .eq('id', existingMembership.id);
+      if (reactivateErr) {
+        this.logger.error(
+          'Error reactivating membership from invitation:',
+          reactivateErr,
+        );
+        throw new BadRequestException('Failed to attach user to organization');
+      }
+    }
+
+    // 4) Mark invitation as accepted
+    const { error: updateInviteErr } = await client
+      .from('organization_invitations')
+      .update({ accepted_at: nowIso })
+      .eq('id', invite.id);
+
+    if (updateInviteErr) {
+      this.logger.error(
+        'Error marking invitation as accepted:',
+        updateInviteErr,
+      );
+    }
+
+    // 5) Build auth response as in signin()
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(
+      user.id,
+    );
+
+    const {
+      organizationId: effectiveOrgId,
+      organizationName,
+      organizationRole,
+      accountType,
+    } = this.extractOrganizationInfo(user, userWithOrg);
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType,
+      organizationId: effectiveOrgId,
+      organizationRole,
+      emailVerified: true,
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType,
+        emailVerified: true,
+        organizationId: effectiveOrgId,
+        organizationName,
+        organizationRole,
+      },
+    };
   }
 }
