@@ -31,6 +31,7 @@ import {
   AnalyticsQueryDto,
   ProductImageDto,
 } from './dto';
+import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 import { SellerCatalogProductDto } from './dto/product.dto';
 import { SellerHomeResponseDto, BuyerRequestSummaryDto } from './dto/home.dto';
 import {
@@ -797,6 +798,48 @@ export class SellersService {
     }
 
     return data || [];
+  }
+
+  async requestOrderStatusUpdate(
+    sellerOrgId: string,
+    orderId: string,
+    dto: SellerStatusUpdateRequestDto,
+    userId: string,
+  ): Promise<{ success: boolean }> {
+    await this.assertSellerVerified(sellerOrgId);
+    const client = this.supabaseService.getClient();
+
+    // Ensure order exists and belongs to seller
+    await this.getOrderById(sellerOrgId, orderId);
+
+    const requested = (dto.requested_status || '').toLowerCase().trim();
+    if (!requested) {
+      throw new BadRequestException('requested_status is required');
+    }
+
+    const title = `Seller requested status change to ${requested}`;
+
+    const { error } = await client.from('order_timeline').insert({
+      order_id: orderId,
+      event_type: 'seller_status_update_request',
+      title,
+      description: dto.notes ?? null,
+      actor_type: 'seller',
+      actor_user_id: userId,
+      metadata: {
+        requested_status: requested,
+      },
+      is_visible_to_buyer: false,
+      is_visible_to_seller: true,
+    });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create status update request: ${error.message}`,
+      );
+    }
+
+    return { success: true };
   }
 
   // ==================== TRANSACTION MANAGEMENT ====================

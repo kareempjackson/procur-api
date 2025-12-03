@@ -75,6 +75,7 @@ import {
   FarmVisitRequestDto,
   SellerCatalogProductDto,
 } from './dto';
+import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 
 @ApiTags('Sellers')
 @ApiBearerAuth('JWT-auth')
@@ -431,6 +432,38 @@ export class SellersController {
     @Param('id', ParseUUIDPipe) orderId: string,
   ) {
     return this.sellersService.getOrderTimeline(user.organizationId!, orderId);
+  }
+
+  @Post('orders/:id/status-requests')
+  @RequirePermissions('view_orders')
+  @ApiOperation({
+    summary: 'Request order status update',
+    description:
+      'Allow a seller to request a status change (e.g. to shipped) without directly updating the order status.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Status update request recorded successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  async requestOrderStatusUpdate(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Body() body: SellerStatusUpdateRequestDto,
+  ): Promise<{ success: boolean }> {
+    return this.sellersService.requestOrderStatusUpdate(
+      user.organizationId!,
+      orderId,
+      body,
+      user.id,
+    );
   }
 
   // ==================== TRANSACTION MANAGEMENT ====================
