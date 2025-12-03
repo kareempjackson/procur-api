@@ -118,6 +118,59 @@ class CreateOfflineOrderAndLinkDto {
   delivery_date?: string;
 }
 
+/**
+ * Seller-facing DTO for updating an existing offline order + payment link.
+ * We keep most fields optional but expect the frontend to send a full
+ * snapshot (buyer details, shipping address, line items, payment methods).
+ */
+class UpdateOfflineOrderAndLinkDto {
+  @IsOptional()
+  @IsString()
+  buyer_name?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_company?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_business_type?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_email?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_phone?: string;
+
+  @IsOptional()
+  shipping_address?: any;
+
+  @IsOptional()
+  line_items?: any[];
+
+  @IsOptional()
+  currency?: string;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  allowed_payment_methods?: OfflinePaymentMethod[];
+
+  @IsOptional()
+  @IsString()
+  expires_at?: string | null;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+
+  @IsOptional()
+  @IsString()
+  delivery_date?: string;
+}
+
 class PublicOfflinePaymentDto {
   @IsString()
   payment_method: OfflinePaymentMethod;
@@ -256,6 +309,50 @@ export class PaymentLinksController {
   })
   async listForSeller(@CurrentUser() user: UserContext) {
     return this.paymentLinks.listForSeller(user.organizationId!);
+  }
+
+  // ========== SELLER: Update offline order + payment link ==========
+
+  @UseGuards(
+    JwtAuthGuard,
+    EmailVerifiedGuard,
+    AccountTypeGuard,
+    PermissionsGuard,
+  )
+  @AccountTypes(AccountType.SELLER)
+  @RequirePermissions('manage_orders')
+  @Patch('payment-links/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Update an existing offline order + payment link',
+    description:
+      'Allows a verified seller to update buyer details, shipping address, line items, allowed payment methods, and expiry for a non-final payment link.',
+  })
+  @ApiParam({ name: 'id', description: 'Payment link ID' })
+  @ApiBody({ type: UpdateOfflineOrderAndLinkDto })
+  async updateOfflineOrderAndLink(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateOfflineOrderAndLinkDto,
+  ) {
+    return this.paymentLinks.updateOfflineOrderAndLinkForSeller({
+      sellerOrgId: user.organizationId!,
+      paymentLinkId: id,
+      buyerName: body.buyer_name,
+      buyerCompany: body.buyer_company,
+      buyerBusinessType: body.buyer_business_type,
+      buyerEmail: body.buyer_email,
+      buyerPhone: body.buyer_phone,
+      shippingAddress: body.shipping_address,
+      lineItems: body.line_items,
+      currency: body.currency,
+      allowedPaymentMethods: body.allowed_payment_methods,
+      expiresAt: body.expires_at,
+      notes: body.notes,
+      deliveryDate: body.delivery_date,
+      updatedByUserId: user.id,
+    });
   }
 
   // ========== PUBLIC: Mini-site payload & offline payment selection ==========

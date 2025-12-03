@@ -69,6 +69,11 @@ export class SellersService {
    * - Organization must exist and be a seller
    * - Organization status must be ACTIVE (not pending_verification / suspended)
    * - For farmer sellers, both farmers_id_verified and farm_verified must be true
+   *
+   * NOTE: This method is intentionally kept private so that external
+   * callers go through the public ensureSellerVerified(...) helper
+   * below. This keeps the verification rules centralized while still
+   * allowing other modules (e.g. payment links) to reuse them.
    */
   private async assertSellerVerified(sellerOrgId: string): Promise<void> {
     const client = this.supabaseService.getClient();
@@ -127,6 +132,15 @@ export class SellersService {
         );
       }
     }
+  }
+
+  /**
+   * Public wrapper so other modules (e.g. payment links) can enforce
+   * the same verification rules before allowing sensitive actions
+   * like creating payment links or accepting payments.
+   */
+  async ensureSellerVerified(sellerOrgId: string): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
   }
 
   // ==================== PRODUCT MANAGEMENT ====================

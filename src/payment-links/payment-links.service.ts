@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
+import { SellersService } from '../sellers/sellers.service';
 
 export type OfflinePaymentMethod =
   | 'bank_transfer'
@@ -23,7 +24,10 @@ export type PaymentLinkStatus =
 export class PaymentLinksService {
   private readonly logger = new Logger(PaymentLinksService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly sellersService: SellersService,
+  ) {}
 
   /**
    * Generate a short public code for the payment link.
@@ -68,6 +72,9 @@ export class PaymentLinksService {
     tax_amount: number;
     total_amount: number;
   }> {
+    // Ensure seller is fully verified before creating payment links
+    await this.sellersService.ensureSellerVerified(input.sellerOrgId);
+
     const client = this.supabase.getClient();
 
     const { data: order, error: orderError } = await client
@@ -231,6 +238,9 @@ export class PaymentLinksService {
     deliveryDate?: string;
     createdByUserId: string;
   }) {
+    // Block unverified sellers from creating offline orders + payment links
+    await this.sellersService.ensureSellerVerified(input.sellerOrgId);
+
     const client = this.supabase.getClient();
 
     if (!input.lineItems || input.lineItems.length === 0) {
@@ -391,6 +401,264 @@ export class PaymentLinksService {
       order_id: order.id as string,
       order_number: order.order_number as string,
       payment_link: link,
+    };
+  }
+
+  /**
+   * Seller flow: update an existing offline order + payment link created
+   * via the seller dashboard. This is limited to non-final links and
+   * reuses the same fee logic as creation.
+   */
+  async updateOfflineOrderAndLinkForSeller(input: {
+    sellerOrgId: string;
+    paymentLinkId: string;
+    buyerName?: string;
+    buyerCompany?: string;
+    buyerBusinessType?: string;
+    buyerEmail?: string;
+    buyerPhone?: string;
+    shippingAddress?: {
+      line1: string;
+      line2?: string;
+      city?: string;
+      state?: string;
+      postal_code?: string;
+      country?: string;
+    };
+    lineItems?: {
+      product_name: string;
+      unit?: string;
+      quantity: number;
+      unit_price: number;
+    }[];
+    currency?: string;
+    allowedPaymentMethods?: OfflinePaymentMethod[];
+    expiresAt?: string | null;
+    notes?: string;
+    deliveryDate?: string;
+    updatedByUserId: string;
+  }) {
+    await this.sellersService.ensureSellerVerified(input.sellerOrgId);
+
+    const client = this.supabase.getClient();
+
+    const { data: link, error: linkError } = await client
+      .from('payment_links')
+      .select(
+        'id, status, seller_org_id, order_id, meta, buyer_contact, currency, subtotal_amount, delivery_fee_amount, platform_fee_amount, tax_amount, total_amount, fee_breakdown, expires_at, allowed_payment_methods',
+      )
+      .eq('id', input.paymentLinkId)
+      .eq('seller_org_id', input.sellerOrgId)
+      .single();
+
+    if (linkError || !link) {
+      throw new NotFoundException('Payment link not found for this seller');
+    }
+
+    const currentStatus = link.status as PaymentLinkStatus;
+    if (
+      currentStatus === 'paid' ||
+      currentStatus === 'expired' ||
+      currentStatus === 'cancelled' ||
+      currentStatus === 'awaiting_payment_confirmation'
+    ) {
+      throw new BadRequestException(
+        'This payment link can no longer be edited. Please create a new link if changes are needed.',
+      );
+    }
+
+    const meta = (link.meta as any) || {};
+    if (meta.flow && meta.flow !== 'seller_offline_payment_link') {
+      // To avoid accidentally mutating non-offline flows
+      throw new BadRequestException(
+        'Only offline payment links created from the seller dashboard can be edited here.',
+      );
+    }
+
+    const lineItems =
+      (input.lineItems && input.lineItems.length > 0
+        ? input.lineItems
+        : (meta.line_items as any[] | undefined)) ?? [];
+
+    if (!lineItems || lineItems.length === 0) {
+      throw new BadRequestException(
+        'At least one product (name, unit, quantity, cost per unit) is required',
+      );
+    }
+
+    for (const item of lineItems) {
+      if (
+        !item.product_name ||
+        !item.unit ||
+        !item.quantity ||
+        !item.unit_price
+      ) {
+        throw new BadRequestException(
+          'Each product must have a name, unit, quantity, and cost per unit',
+        );
+      }
+    }
+
+    const subtotal = lineItems.reduce(
+      (sum, item) => sum + Number(item.unit_price) * Number(item.quantity || 0),
+      0,
+    );
+
+    if (!subtotal || subtotal <= 0) {
+      throw new BadRequestException(
+        'Total amount must be greater than zero to update this order',
+      );
+    }
+
+    const allowedMethods =
+      (input.allowedPaymentMethods &&
+        input.allowedPaymentMethods.length > 0 &&
+        input.allowedPaymentMethods) ||
+      (link.allowed_payment_methods as OfflinePaymentMethod[] | undefined);
+
+    if (!allowedMethods || allowedMethods.length === 0) {
+      throw new BadRequestException(
+        'At least one offline payment method must be allowed',
+      );
+    }
+
+    const currency = (
+      input.currency ||
+      (link.currency as string) ||
+      'XCD'
+    ).toUpperCase();
+
+    const deliveryFeeAmount =
+      typeof link.delivery_fee_amount === 'number'
+        ? Number(link.delivery_fee_amount)
+        : 20;
+    const taxAmount =
+      typeof link.tax_amount === 'number' ? Number(link.tax_amount) : 0;
+    const platformFeeAmount = Number((subtotal * 0.05).toFixed(2));
+    const discountAmount = Number(link.fee_breakdown?.discount_amount ?? 0);
+    const totalAmount =
+      subtotal +
+      deliveryFeeAmount +
+      platformFeeAmount +
+      taxAmount -
+      discountAmount;
+
+    const updatedBuyerContact = {
+      ...(link.buyer_contact as any),
+      name: input.buyerName ?? (link.buyer_contact as any)?.name,
+      company: input.buyerCompany ?? (link.buyer_contact as any)?.company,
+      email: input.buyerEmail ?? (link.buyer_contact as any)?.email,
+      phone: input.buyerPhone ?? (link.buyer_contact as any)?.phone,
+    };
+
+    const shippingAddressSnapshot = input.shippingAddress
+      ? {
+          contact_name:
+            input.buyerName ??
+            (link.buyer_contact as any)?.name ??
+            (link.buyer_contact as any)?.contact_name,
+          line1: input.shippingAddress.line1,
+          line2: input.shippingAddress.line2,
+          city: input.shippingAddress.city,
+          state: input.shippingAddress.state,
+          postal_code: input.shippingAddress.postal_code,
+          country: input.shippingAddress.country,
+          phone:
+            input.buyerPhone ??
+            (link.buyer_contact as any)?.phone ??
+            (link.buyer_contact as any)?.contact_phone,
+        }
+      : null;
+
+    // Update underlying order snapshot
+    if (link.order_id) {
+      const { error: orderUpdateError } = await client
+        .from('orders')
+        .update({
+          subtotal,
+          shipping_amount: deliveryFeeAmount,
+          tax_amount: taxAmount,
+          discount_amount: discountAmount,
+          total_amount: totalAmount,
+          currency,
+          shipping_address: shippingAddressSnapshot,
+          billing_address: shippingAddressSnapshot,
+          buyer_notes: input.notes ?? undefined,
+          estimated_delivery_date: input.deliveryDate ?? null,
+        })
+        .eq('id', link.order_id);
+
+      if (orderUpdateError) {
+        this.logger.error(
+          `Failed to update order ${link.order_id} for payment link ${link.id}: ${orderUpdateError.message}`,
+        );
+        throw new BadRequestException(
+          `Failed to update order for payment link: ${orderUpdateError.message}`,
+        );
+      }
+    }
+
+    const updatedFeeBreakdown = {
+      subtotal_amount: subtotal,
+      delivery_fee_amount: deliveryFeeAmount,
+      platform_fee_amount: platformFeeAmount,
+      tax_amount: taxAmount,
+      discount_amount: discountAmount,
+    };
+
+    const { data: updatedLink, error: updateLinkError } = await client
+      .from('payment_links')
+      .update({
+        subtotal_amount: subtotal,
+        delivery_fee_amount: deliveryFeeAmount,
+        platform_fee_amount: platformFeeAmount,
+        tax_amount: taxAmount,
+        total_amount: totalAmount,
+        currency,
+        buyer_contact: updatedBuyerContact,
+        allowed_payment_methods: allowedMethods,
+        expires_at: input.expiresAt ?? link.expires_at,
+        fee_breakdown: updatedFeeBreakdown,
+        meta: {
+          ...(meta || {}),
+          flow: 'seller_offline_payment_link',
+          line_items: lineItems,
+          last_updated_by: input.updatedByUserId,
+        },
+      })
+      .eq('id', input.paymentLinkId)
+      .select('*')
+      .single();
+
+    if (updateLinkError || !updatedLink) {
+      this.logger.error(
+        `Failed to update payment link ${link.id}: ${updateLinkError?.message}`,
+      );
+      throw new BadRequestException(
+        `Failed to update payment link: ${updateLinkError?.message ?? 'unknown error'}`,
+      );
+    }
+
+    const frontendUrl =
+      process.env.FRONTEND_PUBLIC_URL ||
+      process.env.FRONTEND_URL ||
+      'http://localhost:3001';
+
+    return {
+      id: updatedLink.id as string,
+      link_code: updatedLink.link_code as string,
+      public_url: `${frontendUrl}/p/${updatedLink.link_code}`,
+      status: updatedLink.status as PaymentLinkStatus,
+      currency: (updatedLink.currency as string) || currency,
+      subtotal_amount: Number(updatedLink.subtotal_amount ?? subtotal),
+      delivery_fee_amount: Number(
+        updatedLink.delivery_fee_amount ?? deliveryFeeAmount,
+      ),
+      platform_fee_amount: Number(
+        updatedLink.platform_fee_amount ?? platformFeeAmount,
+      ),
+      tax_amount: Number(updatedLink.tax_amount ?? taxAmount),
+      total_amount: Number(updatedLink.total_amount ?? totalAmount),
     };
   }
 
