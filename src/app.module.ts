@@ -28,6 +28,7 @@ import { HealthController } from './health.controller';
 import { AdminModule } from './admin/admin.module';
 import { AuditModule } from './audit/audit.module';
 import { BankInfoModule } from './bank-info/bank-info.module';
+import { PaymentLinksModule } from './payment-links/payment-links.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { BankInfoModule } from './bank-info/bank-info.module';
     AdminModule,
     AuditModule,
     BankInfoModule,
+    PaymentLinksModule,
   ],
   controllers: [AppController, HealthController],
   providers: [
