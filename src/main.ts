@@ -37,7 +37,9 @@ async function bootstrap() {
       'https://procur-ui-eight.vercel.app',
       'http://localhost:3002',
       'https://procur-admin-ui.vercel.app',
+      'https://www.procurapp.co',
       'https://procurapp.co',
+      'https://admin.procur.co',
     ],
     credentials: true,
   });
