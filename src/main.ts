@@ -39,7 +39,7 @@ async function bootstrap() {
       'https://procur-admin-ui.vercel.app',
       'https://www.procurapp.co',
       'https://procurapp.co',
-      'https://admin.procur.co',
+      'https://admin.procurapp.co',
     ],
     credentials: true,
   });
