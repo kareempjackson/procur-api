@@ -30,6 +30,7 @@ import {
   ProductAnalyticsDto,
   AnalyticsQueryDto,
   ProductImageDto,
+  BuyerReviewDto,
 } from './dto';
 import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 import { SellerCatalogProductDto } from './dto/product.dto';
@@ -854,6 +855,77 @@ export class SellersService {
     }
 
     return { success: true };
+  }
+
+  async createBuyerReview(
+    sellerOrgId: string,
+    orderId: string,
+    reviewDto: BuyerReviewDto,
+    userId: string,
+  ): Promise<void> {
+    await this.assertSellerVerified(sellerOrgId);
+    const client = this.supabaseService.getClient();
+
+    // Verify order belongs to seller and is delivered
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select('id, status, seller_org_id, buyer_org_id')
+      .eq('id', orderId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    if ((order.status as string) !== 'delivered') {
+      throw new BadRequestException('Can only review delivered orders');
+    }
+
+    // Prevent duplicate reviews for same order/seller
+    const { data: existing } = await client
+      .from('buyer_reviews')
+      .select('id')
+      .eq('order_id', orderId)
+      .eq('seller_org_id', sellerOrgId)
+      .maybeSingle();
+
+    if (existing) {
+      throw new BadRequestException('Buyer already reviewed for this order');
+    }
+
+    const { error: insertError } = await client.from('buyer_reviews').insert({
+      order_id: orderId,
+      seller_org_id: sellerOrgId,
+      buyer_org_id: order.buyer_org_id,
+      rating: reviewDto.overall_rating,
+      payment_behavior_rating: reviewDto.payment_behavior_rating,
+      communication_rating: reviewDto.communication_rating,
+      reliability_rating: reviewDto.reliability_rating,
+      review_text: reviewDto.comment ?? null,
+      created_by_user_id: userId,
+    });
+
+    if (insertError) {
+      throw new BadRequestException(
+        `Failed to create buyer review: ${insertError.message}`,
+      );
+    }
+
+    // Optional: timeline event visible to both sides
+    await client.from('order_timeline').insert({
+      order_id: orderId,
+      event_type: 'seller_left_buyer_review',
+      title: 'Seller left a review for the buyer',
+      description: null,
+      actor_type: 'seller',
+      actor_user_id: userId,
+      metadata: {
+        overall_rating: reviewDto.overall_rating,
+      },
+      is_visible_to_buyer: true,
+      is_visible_to_seller: true,
+    });
   }
 
   // ==================== TRANSACTION MANAGEMENT ====================
@@ -2216,8 +2288,44 @@ export class SellersService {
       );
     }
 
+    const rows = requests || [];
+
+    // Pre-compute buyer ratings from buyer_reviews
+    const buyerIds = Array.from(
+      new Set(
+        rows
+          .map((r: any) => (r.buyer_org_id as string | null) ?? null)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    let buyerRatingsByOrg: Record<string, number> = {};
+    if (buyerIds.length > 0) {
+      const { data: reviews } = await client
+        .from('buyer_reviews')
+        .select('buyer_org_id, rating')
+        .in('buyer_org_id', buyerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r: any) => {
+        const bid = r.buyer_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(bid) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(bid, cur);
+      });
+
+      buyerRatingsByOrg = Object.fromEntries(
+        Array.from(agg.entries()).map(([bid, a]) => [
+          bid,
+          a.count > 0 ? Number((a.sum / a.count).toFixed(2)) : 0,
+        ]),
+      );
+    }
+
     // Map to response DTO
-    const mapped = (requests || []).map((req) => {
+    const mapped = rows.map((req) => {
       const myQuote = req.quotes?.find(
         (q: any) => q.seller_org_id === sellerOrgId,
       );
@@ -2252,6 +2360,7 @@ export class SellersService {
               status: myQuote.status,
             }
           : undefined,
+        buyer_rating: buyerRatingsByOrg[req.buyer_org_id as string],
         created_at: req.created_at,
       };
     });
@@ -2295,6 +2404,22 @@ export class SellersService {
       (q: any) => q.seller_org_id === sellerOrgId,
     );
 
+    // Buyer rating from buyer_reviews
+    let buyerRating: number | undefined;
+    if (request.buyer_org_id) {
+      const { data: reviews } = await client
+        .from('buyer_reviews')
+        .select('rating')
+        .eq('buyer_org_id', request.buyer_org_id);
+      if (reviews && reviews.length > 0) {
+        const sum = reviews.reduce(
+          (acc: number, r: any) => acc + Number(r.rating || 0),
+          0,
+        );
+        buyerRating = Number((sum / reviews.length).toFixed(2));
+      }
+    }
+
     return {
       id: request.id,
       request_number: request.request_number,
@@ -2324,6 +2449,7 @@ export class SellersService {
       expires_at: request.expires_at,
       quote_count: request.quotes?.length || 0,
       my_quote: myQuote,
+      buyer_rating: buyerRating,
       created_at: request.created_at,
     };
   }

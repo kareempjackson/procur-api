@@ -74,6 +74,7 @@ import {
   CreateFarmVisitRequestDto,
   FarmVisitRequestDto,
   SellerCatalogProductDto,
+  BuyerReviewDto,
 } from './dto';
 import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 
@@ -410,6 +411,36 @@ export class SellersController {
       user.organizationId!,
       orderId,
       updateOrderStatusDto,
+      user.id,
+    );
+  }
+
+  @Post('orders/:id/review-buyer')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions('manage_orders')
+  @ApiOperation({
+    summary: 'Rate buyer for order',
+    description:
+      'Submit a rating for the buyer after an order has been delivered.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 201,
+    description: 'Buyer review submitted successfully',
+  })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  @ApiBadRequestResponse({
+    description: 'Order cannot be reviewed or already reviewed',
+  })
+  async reviewBuyer(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Body() reviewDto: BuyerReviewDto,
+  ): Promise<void> {
+    await this.sellersService.createBuyerReview(
+      user.organizationId!,
+      orderId,
+      reviewDto,
       user.id,
     );
   }

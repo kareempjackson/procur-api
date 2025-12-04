@@ -178,51 +178,95 @@ export class BuyersService {
         `Failed to fetch products: ${error.message}`,
       );
 
+    const rawProducts = (products || []) as any[];
+
+    // Pre-compute seller rating aggregates for all sellers represented in this page
+    const sellerIds = Array.from(
+      new Set(
+        rawProducts
+          .map((p) => (p.seller_org_id as string | null) ?? null)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    let sellerRatingsById: Record<string, { avg: number; count: number }> = {};
+    if (sellerIds.length > 0) {
+      const { data: reviews } = await this.supabase
+        .getClient()
+        .from('order_reviews')
+        .select('seller_org_id, rating')
+        .in('seller_org_id', sellerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r: any) => {
+        const sid = r.seller_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(sid) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(sid, cur);
+      });
+
+      sellerRatingsById = Object.fromEntries(
+        Array.from(agg.entries()).map(([sid, a]) => [
+          sid,
+          {
+            avg: a.count > 0 ? Number((a.sum / a.count).toFixed(2)) : 0,
+            count: a.count,
+          },
+        ]),
+      );
+    }
+
     // Transform data
     const transformedProducts: MarketplaceProductDto[] =
       (await Promise.all(
-        products?.map(async (product) => ({
-          id: product.id,
-          name: product.name,
-          short_description: product.short_description,
-          category: product.category,
-          subcategory: product.subcategory,
-          current_price: product.sale_price || product.base_price,
-          base_price: product.base_price,
-          sale_price: product.sale_price,
-          currency: product.currency,
-          stock_quantity: product.stock_quantity,
-          unit_of_measurement: product.unit_of_measurement,
-          condition: product.condition,
-          brand: product.brand,
-          image_url:
-            product.product_images?.find((img) => img.is_primary)?.image_url ||
-            product.product_images?.[0]?.image_url,
-          images:
-            product.product_images
-              ?.sort((a, b) => a.display_order - b.display_order)
-              .map((img) => img.image_url) || [],
-          tags: product.tags,
-          is_organic: product.is_organic,
-          is_local: product.is_local,
-          is_featured: product.is_featured,
-          average_rating: undefined, // TODO: Calculate from reviews
-          review_count: 0, // TODO: Count reviews
-          seller: {
-            id: product.seller_organization.id,
-            name: product.seller_organization.name,
-            description: undefined,
-            logo_url: product.seller_organization.logo_url,
-            location: product.seller_organization.country,
-            average_rating: undefined, // TODO: Calculate seller rating
-            review_count: 0, // TODO: Count seller reviews
-            product_count: 0, // TODO: Count seller products
-            is_verified: true, // TODO: Add verification logic
-          },
-          is_favorited: buyerOrgId
-            ? await this.isProductFavorited(buyerOrgId, product.id)
-            : false,
-        })),
+        rawProducts?.map(async (product) => {
+          const sellerId = product.seller_org_id as string;
+          const sellerRating = sellerRatingsById[sellerId];
+          return {
+            id: product.id,
+            name: product.name,
+            short_description: product.short_description,
+            category: product.category,
+            subcategory: product.subcategory,
+            current_price: product.sale_price || product.base_price,
+            base_price: product.base_price,
+            sale_price: product.sale_price,
+            currency: product.currency,
+            stock_quantity: product.stock_quantity,
+            unit_of_measurement: product.unit_of_measurement,
+            condition: product.condition,
+            brand: product.brand,
+            image_url:
+              product.product_images?.find((img) => img.is_primary)
+                ?.image_url || product.product_images?.[0]?.image_url,
+            images:
+              product.product_images
+                ?.sort((a, b) => a.display_order - b.display_order)
+                .map((img) => img.image_url) || [],
+            tags: product.tags,
+            is_organic: product.is_organic,
+            is_local: product.is_local,
+            is_featured: product.is_featured,
+            average_rating: undefined, // Product-level ratings could be added later
+            review_count: 0,
+            seller: {
+              id: product.seller_organization.id,
+              name: product.seller_organization.name,
+              description: undefined,
+              logo_url: product.seller_organization.logo_url,
+              location: product.seller_organization.country,
+              average_rating: sellerRating?.avg,
+              review_count: sellerRating?.count ?? 0,
+              product_count: 0, // TODO: Count seller products
+              is_verified: true, // TODO: Add verification logic
+            },
+            is_favorited: buyerOrgId
+              ? await this.isProductFavorited(buyerOrgId, product.id)
+              : false,
+          };
+        }),
       )) || [];
 
     return {
@@ -237,8 +281,9 @@ export class BuyersService {
     productId: string,
     buyerOrgId?: string,
   ): Promise<MarketplaceProductDetailDto> {
-    const { data: product, error } = await this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+
+    const { data: product, error } = await client
       .from('products')
       .select(
         `
@@ -256,8 +301,7 @@ export class BuyersService {
     }
 
     // Get related products (same category, different seller or same seller)
-    const { data: relatedProducts } = await this.supabase
-      .getClient()
+    const { data: relatedProducts } = await client
       .from('products')
       .select(
         `
@@ -271,6 +315,24 @@ export class BuyersService {
       .neq('id', productId)
       .eq('status', 'active')
       .limit(6);
+
+    // Compute seller rating aggregate
+    let sellerAverageRating: number | undefined;
+    let sellerReviewCount = 0;
+    {
+      const { data: reviews } = await client
+        .from('order_reviews')
+        .select('rating')
+        .eq('seller_org_id', product.seller_org_id);
+      if (reviews && reviews.length > 0) {
+        const sum = reviews.reduce(
+          (acc: number, r: any) => acc + Number(r.rating || 0),
+          0,
+        );
+        sellerReviewCount = reviews.length;
+        sellerAverageRating = Number((sum / reviews.length).toFixed(2));
+      }
+    }
 
     const transformedProduct: MarketplaceProductDetailDto = {
       id: product.id,
@@ -305,16 +367,16 @@ export class BuyersService {
       is_organic: product.is_organic,
       is_local: product.is_local,
       is_featured: product.is_featured,
-      average_rating: undefined, // TODO: Calculate from reviews
-      review_count: 0, // TODO: Count reviews
+      average_rating: undefined,
+      review_count: 0,
       seller: {
         id: product.seller_organization.id,
         name: product.seller_organization.name,
         description: undefined,
         logo_url: product.seller_organization.logo_url,
         location: product.seller_organization.country,
-        average_rating: undefined, // TODO: Calculate seller rating
-        review_count: 0, // TODO: Count seller reviews
+        average_rating: sellerAverageRating,
+        review_count: sellerReviewCount,
         product_count: 0, // TODO: Count seller products
         is_verified: true, // TODO: Add verification logic
       },
@@ -2087,16 +2149,17 @@ Manage this order: ${link}`;
     orderId: string,
     reviewDto: OrderReviewDto,
   ): Promise<void> {
+    const client = this.supabase.getClient();
+
     // Verify order ownership and completion
-    const { data: order } = await this.supabase
-      .getClient()
+    const { data: order, error: orderError } = await client
       .from('orders')
       .select('id, status, seller_org_id')
       .eq('id', orderId)
       .eq('buyer_org_id', buyerOrgId)
       .single();
 
-    if (!order) {
+    if (orderError || !order) {
       throw new NotFoundException('Order not found');
     }
 
@@ -2104,25 +2167,48 @@ Manage this order: ${link}`;
       throw new BadRequestException('Can only review delivered orders');
     }
 
-    const { error } = await this.supabase
-      .getClient()
+    // Prevent duplicate reviews for the same order/buyer
+    const { data: existing } = await client
       .from('order_reviews')
-      .insert({
-        order_id: orderId,
-        buyer_org_id: buyerOrgId,
-        seller_org_id: order.seller_org_id,
-        rating: reviewDto.overall_rating,
-        review_text: reviewDto.comment || null,
-        delivery_rating: reviewDto.delivery_rating,
-        product_quality_rating: reviewDto.product_quality_rating,
-        service_rating: reviewDto.service_rating,
-      });
+      .select('id')
+      .eq('order_id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    if (existing) {
+      throw new BadRequestException('Order has already been reviewed');
+    }
+
+    const { error } = await client.from('order_reviews').insert({
+      order_id: orderId,
+      buyer_org_id: buyerOrgId,
+      seller_org_id: order.seller_org_id,
+      rating: reviewDto.overall_rating,
+      review_text: reviewDto.comment || null,
+      delivery_rating: reviewDto.delivery_rating,
+      product_quality_rating: reviewDto.product_quality_rating,
+      service_rating: reviewDto.service_rating,
+    });
 
     if (error) {
       throw new BadRequestException(
         `Failed to create review: ${error.message}`,
       );
     }
+
+    // Optional: add timeline entry so both sides can see that a review was left
+    await client.from('order_timeline').insert({
+      order_id: orderId,
+      event_type: 'buyer_left_review',
+      title: 'Buyer left a review',
+      description: reviewDto.title || null,
+      actor_type: 'buyer',
+      metadata: {
+        overall_rating: reviewDto.overall_rating,
+      },
+      is_visible_to_buyer: true,
+      is_visible_to_seller: true,
+    });
   }
 
   private transformOrderToResponse(
@@ -2414,8 +2500,8 @@ Manage this order: ${link}`;
   }
 
   async getFavoriteSellers(buyerOrgId: string): Promise<FavoriteSellerDto[]> {
-    const { data: favorites, error } = await this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+    const { data: favorites, error } = await client
       .from('buyer_favorite_sellers')
       .select(
         `
@@ -2434,20 +2520,56 @@ Manage this order: ${link}`;
         `Failed to fetch favorite sellers: ${error.message}`,
       );
 
-    return (
-      favorites?.map((fav) => {
-        const seller = Array.isArray(fav.seller) ? fav.seller[0] : fav.seller;
-        return {
-          seller_org_id: fav.seller_org_id,
-          seller_name: seller?.name || 'Unknown Seller',
-          logo_url: seller?.logo_url,
-          description: seller?.business_type,
-          average_rating: undefined, // TODO: Calculate from reviews
-          product_count: seller?.products?.[0]?.count || 0,
-          created_at: fav.created_at,
-        };
-      }) || []
+    const rows = favorites || [];
+    const sellerIds = Array.from(
+      new Set(
+        rows
+          .map((fav: any) => (fav.seller_org_id as string | null) ?? null)
+          .filter((id): id is string => Boolean(id)),
+      ),
     );
+
+    let ratingsBySeller: Record<string, { avg: number; count: number }> = {};
+    if (sellerIds.length > 0) {
+      const { data: reviews } = await client
+        .from('order_reviews')
+        .select('seller_org_id, rating')
+        .in('seller_org_id', sellerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r: any) => {
+        const sid = r.seller_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(sid) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(sid, cur);
+      });
+
+      ratingsBySeller = Object.fromEntries(
+        Array.from(agg.entries()).map(([sid, a]) => [
+          sid,
+          {
+            avg: a.count > 0 ? Number((a.sum / a.count).toFixed(2)) : 0,
+            count: a.count,
+          },
+        ]),
+      );
+    }
+
+    return rows.map((fav: any) => {
+      const seller = Array.isArray(fav.seller) ? fav.seller[0] : fav.seller;
+      const r = ratingsBySeller[fav.seller_org_id as string];
+      return {
+        seller_org_id: fav.seller_org_id,
+        seller_name: seller?.name || 'Unknown Seller',
+        logo_url: seller?.logo_url,
+        description: seller?.business_type,
+        average_rating: r?.avg,
+        product_count: seller?.products?.[0]?.count || 0,
+        created_at: fav.created_at,
+      };
+    });
   }
 
   async addSellerToFavorites(

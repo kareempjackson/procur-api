@@ -6,8 +6,8 @@ import {
   IsEnum,
   IsPositive,
   Min,
+  Max,
   IsUUID,
-  IsObject,
   ValidateNested,
   IsDateString,
   Length,
@@ -220,6 +220,53 @@ export class RejectOrderDto {
   @IsOptional()
   @IsString()
   seller_notes?: string;
+}
+
+export class BuyerReviewDto {
+  @ApiProperty({ description: 'Overall rating (1-5)', minimum: 1, maximum: 5 })
+  @IsNumber()
+  @Min(1)
+  @Max(5)
+  overall_rating: number;
+
+  @ApiPropertyOptional({
+    description: 'Payment behavior rating (1-5)',
+    minimum: 1,
+    maximum: 5,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(5)
+  payment_behavior_rating?: number;
+
+  @ApiPropertyOptional({
+    description: 'Communication rating (1-5)',
+    minimum: 1,
+    maximum: 5,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(5)
+  communication_rating?: number;
+
+  @ApiPropertyOptional({
+    description: 'Reliability rating (1-5)',
+    minimum: 1,
+    maximum: 5,
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(5)
+  reliability_rating?: number;
+
+  @ApiPropertyOptional({ description: 'Review comment' })
+  @IsOptional()
+  @IsString()
+  @Length(1, 500)
+  comment?: string;
 }
 
 export class OrderQueryDto {

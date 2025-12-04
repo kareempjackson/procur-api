@@ -692,8 +692,11 @@ export class BuyersController {
     @Param('id', ParseUUIDPipe) orderId: string,
     @Body() reviewDto: OrderReviewDto,
   ): Promise<void> {
-    // TODO: Implement reviewOrder in service
-    throw new Error('Not implemented');
+    return this.buyersService.createOrderReview(
+      user.organizationId!,
+      orderId,
+      reviewDto,
+    );
   }
 
   @Get('orders/summary')

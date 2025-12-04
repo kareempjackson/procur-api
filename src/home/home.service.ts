@@ -96,8 +96,46 @@ export class HomeService {
       throw new Error(`Failed to fetch recommended products: ${error.message}`);
     }
 
-    return (
-      products?.map((product: any) => ({
+    const rows = products || [];
+    const sellerIds = Array.from(
+      new Set(
+        rows
+          .map((p: any) => (p.seller_org_id as string | null) ?? null)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+
+    let ratingsBySeller: Record<string, { avg: number; count: number }> = {};
+    if (sellerIds.length > 0) {
+      const { data: reviews } = await supabase
+        .from('order_reviews')
+        .select('seller_org_id, rating')
+        .in('seller_org_id', sellerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r: any) => {
+        const sid = r.seller_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(sid) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(sid, cur);
+      });
+
+      ratingsBySeller = Object.fromEntries(
+        Array.from(agg.entries()).map(([sid, a]) => [
+          sid,
+          {
+            avg: a.count > 0 ? Number((a.sum / a.count).toFixed(2)) : 0,
+            count: a.count,
+          },
+        ]),
+      );
+    }
+
+    return rows.map((product: any): RecommendedProductDto => {
+      const r = ratingsBySeller[product.seller_org_id as string];
+      return {
         id: product.id,
         name: product.name,
         short_description: product.short_description,
@@ -110,13 +148,13 @@ export class HomeService {
             ?.image_url || product.product_images?.[0]?.image_url,
         seller_name: product.organizations?.name,
         seller_id: product.seller_org_id,
-        average_rating: undefined, // TODO: Calculate from reviews when implemented
+        average_rating: r?.avg,
         is_organic: product.is_organic,
         is_local: product.is_local,
         stock_quantity: product.stock_quantity,
         unit_of_measurement: product.unit_of_measurement,
-      })) || []
-    );
+      };
+    });
   }
 
   private async getPopularSellers(limit: number): Promise<PopularSellerDto[]> {
@@ -147,9 +185,41 @@ export class HomeService {
       throw new Error(`Failed to fetch popular sellers: ${error.message}`);
     }
 
+    const rows = sellers || [];
+
+    // Preload seller ratings
+    const sellerIds = rows.map((s: any) => s.id as string);
+    let ratingsBySeller: Record<string, { avg: number; count: number }> = {};
+    if (sellerIds.length > 0) {
+      const { data: reviews } = await supabase
+        .from('order_reviews')
+        .select('seller_org_id, rating')
+        .in('seller_org_id', sellerIds);
+
+      const agg = new Map<string, { sum: number; count: number }>();
+      (reviews || []).forEach((r: any) => {
+        const sid = r.seller_org_id as string;
+        const rating = Number(r.rating) || 0;
+        const cur = agg.get(sid) || { sum: 0, count: 0 };
+        cur.sum += rating;
+        cur.count += 1;
+        agg.set(sid, cur);
+      });
+
+      ratingsBySeller = Object.fromEntries(
+        Array.from(agg.entries()).map(([sid, a]) => [
+          sid,
+          {
+            avg: a.count > 0 ? Number((a.sum / a.count).toFixed(2)) : 0,
+            count: a.count,
+          },
+        ]),
+      );
+    }
+
     // Get additional stats for each seller
     const sellersWithStats = await Promise.all(
-      sellers?.map(async (seller: any) => {
+      rows.map(async (seller: any) => {
         // Get product count
         const { count: productCount } = await supabase
           .from('products')
@@ -175,6 +245,8 @@ export class HomeService {
             0,
           ) || 0;
 
+        const rating = ratingsBySeller[seller.id as string];
+
         return {
           id: seller.id,
           name: seller.name,
@@ -182,8 +254,8 @@ export class HomeService {
           business_type: seller.business_type,
           logo_url: seller.logo_url,
           location: seller.location,
-          average_rating: undefined, // TODO: Calculate from reviews
-          review_count: 0, // TODO: Get from reviews table
+          average_rating: rating?.avg,
+          review_count: rating?.count ?? 0,
           product_count: productCount || 0,
           monthly_sales: monthlySales,
           years_in_business: seller.years_in_business,
