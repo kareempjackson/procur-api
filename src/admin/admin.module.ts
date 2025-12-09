@@ -4,9 +4,10 @@ import { AdminService } from './admin.service';
 import { DatabaseModule } from '../database/database.module';
 import { FinanceModule } from '../finance/finance.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
+import { EmailModule } from '../email/email.module';
 
 @Module({
-  imports: [DatabaseModule, FinanceModule, WhatsappModule],
+  imports: [DatabaseModule, FinanceModule, WhatsappModule, EmailModule],
   controllers: [AdminController],
   providers: [AdminService],
 })

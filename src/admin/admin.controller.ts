@@ -99,6 +99,20 @@ export class AdminController {
     return this.adminService.getBuyerDetail(id);
   }
 
+  @Delete('buyers/:id')
+  @ApiOperation({
+    summary: 'Delete buyer organization',
+    description:
+      'Soft-delete (suspend) a buyer organization and deactivate its members from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Buyer organization deleted successfully',
+  })
+  async deleteBuyer(@Param('id') id: string): Promise<{ success: boolean }> {
+    return this.adminService.deleteOrganization(id, 'buyer');
+  }
+
   // ===== Sellers =====
 
   @Get('sellers')
@@ -127,6 +141,20 @@ export class AdminController {
   })
   async getSellerById(@Param('id') id: string) {
     return this.adminService.getSellerDetail(id);
+  }
+
+  @Delete('sellers/:id')
+  @ApiOperation({
+    summary: 'Delete seller organization',
+    description:
+      'Soft-delete (suspend) a seller organization and deactivate its members from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller organization deleted successfully',
+  })
+  async deleteSeller(@Param('id') id: string): Promise<{ success: boolean }> {
+    return this.adminService.deleteOrganization(id, 'seller');
   }
 
   // ===== Orders =====
@@ -622,5 +650,117 @@ export class AdminController {
     @Body() dto: CreateAdminUserDto,
   ): Promise<AdminUserResponseDto> {
     return this.adminService.createAdminUser(dto);
+  }
+
+  // ===== User WhatsApp management (admin-triggered) =====
+
+  @Patch('users/:id/phone')
+  @ApiOperation({
+    summary: 'Update user phone number (no WhatsApp send)',
+    description:
+      'Update a user phone_number without triggering any WhatsApp messages. Admins can then manually start the bot or send prompts.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'User phone number updated successfully',
+  })
+  async updateUserPhone(
+    @Param('id') id: string,
+    @Body() body: { phoneNumber: string },
+  ): Promise<{ success: boolean; phoneNumber: string }> {
+    return this.adminService.updateUserPhone(id, body.phoneNumber);
+  }
+
+  @Post('users/:id/whatsapp/start')
+  @ApiOperation({
+    summary: 'Start WhatsApp bot for user',
+    description:
+      'Send an onboarding WhatsApp template to the user to start the bot. Must be called explicitly from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'WhatsApp bot started successfully',
+  })
+  async startUserWhatsAppBot(
+    @Param('id') id: string,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.startUserWhatsAppBot(id);
+  }
+
+  @Post('users/:id/whatsapp/prompt')
+  @ApiOperation({
+    summary: 'Send WhatsApp prompt to user',
+    description:
+      'Send a predefined WhatsApp prompt template (e.g., KYC reminder) to the given user.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'WhatsApp prompt sent successfully',
+  })
+  async sendUserWhatsAppPrompt(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      template: string;
+      variables?: Record<string, string>;
+    },
+  ): Promise<{ success: boolean }> {
+    return this.adminService.sendUserWhatsAppPrompt(
+      id,
+      body.template,
+      body.variables ?? {},
+    );
+  }
+
+  // ===== Onboarding buyers and sellers from admin =====
+
+  @Post('buyers/onboard')
+  @ApiOperation({
+    summary: 'Create buyer organization and primary user from admin panel',
+    description:
+      'Create a new buyer organization plus its primary admin user (email + password) for onboarding.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Buyer organization created successfully',
+  })
+  async createBuyerFromAdmin(
+    @Body()
+    body: {
+      adminEmail: string;
+      adminFullname: string;
+      password: string;
+      businessName: string;
+      country?: string;
+      businessType?: string;
+      phoneNumber?: string;
+    },
+  ): Promise<{ organizationId: string; userId: string }> {
+    return this.adminService.createBuyerFromAdmin(body);
+  }
+
+  @Post('sellers/onboard')
+  @ApiOperation({
+    summary: 'Create seller organization and primary user from admin panel',
+    description:
+      'Create a new seller organization plus its primary admin user (email + password) for onboarding.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Seller organization created successfully',
+  })
+  async createSellerFromAdmin(
+    @Body()
+    body: {
+      adminEmail: string;
+      adminFullname: string;
+      password: string;
+      businessName: string;
+      country?: string;
+      businessType?: string;
+      phoneNumber?: string;
+    },
+  ): Promise<{ organizationId: string; userId: string }> {
+    return this.adminService.createSellerFromAdmin(body);
   }
 }

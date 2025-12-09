@@ -58,6 +58,6 @@ import { TemplateService } from './templates/template.service';
       },
     },
   ],
-  exports: [SendService, TemplateService],
+  exports: [SendService, TemplateService, WhatsappService],
 })
 export class WhatsappModule {}

@@ -8,6 +8,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { DatabaseModule } from '../database/database.module';
 import { EmailModule } from '../email/email.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
+import { CaptchaService } from '../common/utils/captcha.service';
 
 @Module({
   imports: [
@@ -27,7 +28,7 @@ import { WhatsappModule } from '../whatsapp/whatsapp.module';
     forwardRef(() => WhatsappModule),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, CaptchaService],
   exports: [AuthService, JwtModule],
 })
 export class AuthModule {}

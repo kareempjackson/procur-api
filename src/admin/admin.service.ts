@@ -13,6 +13,8 @@ import {
 } from '../database/types/database.types';
 import { OrderClearingService } from '../finance/order-clearing.service';
 import { TemplateService } from '../whatsapp/templates/template.service';
+import { WhatsappService } from '../whatsapp/whatsapp.service';
+import { EmailService } from '../email/email.service';
 import {
   AdminDriverResponseDto,
   CreateDriverDto,
@@ -123,6 +125,8 @@ export class AdminService {
     private readonly clearing: OrderClearingService,
     private readonly waTemplates: TemplateService,
     private readonly configService: ConfigService,
+    private readonly whatsapp: WhatsappService,
+    private readonly email: EmailService,
   ) {}
 
   private get privateBucket(): string {
@@ -649,6 +653,42 @@ export class AdminService {
         `Failed to update organization status: ${
           error?.message ?? 'Unknown error'
         }`,
+      );
+    }
+
+    return { success: true };
+  }
+
+  async deleteOrganization(
+    id: string,
+    accountType: 'buyer' | 'seller',
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    // Soft-delete by marking the organization as suspended / inactive
+    const { data, error } = await client
+      .from('organizations')
+      .update({ status: OrganizationStatus.SUSPENDED })
+      .eq('id', id)
+      .eq('account_type', accountType)
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to delete organization: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    // Additionally deactivate all organization user memberships
+    const { error: orgUsersError } = await client
+      .from('organization_users')
+      .update({ is_active: false })
+      .eq('organization_id', id);
+
+    if (orgUsersError) {
+      throw new BadRequestException(
+        `Failed to deactivate organization users: ${orgUsersError.message}`,
       );
     }
 
@@ -2162,5 +2202,262 @@ export class AdminService {
       isActive: Boolean(data.is_active),
       createdAt: data.created_at as string,
     };
+  }
+
+  // ===== User WhatsApp helpers (admin-triggered) =====
+
+  /**
+   * Update a user's phone_number without triggering any WhatsApp sends.
+   * The admin must separately call the start-bot or prompt endpoints
+   * to initiate WhatsApp messages.
+   */
+  async updateUserPhone(
+    userId: string,
+    phoneNumber: string,
+  ): Promise<{ success: boolean; phoneNumber: string }> {
+    const normalized = this.normalizePhoneNumber(phoneNumber);
+
+    const client = this.supabase.getClient();
+    const { error } = await client
+      .from('users')
+      .update({ phone_number: normalized })
+      .eq('id', userId);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to update user phone: ${error.message}`,
+      );
+    }
+
+    return { success: true, phoneNumber: normalized };
+  }
+
+  async startUserWhatsAppBot(userId: string): Promise<{ success: boolean }> {
+    await this.whatsapp.startBotForUser(userId);
+    return { success: true };
+  }
+
+  async sendUserWhatsAppPrompt(
+    userId: string,
+    template: string,
+    variables: Record<string, string> = {},
+  ): Promise<{ success: boolean }> {
+    await this.whatsapp.sendAdminPromptForUser(userId, template, variables);
+    return { success: true };
+  }
+
+  /**
+   * Very lightweight normalization for admin-provided phone numbers.
+   * Delegates full validation to WhatsappService when sending.
+   */
+  private normalizePhoneNumber(input: string): string {
+    const trimmed = String(input || '').trim();
+    if (!trimmed) {
+      throw new BadRequestException('Phone number is required');
+    }
+    // Keep as-is; WhatsappService.normalizePhoneE164 will validate on send.
+    return trimmed;
+  }
+
+  // ===== Admin-led onboarding for buyers and sellers =====
+
+  async createBuyerFromAdmin(input: {
+    adminEmail: string;
+    adminFullname: string;
+    password: string;
+    businessName: string;
+    country?: string;
+    businessType?: string;
+    phoneNumber?: string;
+  }): Promise<{ organizationId: string; userId: string }> {
+    const client = this.supabase.getClient();
+
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(input.password, saltRounds);
+
+    const { data: user, error: userError } = await client
+      .from('users')
+      .insert({
+        email: input.adminEmail,
+        password: hashedPassword,
+        fullname: input.adminFullname,
+        individual_account_type: 'buyer',
+        phone_number: input.phoneNumber ?? null,
+        country: input.country ?? null,
+        email_verified: true,
+        is_active: true,
+      })
+      .select('id, email, fullname')
+      .single();
+
+    if (userError || !user) {
+      throw new BadRequestException(
+        `Failed to create buyer admin user: ${
+          userError?.message ?? 'unknown error'
+        }`,
+      );
+    }
+
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .insert({
+        name: input.businessName,
+        business_name: input.businessName,
+        account_type: 'buyer',
+        business_type: input.businessType || 'general',
+        country: input.country ?? null,
+        phone_number: input.phoneNumber ?? null,
+        status: 'pending_verification',
+      })
+      .select('id')
+      .single();
+
+    if (orgError || !org) {
+      throw new BadRequestException(
+        `Failed to create buyer organization: ${
+          orgError?.message ?? 'unknown error'
+        }`,
+      );
+    }
+
+    await this.supabase.ensureCreatorIsOrganizationAdmin(
+      user.id as string,
+      org.id as string,
+    );
+
+    // Fire-and-forget email notification
+    const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
+    const loginUrl = `${frontendUrl}/login`;
+    const htmlBody = `
+      <p>Hi ${input.adminFullname},</p>
+      <p>A Procur buyer account has been created for you for <strong>${input.businessName}</strong>.</p>
+      <p>You can sign in with this email address and the password provided by your admin.</p>
+      <p><a href="${loginUrl}">Go to Procur login</a></p>
+    `;
+    const textBody = `Hi ${input.adminFullname},
+
+A Procur buyer account has been created for you for "${input.businessName}".
+
+You can sign in with this email address and the password provided by your admin.
+
+Login here: ${loginUrl}
+`;
+
+    void this.email.sendBasicEmail(
+      input.adminEmail,
+      'Your Procur buyer account has been created',
+      htmlBody,
+      textBody,
+    );
+
+    // Optionally start WhatsApp bot if a phone number is present
+    if (input.phoneNumber) {
+      try {
+        await this.whatsapp.startBotForUser(user.id as string);
+      } catch {
+        // Ignore WhatsApp failures during onboarding
+      }
+    }
+
+    return { organizationId: org.id as string, userId: user.id as string };
+  }
+
+  async createSellerFromAdmin(input: {
+    adminEmail: string;
+    adminFullname: string;
+    password: string;
+    businessName: string;
+    country?: string;
+    businessType?: string;
+    phoneNumber?: string;
+  }): Promise<{ organizationId: string; userId: string }> {
+    const client = this.supabase.getClient();
+
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(input.password, saltRounds);
+
+    const { data: user, error: userError } = await client
+      .from('users')
+      .insert({
+        email: input.adminEmail,
+        password: hashedPassword,
+        fullname: input.adminFullname,
+        individual_account_type: 'seller',
+        phone_number: input.phoneNumber ?? null,
+        country: input.country ?? null,
+        email_verified: true,
+        is_active: true,
+      })
+      .select('id, email, fullname')
+      .single();
+
+    if (userError || !user) {
+      throw new BadRequestException(
+        `Failed to create seller admin user: ${
+          userError?.message ?? 'unknown error'
+        }`,
+      );
+    }
+
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .insert({
+        name: input.businessName,
+        business_name: input.businessName,
+        account_type: 'seller',
+        business_type: input.businessType || 'farmers',
+        country: input.country ?? null,
+        phone_number: input.phoneNumber ?? null,
+        status: 'pending_verification',
+      })
+      .select('id')
+      .single();
+
+    if (orgError || !org) {
+      throw new BadRequestException(
+        `Failed to create seller organization: ${
+          orgError?.message ?? 'unknown error'
+        }`,
+      );
+    }
+
+    await this.supabase.ensureCreatorIsOrganizationAdmin(
+      user.id as string,
+      org.id as string,
+    );
+
+    const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
+    const loginUrl = `${frontendUrl}/login`;
+    const htmlBody = `
+      <p>Hi ${input.adminFullname},</p>
+      <p>A Procur seller account has been created for you for <strong>${input.businessName}</strong>.</p>
+      <p>You can sign in with this email address and the password provided by your admin.</p>
+      <p><a href="${loginUrl}">Go to Procur login</a></p>
+    `;
+    const textBody = `Hi ${input.adminFullname},
+
+A Procur seller account has been created for you for "${input.businessName}".
+
+You can sign in with this email address and the password provided by your admin.
+
+Login here: ${loginUrl}
+`;
+
+    void this.email.sendBasicEmail(
+      input.adminEmail,
+      'Your Procur seller account has been created',
+      htmlBody,
+      textBody,
+    );
+
+    if (input.phoneNumber) {
+      try {
+        await this.whatsapp.startBotForUser(user.id as string);
+      } catch {
+        // Ignore WhatsApp failures during onboarding
+      }
+    }
+
+    return { organizationId: org.id as string, userId: user.id as string };
   }
 }

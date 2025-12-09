@@ -55,4 +55,7 @@ export default () => ({
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN,
     appSecret: process.env.WHATSAPP_APP_SECRET,
   },
+  turnstile: {
+    secret: process.env.TURNSTILE_SECRET,
+  },
 });

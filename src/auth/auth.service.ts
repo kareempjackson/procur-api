@@ -24,12 +24,14 @@ import {
 import { JwtPayload } from '../common/interfaces/jwt-payload.interface';
 import { AccountType } from '../common/enums/account-type.enum';
 import { BusinessType } from '../common/enums/business-types.enum';
+import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { SendService as WaSendService } from '../whatsapp/send/send.service';
 import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
+import { CaptchaService } from '../common/utils/captcha.service';
 
 @Injectable()
 export class AuthService {
@@ -40,6 +42,7 @@ export class AuthService {
     private emailService: EmailService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private captchaService: CaptchaService,
     // Optional: present if WhatsappModule is loaded
     private waSend?: WaSendService,
     private waTemplates?: WaTemplateService,
@@ -54,7 +57,25 @@ export class AuthService {
       country,
       businessType,
       businessName,
+      website,
+      captchaToken,
     } = signupDto;
+
+    // Honeypot: if filled, treat as bot and fail fast
+    if (website && website.trim().length > 0) {
+      this.logger.warn(`Signup honeypot triggered for email ${email}`);
+      throw new BadRequestException('Unable to process signup');
+    }
+
+    // CAPTCHA verification
+    await this.captchaService.verifyTurnstileToken(captchaToken);
+
+    // Additional sanity check on fullname (backup to DTO validation)
+    if (!/\s/.test(fullname) || /\d/.test(fullname) || fullname.length < 5) {
+      throw new BadRequestException(
+        'Please enter your real first and last name',
+      );
+    }
 
     // Check if user already exists
     const existingUser = await this.supabaseService.findUserByEmail(email);
@@ -493,10 +514,24 @@ export class AuthService {
       // Send welcome email
       await this.emailService.sendWelcomeEmail(user.email, user.fullname);
 
-      // Generate JWT token for the verified user
+      // Load organization context (if any) for this user
       const userWithOrg = await this.supabaseService.getUserWithOrganization(
         user.id,
       );
+
+      // If this is a buyer with a linked organization in pending state,
+      // automatically mark the organization as active when email is verified.
+      const orgUser = userWithOrg?.organization_users?.[0];
+      const org = orgUser?.organizations;
+      if (
+        org &&
+        org.account_type === AccountType.BUYER &&
+        org.status === OrganizationStatus.PENDING_VERIFICATION
+      ) {
+        await this.supabaseService.updateOrganization(org.id, {
+          status: OrganizationStatus.ACTIVE,
+        });
+      }
 
       const {
         organizationId,

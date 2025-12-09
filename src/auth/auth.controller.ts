@@ -7,6 +7,7 @@ import {
   ValidationPipe,
   Query,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import {
   ApiTags,
   ApiOperation,
@@ -41,6 +42,7 @@ export class AuthController {
 
   @Public()
   @Post('signup')
+  @Throttle({ default: { limit: 3, ttl: 60 } })
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'User Registration',
@@ -86,6 +88,7 @@ export class AuthController {
 
   @Public()
   @Post('signin')
+  @Throttle({ default: { limit: 10, ttl: 60 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'User Sign In',
@@ -219,6 +222,7 @@ export class AuthController {
 
   @Public()
   @Post('otp/request')
+  @Throttle({ default: { limit: 5, ttl: 300 } })
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Request login OTP via WhatsApp or Email',

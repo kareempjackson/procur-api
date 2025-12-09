@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
   ParseUUIDPipe,
+  Res,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -34,6 +35,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
 import { AccountTypes } from '../auth/decorators/account-types.decorator';
 import { UserContext } from '../common/interfaces/jwt-payload.interface';
+import type { Response } from 'express';
 import { AccountType } from '../common/enums/account-type.enum';
 import {
   // Cart DTOs
@@ -627,6 +629,43 @@ export class BuyersController {
     return this.buyersService.getOrderById(user.organizationId!, orderId);
   }
 
+  @Get('orders/:id/invoice')
+  @RequirePermissions('view_buyer_orders')
+  @ApiOperation({
+    summary: 'Download Order Invoice (PDF)',
+    description: 'Generate and download a PDF invoice for an order',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'PDF invoice generated successfully',
+    content: {
+      'application/pdf': {
+        schema: {
+          type: 'string',
+          format: 'binary',
+        },
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  async downloadOrderInvoice(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const buffer = await this.buyersService.generateOrderInvoicePdf(
+      user.organizationId!,
+      orderId,
+    );
+
+    const filename = `procur-invoice-${orderId}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.end(buffer);
+  }
+
   @Patch('orders/:id/cancel')
   @RequirePermissions('cancel_orders')
   @ApiOperation({
@@ -835,8 +874,7 @@ export class BuyersController {
   async getPreferences(
     @CurrentUser() user: UserContext,
   ): Promise<PreferencesResponseDto> {
-    // TODO: Implement getPreferences in service
-    throw new Error('Not implemented');
+    return this.buyersService.getPreferences(user.organizationId!);
   }
 
   @Patch('preferences')
@@ -855,8 +893,10 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Body() updateDto: UpdatePreferencesDto,
   ): Promise<PreferencesResponseDto> {
-    // TODO: Implement updatePreferences in service
-    throw new Error('Not implemented');
+    return this.buyersService.updatePreferences(
+      user.organizationId!,
+      updateDto,
+    );
   }
 
   // ==================== FAVORITES ENDPOINTS ====================

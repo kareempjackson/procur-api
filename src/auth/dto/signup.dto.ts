@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsNotEmpty,
   ValidateIf,
+  Matches,
 } from 'class-validator';
 import { AccountType } from '../../common/enums/account-type.enum';
 import { BuyerBusinessType } from '../../common/enums/buyer-business-type.enum';
@@ -35,6 +36,10 @@ export class SignupDto {
     description: 'Full name of the user',
   })
   @IsString()
+  @MinLength(5, { message: 'Full name must be at least 5 characters long' })
+  @Matches(/^[A-Za-zÀ-ÖØ-öø-ÿ.'-]+\s+[A-Za-zÀ-ÖØ-öø-ÿ.'-]+.*$/, {
+    message: 'Please enter your real first and last name',
+  })
   fullname: string;
 
   @ApiProperty({
@@ -84,4 +89,18 @@ export class SignupDto {
     message: 'Business type must be valid for the selected account type',
   })
   businessType?: string;
+
+  @ApiProperty({
+    description: 'Business website honeypot. Real users must leave this empty.',
+    required: false,
+  })
+  @IsOptional()
+  @IsString()
+  website?: string;
+
+  @ApiProperty({
+    description: 'CAPTCHA verification token from the client',
+  })
+  @IsString()
+  captchaToken: string;
 }

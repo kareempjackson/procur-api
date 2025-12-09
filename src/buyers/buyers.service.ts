@@ -2105,6 +2105,242 @@ Manage this order: ${link}`;
     return this.transformOrderToResponse(order, orderItems);
   }
 
+  async generateOrderInvoicePdf(
+    buyerOrgId: string,
+    orderId: string,
+  ): Promise<Buffer> {
+    const order = await this.getOrderById(buyerOrgId, orderId);
+
+    // Dynamically require pdfkit to avoid ESM/CJS interop issues
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    const chunks: Buffer[] = [];
+
+    return await new Promise<Buffer>((resolve, reject) => {
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', (err) => reject(err));
+
+      // Classic balance style invoice
+      doc
+        .fontSize(18)
+        .font('Helvetica-Bold')
+        .text('Tax invoice', { align: 'left' });
+
+      doc.moveDown(0.5);
+      doc
+        .fontSize(10)
+        .font('Helvetica')
+        .text('Procur marketplace', { align: 'left' });
+
+      doc.moveDown(1);
+
+      const issuedDate = new Date(order.created_at);
+      const dueDate = order.estimated_delivery_date
+        ? new Date(order.estimated_delivery_date)
+        : undefined;
+      const invoiceNumber =
+        (order as any).invoice_number || order.order_number || order.id;
+
+      const rightX = doc.page.width - doc.page.margins.right;
+
+      doc
+        .fontSize(10)
+        .font('Helvetica')
+        .text(`Invoice: ${invoiceNumber}`, rightX - 200, 70, {
+          width: 200,
+          align: 'right',
+        })
+        .text(
+          `Issued: ${issuedDate.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+          })}`,
+          {
+            align: 'right',
+          },
+        );
+
+      if (dueDate) {
+        doc.text(
+          `Due: ${dueDate.toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+          })}`,
+          {
+            align: 'right',
+          },
+        );
+      }
+
+      doc.moveDown(2);
+
+      // Billed to
+      doc.fontSize(11).font('Helvetica-Bold').text('Billed to');
+      doc.moveDown(0.3);
+      doc.fontSize(10).font('Helvetica');
+
+      const shipping = order.shipping_address as any;
+      if (shipping) {
+        if (shipping.name || shipping.contact_name) {
+          doc.text(shipping.name || shipping.contact_name);
+        }
+        if (shipping.address_line1 || shipping.street_address) {
+          doc.text(shipping.address_line1 || shipping.street_address);
+        }
+        if (shipping.address_line2) {
+          doc.text(shipping.address_line2);
+        }
+        const cityLine = [shipping.city, shipping.state, shipping.postal_code]
+          .filter(Boolean)
+          .join(' ');
+        if (cityLine) {
+          doc.text(cityLine);
+        }
+        if (shipping.country) {
+          doc.text(shipping.country);
+        }
+      }
+
+      doc.moveDown(1.2);
+
+      // Order reference
+      doc.fontSize(11).font('Helvetica-Bold').text('Order reference');
+      doc.moveDown(0.3);
+      doc.fontSize(10).font('Helvetica');
+      doc.text(`Order number: ${order.order_number}`);
+      if (order.estimated_delivery_date) {
+        doc.text(
+          `Estimated delivery: ${new Date(
+            order.estimated_delivery_date,
+          ).toLocaleDateString('en-US', {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+          })}`,
+        );
+      }
+
+      doc.moveDown(1.5);
+
+      // Line items table header
+      const tableTop = doc.y;
+      const colItemX = doc.page.margins.left;
+      const colQtyX = colItemX + 260;
+      const colUnitPriceX = colQtyX + 70;
+      const colTotalX = colUnitPriceX + 90;
+
+      doc.fontSize(10).font('Helvetica-Bold');
+      doc.text('Item', colItemX, tableTop);
+      doc.text('Qty', colQtyX, tableTop, { width: 60, align: 'right' });
+      doc.text('Unit price', colUnitPriceX, tableTop, {
+        width: 80,
+        align: 'right',
+      });
+      doc.text('Line total', colTotalX, tableTop, {
+        width: 80,
+        align: 'right',
+      });
+
+      doc
+        .moveTo(colItemX, tableTop + 14)
+        .lineTo(doc.page.width - doc.page.margins.right, tableTop + 14)
+        .strokeColor('#dddddd')
+        .lineWidth(0.5)
+        .stroke();
+
+      const currency = order.currency || 'USD';
+      const formatCurrency = (value: number) =>
+        `${currency} ${Number(value || 0).toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+
+      doc.moveDown(0.8);
+      doc.font('Helvetica').fontSize(10);
+
+      order.items.forEach((item) => {
+        const y = doc.y;
+        const qty = item.quantity || 0;
+        const unitPrice = item.unit_price || 0;
+        const lineTotal = item.total_price || qty * unitPrice;
+
+        doc.text(item.product_name, colItemX, y, {
+          width: colQtyX - colItemX - 10,
+        });
+        doc.text(String(qty), colQtyX, y, { width: 60, align: 'right' });
+        doc.text(formatCurrency(unitPrice), colUnitPriceX, y, {
+          width: 80,
+          align: 'right',
+        });
+        doc.text(formatCurrency(lineTotal), colTotalX, y, {
+          width: 80,
+          align: 'right',
+        });
+
+        doc.moveDown(0.6);
+      });
+
+      doc.moveDown(1);
+
+      // Totals
+      const totalsX = colUnitPriceX;
+      const totalsWidth = doc.page.width - doc.page.margins.right - totalsX;
+
+      const addTotalRow = (label: string, value: number, bold = false) => {
+        const y = doc.y;
+        doc
+          .font(bold ? 'Helvetica-Bold' : 'Helvetica')
+          .fontSize(10)
+          .text(label, totalsX, y, {
+            width: totalsWidth / 2,
+            align: 'left',
+          })
+          .text(formatCurrency(value), totalsX, y, {
+            width: totalsWidth,
+            align: 'right',
+          });
+        doc.moveDown(0.4);
+      };
+
+      addTotalRow('Subtotal', order.subtotal || 0);
+      addTotalRow('Shipping & handling', order.shipping_amount || 0);
+      addTotalRow('Tax', order.tax_amount || 0);
+      if (order.discount_amount && order.discount_amount > 0) {
+        addTotalRow('Discount', -order.discount_amount);
+      }
+
+      doc.moveDown(0.4);
+      doc
+        .moveTo(totalsX, doc.y)
+        .lineTo(doc.page.width - doc.page.margins.right, doc.y)
+        .strokeColor('#000000')
+        .lineWidth(0.8)
+        .stroke();
+      doc.moveDown(0.4);
+
+      addTotalRow('Amount due', order.total_amount || 0, true);
+
+      doc.moveDown(1.5);
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor('#666666')
+        .text(
+          'Thank you for sourcing fresh produce through Procur. Payments help us keep farmers on the land and buyers fully supplied.',
+          {
+            width:
+              doc.page.width - doc.page.margins.left - doc.page.margins.right,
+          },
+        );
+
+      doc.end();
+    });
+  }
+
   async cancelOrder(buyerOrgId: string, orderId: string): Promise<void> {
     const { data: order } = await this.supabase
       .getClient()
@@ -2381,20 +2617,18 @@ Manage this order: ${link}`;
     };
   }
 
-  private async getPreferences(
-    buyerOrgId: string,
-  ): Promise<PreferencesResponseDto> {
-    const { data: preferences } = await this.supabase
-      .getClient()
+  async getPreferences(buyerOrgId: string): Promise<PreferencesResponseDto> {
+    const client = this.supabase.getClient();
+
+    const { data: preferences } = await client
       .from('buyer_preferences')
       .select('*')
       .eq('buyer_org_id', buyerOrgId)
       .single();
 
     if (!preferences) {
-      // Create default preferences
-      const { data: newPreferences } = await this.supabase
-        .getClient()
+      // Create default preferences record if it doesn't exist yet
+      const { data: newPreferences, error } = await client
         .from('buyer_preferences')
         .insert({
           buyer_org_id: buyerOrgId,
@@ -2408,13 +2642,90 @@ Manage this order: ${link}`;
           public_reviews: true,
           share_purchase_history: false,
         })
-        .select()
+        .select('*')
         .single();
 
-      return newPreferences;
+      if (error || !newPreferences) {
+        throw new BadRequestException(
+          `Failed to create default preferences: ${error?.message}`,
+        );
+      }
+
+      return newPreferences as PreferencesResponseDto;
     }
 
-    return preferences;
+    return preferences as PreferencesResponseDto;
+  }
+
+  async updatePreferences(
+    buyerOrgId: string,
+    updateDto: UpdatePreferencesDto,
+  ): Promise<PreferencesResponseDto> {
+    const client = this.supabase.getClient();
+
+    // Ensure a preferences row exists and get the current values
+    const current = await this.getPreferences(buyerOrgId);
+
+    const updatePayload: Record<string, any> = {};
+
+    if (typeof updateDto.email_notifications === 'boolean') {
+      updatePayload.email_notifications = updateDto.email_notifications;
+    }
+    if (typeof updateDto.sms_notifications === 'boolean') {
+      updatePayload.sms_notifications = updateDto.sms_notifications;
+    }
+    if (typeof updateDto.order_updates === 'boolean') {
+      updatePayload.order_updates = updateDto.order_updates;
+    }
+    if (typeof updateDto.price_alerts === 'boolean') {
+      updatePayload.price_alerts = updateDto.price_alerts;
+    }
+    if (typeof updateDto.new_product_alerts === 'boolean') {
+      updatePayload.new_product_alerts = updateDto.new_product_alerts;
+    }
+    if (typeof updateDto.auto_reorder === 'boolean') {
+      updatePayload.auto_reorder = updateDto.auto_reorder;
+    }
+    if (typeof updateDto.public_reviews === 'boolean') {
+      updatePayload.public_reviews = updateDto.public_reviews;
+    }
+    if (typeof updateDto.share_purchase_history === 'boolean') {
+      updatePayload.share_purchase_history = updateDto.share_purchase_history;
+    }
+    if (typeof updateDto.preferred_currency === 'string') {
+      updatePayload.preferred_currency = updateDto.preferred_currency;
+    }
+    if (typeof updateDto.preferred_delivery_window === 'object') {
+      updatePayload.preferred_delivery_window =
+        updateDto.preferred_delivery_window;
+    }
+
+    if (typeof updateDto.preferences_data === 'object') {
+      updatePayload.preferences_data = {
+        ...(current.preferences_data || {}),
+        ...updateDto.preferences_data,
+      };
+    }
+
+    // If nothing to update, just return current
+    if (Object.keys(updatePayload).length === 0) {
+      return current;
+    }
+
+    const { data, error } = await client
+      .from('buyer_preferences')
+      .update(updatePayload)
+      .eq('buyer_org_id', buyerOrgId)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to update preferences: ${error?.message}`,
+      );
+    }
+
+    return data as PreferencesResponseDto;
   }
 
   // ==================== FAVORITES METHODS ====================

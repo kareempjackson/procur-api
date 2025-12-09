@@ -81,6 +81,10 @@ export class EnvironmentVariables {
   @IsString()
   @IsOptional()
   WHATSAPP_APP_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  TURNSTILE_SECRET?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

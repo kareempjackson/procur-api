@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { SessionStore } from './session.store';
@@ -21,6 +27,13 @@ export class WhatsappService {
   private readonly phoneNumberId: string;
   private readonly token: string;
   private readonly apiBase: string;
+
+  private readonly adminKycTemplateEnvKey = 'WA_TEMPLATE_KYC_REMINDER';
+  private readonly adminStartBotTemplateEnvKey =
+    'WA_TEMPLATE_ONBOARDING_START_BOT';
+
+  private readonly defaultAdminKycTemplate = 'kyc_reminder_v1';
+  private readonly defaultAdminStartBotTemplate = 'onboarding_start_bot_v1';
 
   constructor(
     private readonly config: ConfigService,
@@ -45,6 +58,150 @@ export class WhatsappService {
       this.config.get<string>('whatsapp.token') ||
       '';
     this.apiBase = `https://graph.facebook.com/v24.0/${this.phoneNumberId}`;
+  }
+
+  /**
+   * Admin-triggered: start the WhatsApp bot for a specific user by
+   * sending an onboarding template to their stored phone number.
+   *
+   * This does NOT auto-run when a phone is added; callers must invoke
+   * it explicitly from the admin panel.
+   */
+  async startBotForUser(userId: string) {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('users')
+      .select('id, email, fullname, phone_number')
+      .eq('id', userId)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('User not found');
+    }
+
+    type UserRow = {
+      id: string;
+      email: string | null;
+      fullname: string | null;
+      phone_number: string | null;
+    };
+    const user = data as unknown as UserRow;
+    const rawPhone = user.phone_number;
+    if (!rawPhone) {
+      throw new BadRequestException('User does not have a phone_number set');
+    }
+
+    const phoneE164 = this.normalizePhoneE164(rawPhone);
+    const to = phoneE164.replace(/^\+/, '');
+
+    // Simple locale default for now – can be derived from user/org later
+    const locale = 'en';
+    const templateName =
+      this.config.get<string>(this.adminStartBotTemplateEnvKey) ||
+      this.defaultAdminStartBotTemplate;
+
+    const nameOrEmail = user.fullname || user.email || phoneE164;
+
+    const components = [
+      {
+        type: 'body',
+        parameters: [{ type: 'text', text: this.truncate(nameOrEmail, 80) }],
+      },
+    ];
+
+    await this.sendTemplate(
+      to,
+      templateName,
+      components,
+      this.getTemplateLang(locale),
+    );
+
+    await this.audit('admin_start_bot', {
+      user_id: userId,
+      from_e164: phoneE164,
+    });
+  }
+
+  /**
+   * Admin-triggered: send a predefined WhatsApp prompt template to a user.
+   * Currently supports a small, explicit set of templates.
+   */
+  async sendAdminPromptForUser(
+    userId: string,
+    template: string,
+    variables: Record<string, string> = {},
+  ) {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('users')
+      .select('id, email, fullname, phone_number')
+      .eq('id', userId)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('User not found');
+    }
+
+    type UserRow = {
+      id: string;
+      email: string | null;
+      fullname: string | null;
+      phone_number: string | null;
+    };
+    const user = data as unknown as UserRow;
+    const rawPhone = user.phone_number;
+    if (!rawPhone) {
+      throw new BadRequestException('User does not have a phone_number set');
+    }
+
+    const phoneE164 = this.normalizePhoneE164(rawPhone);
+    const to = phoneE164.replace(/^\+/, '');
+
+    const locale = 'en';
+
+    let templateName: string;
+    let components: any[]; // templates from Meta API accept flexible shapes
+
+    switch (template) {
+      case 'kyc_reminder': {
+        templateName =
+          this.config.get<string>(this.adminKycTemplateEnvKey) ||
+          this.defaultAdminKycTemplate;
+        const nameOrEmail = user.fullname || user.email || phoneE164;
+        const deadline = variables.deadline || '';
+        components = [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: this.truncate(nameOrEmail, 80) },
+              { type: 'text', text: this.truncate(deadline, 80) },
+            ],
+          },
+        ];
+        break;
+      }
+      default: {
+        throw new BadRequestException(
+          `Unsupported WhatsApp admin template: ${template}`,
+        );
+      }
+    }
+
+    await this.sendTemplate(
+      to,
+      templateName,
+      components,
+      this.getTemplateLang(locale),
+    );
+
+    await this.audit('admin_send_prompt', {
+      user_id: userId,
+      from_e164: phoneE164,
+      template,
+      variables,
+    });
   }
 
   async handleWebhook(body: any) {
@@ -3248,6 +3405,35 @@ export class WhatsappService {
   private getLocale(to: string): string {
     const s = this.sessions.get(to);
     return (s.data.locale as string) || 'en';
+  }
+
+  /**
+   * Normalize various phone number inputs into a best-effort E.164 string.
+   * This is intentionally conservative and will throw for obviously invalid
+   * inputs so that the admin can correct the number instead of silently
+   * failing WhatsApp sends.
+   */
+  private normalizePhoneE164(raw: string): string {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) {
+      throw new BadRequestException('Phone number is empty');
+    }
+
+    // Allow leading + for already-E.164 numbers
+    const digits = trimmed.replace(/[^\d+]/g, '');
+    if (digits.startsWith('+')) {
+      if (digits.length < 8) {
+        throw new BadRequestException('Phone number looks too short');
+      }
+      return digits;
+    }
+
+    const onlyDigits = digits.replace(/\D/g, '');
+    if (onlyDigits.length < 8) {
+      throw new BadRequestException('Phone number looks too short');
+    }
+
+    return `+${onlyDigits}`;
   }
 
   private t(locale: string, key: string): string {
