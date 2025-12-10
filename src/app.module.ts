@@ -30,6 +30,7 @@ import { AdminModule } from './admin/admin.module';
 import { AuditModule } from './audit/audit.module';
 import { BankInfoModule } from './bank-info/bank-info.module';
 import { PaymentLinksModule } from './payment-links/payment-links.module';
+import { MarketplaceModule } from './marketplace/marketplace.module';
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { PaymentLinksModule } from './payment-links/payment-links.module';
     AuditModule,
     BankInfoModule,
     PaymentLinksModule,
+    MarketplaceModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

@@ -32,7 +32,15 @@ import {
 } from './dto/admin-product.dto';
 import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
-import { CreateFarmVisitRequestDto } from '../sellers/dto';
+import * as crypto from 'crypto';
+import { FarmersIdUploadUrlResponseDto } from '../users/dto/farmers-id-upload.dto';
+import {
+  CreateFarmVisitRequestDto,
+  CreateProductDto,
+  ProductQueryDto,
+  ProductResponseDto,
+} from '../sellers/dto';
+import { SellersService } from '../sellers/sellers.service';
 
 export interface AdminOrganizationSummary {
   id: string;
@@ -127,6 +135,7 @@ export class AdminService {
     private readonly configService: ConfigService,
     private readonly whatsapp: WhatsappService,
     private readonly email: EmailService,
+    private readonly sellersService: SellersService,
   ) {}
 
   private get privateBucket(): string {
@@ -889,6 +898,26 @@ export class AdminService {
       members,
       recentOrders,
     };
+  }
+
+  async listSellerProducts(
+    orgId: string,
+    query: ProductQueryDto,
+  ): Promise<{
+    products: ProductResponseDto[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    return this.sellersService.getProducts(orgId, query);
+  }
+
+  async createSellerProduct(
+    orgId: string,
+    dto: CreateProductDto,
+    adminUserId: string,
+  ): Promise<ProductResponseDto> {
+    return this.sellersService.createProduct(orgId, dto, adminUserId);
   }
 
   async getSellerDetail(orgId: string): Promise<{
@@ -2260,6 +2289,49 @@ export class AdminService {
   }
 
   // ===== Admin-led onboarding for buyers and sellers =====
+
+  async createSellerFarmersIdSignedUpload(
+    organizationId: string,
+    filename: string,
+  ): Promise<FarmersIdUploadUrlResponseDto> {
+    const ext = filename.includes('.')
+      ? filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = this.privateBucket;
+    const objectPath = `ids/farmers/${organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+
+      const client = this.supabase.getClient();
+      const { error } = await client
+        .from('organizations')
+        .update({
+          farmers_id: objectPath,
+          farmers_id_verified: false,
+        })
+        .eq('id', organizationId)
+        .eq('account_type', 'seller');
+
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update organization with farmer ID path: ${error.message}`,
+        );
+      }
+
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e) {
+      throw new BadRequestException('Failed to create signed upload URL');
+    }
+  }
 
   async createBuyerFromAdmin(input: {
     adminEmail: string;

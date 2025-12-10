@@ -1,14 +1,17 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import { IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 export class AdminOrgQueryDto {
   @ApiPropertyOptional({ description: 'Page number (1-based)', default: 1 })
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @IsOptional()
   page?: number = 1;
 
   @ApiPropertyOptional({ description: 'Page size', default: 20 })
+  @Type(() => Number)
   @IsInt()
   @Min(1)
   @IsOptional()

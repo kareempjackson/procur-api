@@ -372,7 +372,7 @@ export class BuyersService {
       seller: {
         id: product.seller_organization.id,
         name: product.seller_organization.name,
-        description: undefined,
+        description: product.seller_organization.description,
         logo_url: product.seller_organization.logo_url,
         location: product.seller_organization.country,
         average_rating: sellerAverageRating,
@@ -449,7 +449,7 @@ export class BuyersService {
       .from('organizations')
       .select(
         `
-        id, name, logo_url, created_at, business_type, country,
+        id, name, description, logo_url, created_at, business_type, country,
         products:products!seller_org_id(id, status)
       `,
         { count: 'exact' },
@@ -492,7 +492,7 @@ export class BuyersService {
       sellers?.map((seller) => ({
         id: seller.id,
         name: seller.name,
-        description: undefined,
+        description: seller.description,
         business_type: seller.business_type,
         logo_url: seller.logo_url,
         location: seller.country,
@@ -549,6 +549,16 @@ export class BuyersService {
       page,
       limit,
     };
+  }
+
+  async getSellerById(sellerId: string): Promise<MarketplaceSellerDto | null> {
+    const { sellers } = await this.getSellers({
+      page: 1,
+      limit: 100,
+    });
+
+    const found = sellers.find((s) => s.id === sellerId);
+    return found ?? null;
   }
 
   async getMarketplaceStats(): Promise<MarketplaceStatsDto> {

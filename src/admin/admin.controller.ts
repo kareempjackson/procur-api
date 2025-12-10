@@ -59,7 +59,12 @@ import {
 } from './dto/admin-org-verification.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserContext } from '../common/interfaces/jwt-payload.interface';
-import { CreateFarmVisitRequestDto } from '../sellers/dto';
+import {
+  CreateFarmVisitRequestDto,
+  CreateProductDto,
+  ProductQueryDto,
+  ProductResponseDto,
+} from '../sellers/dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth('JWT-auth')
@@ -143,6 +148,26 @@ export class AdminController {
     return this.adminService.getSellerDetail(id);
   }
 
+  @Patch('sellers/:id/farmers-id/signed-upload')
+  @ApiOperation({
+    summary: "Create signed upload URL for seller farmer's ID (admin)",
+    description:
+      "Return a signed upload URL for the seller's farmer ID image and update the organization's farmers_id path.",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Signed upload URL created successfully',
+  })
+  async createSellerFarmersIdSignedUpload(
+    @Param('id') id: string,
+    @Body() body: { filename: string },
+  ) {
+    return this.adminService.createSellerFarmersIdSignedUpload(
+      id,
+      body.filename,
+    );
+  }
+
   @Delete('sellers/:id')
   @ApiOperation({
     summary: 'Delete seller organization',
@@ -155,6 +180,56 @@ export class AdminController {
   })
   async deleteSeller(@Param('id') id: string): Promise<{ success: boolean }> {
     return this.adminService.deleteOrganization(id, 'seller');
+  }
+
+  // ===== Seller products (admin-managed) =====
+
+  @Get('sellers/:id/products')
+  @ApiOperation({
+    summary: 'List seller products (admin)',
+    description:
+      'Platform-level view of products for a specific seller organization.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller products listed successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        products: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/ProductResponseDto' },
+        },
+        total: { type: 'number' },
+        page: { type: 'number' },
+        limit: { type: 'number' },
+      },
+    },
+  })
+  async listSellerProducts(
+    @Param('id') orgId: string,
+    @Query() query: ProductQueryDto,
+  ) {
+    return this.adminService.listSellerProducts(orgId, query);
+  }
+
+  @Post('sellers/:id/products')
+  @ApiOperation({
+    summary: 'Create product for seller (admin)',
+    description:
+      'Create a new product in the seller catalog on behalf of a seller organization.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Product created successfully',
+    type: ProductResponseDto,
+  })
+  async createSellerProduct(
+    @Param('id') orgId: string,
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateProductDto,
+  ): Promise<ProductResponseDto> {
+    return this.adminService.createSellerProduct(orgId, dto, user.id);
   }
 
   // ===== Orders =====

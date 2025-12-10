@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -8,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import {
   PaymentLinksService,
@@ -32,7 +34,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { IsArray, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 class CreatePaymentLinkForOrderDto {
   @IsString()
@@ -195,6 +197,74 @@ class ConfirmOfflinePaymentDto {
   @IsOptional()
   @IsString()
   proof_url?: string;
+}
+
+class AdminCreateSimplePaymentLinkDto {
+  @IsString()
+  seller_org_id: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_name?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_company?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_email?: string;
+
+  @IsOptional()
+  @IsString()
+  buyer_phone?: string;
+
+  @IsOptional()
+  @IsString()
+  currency?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  amount?: number;
+
+  @IsArray()
+  @IsString({ each: true })
+  allowed_payment_methods: OfflinePaymentMethod[];
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsOptional()
+  @IsString()
+  expires_at?: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+
+  @IsOptional()
+  @IsString()
+  delivery_date?: string;
+
+  @IsOptional()
+  line_items?: {
+    product_name: string;
+    unit?: string;
+    quantity: number;
+    unit_price: number;
+  }[];
+
+  @IsOptional()
+  shipping_address?: {
+    line1: string;
+    line2?: string;
+    city?: string;
+    state?: string;
+    postal_code?: string;
+    country?: string;
+  };
 }
 
 @ApiTags('Payment Links')
@@ -417,5 +487,84 @@ export class PaymentLinksController {
       paymentReference: body.payment_reference,
       proofUrl: body.proof_url,
     });
+  }
+
+  // ========== ADMIN: Create simple offline order + payment link for seller ==========
+
+  @UseGuards(JwtAuthGuard, EmailVerifiedGuard, PermissionsGuard)
+  @RequirePermissions('manage_orders')
+  @Post('admin/payment-links/offline-order')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Create simple offline order and payment link for seller (admin)',
+    description:
+      'Admin creates a basic pending offline order and attached payment link on behalf of a seller organization.',
+  })
+  @ApiBody({ type: AdminCreateSimplePaymentLinkDto })
+  async createSimpleOfflineOrderAndLinkForSeller(
+    @CurrentUser() user: UserContext,
+    @Body() body: AdminCreateSimplePaymentLinkDto,
+  ) {
+    const hasLineItems =
+      Array.isArray(body.line_items) && body.line_items.length > 0;
+
+    if (!hasLineItems && (body.amount == null || Number(body.amount) <= 0)) {
+      throw new BadRequestException(
+        'Either line_items must be provided or amount must be a positive number',
+      );
+    }
+
+    const lineItems: {
+      product_name: string;
+      unit?: string;
+      quantity: number;
+      unit_price: number;
+    }[] = hasLineItems
+      ? body.line_items!
+      : [
+          {
+            product_name: body.description || 'Offline order',
+            unit: 'unit',
+            quantity: 1,
+            unit_price: Number(body.amount),
+          },
+        ];
+
+    return this.paymentLinks.createOrderAndLinkForSeller({
+      sellerOrgId: body.seller_org_id,
+      buyerName: body.buyer_name,
+      buyerCompany: body.buyer_company,
+      buyerEmail: body.buyer_email,
+      buyerPhone: body.buyer_phone,
+      shippingAddress: body.shipping_address,
+      lineItems,
+      currency: body.currency,
+      allowedPaymentMethods: body.allowed_payment_methods,
+      expiresAt: body.expires_at,
+      notes: body.notes,
+      deliveryDate: body.delivery_date,
+      createdByUserId: user.id,
+    });
+  }
+
+  // ========== ADMIN: List payment links for a seller ==========
+
+  @UseGuards(JwtAuthGuard, EmailVerifiedGuard, PermissionsGuard)
+  @RequirePermissions('manage_orders')
+  @Get('admin/payment-links')
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'List payment links for a seller (admin)',
+    description:
+      'Admin lists all payment links for a specific seller organization.',
+  })
+  async listPaymentLinksForSellerAdmin(
+    @Query('seller_org_id') sellerOrgId?: string,
+  ) {
+    if (!sellerOrgId) {
+      throw new BadRequestException('seller_org_id is required');
+    }
+    return this.paymentLinks.listForSeller(sellerOrgId);
   }
 }
