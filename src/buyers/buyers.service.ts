@@ -372,7 +372,7 @@ export class BuyersService {
       seller: {
         id: product.seller_organization.id,
         name: product.seller_organization.name,
-        description: product.seller_organization.description,
+        description: undefined,
         logo_url: product.seller_organization.logo_url,
         location: product.seller_organization.country,
         average_rating: sellerAverageRating,
@@ -449,7 +449,7 @@ export class BuyersService {
       .from('organizations')
       .select(
         `
-        id, name, description, logo_url, created_at, business_type, country,
+        id, name, logo_url, created_at, business_type, country,
         products:products!seller_org_id(id, status)
       `,
         { count: 'exact' },
@@ -492,7 +492,7 @@ export class BuyersService {
       sellers?.map((seller) => ({
         id: seller.id,
         name: seller.name,
-        description: seller.description,
+        description: undefined,
         business_type: seller.business_type,
         logo_url: seller.logo_url,
         location: seller.country,

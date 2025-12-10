@@ -64,6 +64,7 @@ import {
   CreateProductDto,
   ProductQueryDto,
   ProductResponseDto,
+  ProductStatus,
 } from '../sellers/dto';
 
 @ApiTags('Admin')
@@ -116,6 +117,26 @@ export class AdminController {
   })
   async deleteBuyer(@Param('id') id: string): Promise<{ success: boolean }> {
     return this.adminService.deleteOrganization(id, 'buyer');
+  }
+
+  @Post('buyers/bulk-delete')
+  @ApiOperation({
+    summary: 'Bulk delete buyer organizations',
+    description:
+      'Soft-delete (suspend) multiple buyer organizations and deactivate their members from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Buyer organizations deleted successfully',
+  })
+  async bulkDeleteBuyers(
+    @Body('ids') ids: string[],
+  ): Promise<{ success: boolean; deleted: number }> {
+    const { deleted } = await this.adminService.bulkDeleteOrganizations(
+      ids || [],
+      'buyer',
+    );
+    return { success: true, deleted };
   }
 
   // ===== Sellers =====
@@ -182,6 +203,26 @@ export class AdminController {
     return this.adminService.deleteOrganization(id, 'seller');
   }
 
+  @Post('sellers/bulk-delete')
+  @ApiOperation({
+    summary: 'Bulk delete seller organizations',
+    description:
+      'Soft-delete (suspend) multiple seller organizations and deactivate their members from the admin panel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller organizations deleted successfully',
+  })
+  async bulkDeleteSellers(
+    @Body('ids') ids: string[],
+  ): Promise<{ success: boolean; deleted: number }> {
+    const { deleted } = await this.adminService.bulkDeleteOrganizations(
+      ids || [],
+      'seller',
+    );
+    return { success: true, deleted };
+  }
+
   // ===== Seller products (admin-managed) =====
 
   @Get('sellers/:id/products')
@@ -232,6 +273,49 @@ export class AdminController {
     return this.adminService.createSellerProduct(orgId, dto, user.id);
   }
 
+  @Patch('sellers/:orgId/products/:productId/status')
+  @ApiOperation({
+    summary: 'Update product status for seller (admin)',
+    description:
+      'Hide or show a product in the marketplace by changing its status (e.g. active/inactive).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product status updated successfully',
+    type: ProductResponseDto,
+  })
+  async updateSellerProductStatus(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+    @CurrentUser() user: UserContext,
+    @Body('status') status: ProductStatus,
+  ): Promise<ProductResponseDto> {
+    return this.adminService.updateSellerProductStatus(
+      orgId,
+      productId,
+      status,
+      user.id,
+    );
+  }
+
+  @Delete('sellers/:orgId/products/:productId')
+  @ApiOperation({
+    summary: 'Delete product for seller (admin)',
+    description:
+      'Delete a product from the seller catalog on behalf of a seller organization.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product deleted successfully',
+  })
+  async deleteSellerProduct(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+  ): Promise<{ success: boolean }> {
+    await this.adminService.deleteSellerProduct(orgId, productId);
+    return { success: true };
+  }
+
   // ===== Orders =====
 
   @Get('orders')
@@ -260,6 +344,23 @@ export class AdminController {
   })
   async getOrderById(@Param('id') id: string) {
     return this.adminService.getOrderDetail(id);
+  }
+
+  @Post('orders/bulk-delete')
+  @ApiOperation({
+    summary: 'Bulk delete orders (admin)',
+    description:
+      'Permanently delete multiple orders by ID. Use with care; this is irreversible.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Orders deleted successfully',
+  })
+  async bulkDeleteOrders(
+    @Body('ids') ids: string[],
+  ): Promise<{ success: boolean; deleted: number }> {
+    const { deleted } = await this.adminService.bulkDeleteOrders(ids || []);
+    return { success: true, deleted };
   }
 
   @Patch('orders/:id/status')

@@ -39,6 +39,7 @@ import {
   CreateProductDto,
   ProductQueryDto,
   ProductResponseDto,
+  ProductStatus,
 } from '../sellers/dto';
 import { SellersService } from '../sellers/sellers.service';
 
@@ -340,11 +341,12 @@ export class AdminService {
   async getDashboardSummary(): Promise<AdminDashboardSummary> {
     const client = this.supabase.getClient();
 
-    // Buyers count
+    // Buyers count (active only)
     const { count: buyersCount, error: buyersError } = await client
       .from('organizations')
       .select('id', { count: 'exact', head: true })
-      .eq('account_type', 'buyer');
+      .eq('account_type', 'buyer')
+      .eq('status', OrganizationStatus.ACTIVE);
 
     if (buyersError) {
       throw new BadRequestException(
@@ -352,11 +354,12 @@ export class AdminService {
       );
     }
 
-    // Sellers count
+    // Sellers count (active only)
     const { count: sellersCount, error: sellersError } = await client
       .from('organizations')
       .select('id', { count: 'exact', head: true })
-      .eq('account_type', 'seller');
+      .eq('account_type', 'seller')
+      .eq('status', OrganizationStatus.ACTIVE);
 
     if (sellersError) {
       throw new BadRequestException(
@@ -704,6 +707,52 @@ export class AdminService {
     return { success: true };
   }
 
+  async bulkDeleteOrganizations(
+    ids: string[],
+    accountType: 'buyer' | 'seller',
+  ): Promise<{ deleted: number }> {
+    if (!ids || ids.length === 0) {
+      return { deleted: 0 };
+    }
+
+    const client = this.supabase.getClient();
+
+    // Soft-delete organizations in bulk
+    const { data, error } = await client
+      .from('organizations')
+      .update({ status: OrganizationStatus.SUSPENDED })
+      .in('id', ids)
+      .eq('account_type', accountType)
+      .select('id');
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete organizations: ${error.message}`,
+      );
+    }
+
+    const affectedIds =
+      data?.map((org: { id: string }) => org.id).filter(Boolean) ?? [];
+
+    if (affectedIds.length === 0) {
+      return { deleted: 0 };
+    }
+
+    // Deactivate all memberships for the affected organizations
+    const { error: orgUsersError } = await client
+      .from('organization_users')
+      .update({ is_active: false })
+      .in('organization_id', affectedIds);
+
+    if (orgUsersError) {
+      throw new BadRequestException(
+        `Failed to deactivate organization users: ${orgUsersError.message}`,
+      );
+    }
+
+    return { deleted: affectedIds.length };
+  }
+
   async getOrganizationById(
     accountType: 'buyer' | 'seller',
     orgId: string,
@@ -910,6 +959,24 @@ export class AdminService {
     limit: number;
   }> {
     return this.sellersService.getProducts(orgId, query);
+  }
+
+  async deleteSellerProduct(orgId: string, productId: string): Promise<void> {
+    await this.sellersService.deleteProduct(orgId, productId);
+  }
+
+  async updateSellerProductStatus(
+    orgId: string,
+    productId: string,
+    status: ProductStatus,
+    adminUserId: string,
+  ): Promise<ProductResponseDto> {
+    return this.sellersService.updateProduct(
+      orgId,
+      productId,
+      { status },
+      adminUserId,
+    );
   }
 
   async createSellerProduct(
@@ -1297,6 +1364,38 @@ export class AdminService {
       page,
       limit,
     };
+  }
+
+  async bulkDeleteOrders(orderIds: string[]): Promise<{ deleted: number }> {
+    if (!orderIds || orderIds.length === 0) {
+      return { deleted: 0 };
+    }
+
+    const client = this.supabase.getClient();
+    // First delete any payment links pointing at these orders to satisfy FKs
+    const { error: plError } = await client
+      .from('payment_links')
+      .delete()
+      .in('order_id', orderIds);
+
+    if (plError) {
+      throw new BadRequestException(
+        `Failed to delete payment links for orders: ${plError.message}`,
+      );
+    }
+
+    const { error, count } = await client
+      .from('orders')
+      .delete({ count: 'exact' })
+      .in('id', orderIds);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete orders: ${error.message}`,
+      );
+    }
+
+    return { deleted: count || 0 };
   }
 
   async approveOrderInspection(
