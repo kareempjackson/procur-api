@@ -66,6 +66,8 @@ import {
   ProductResponseDto,
   ProductStatus,
 } from '../sellers/dto';
+import { OrderReviewDto } from '../buyers/dto/order.dto';
+import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth('JWT-auth')
@@ -184,6 +186,45 @@ export class AdminController {
     @Body() body: { filename: string },
   ) {
     return this.adminService.createSellerFarmersIdSignedUpload(
+      id,
+      body.filename,
+    );
+  }
+
+  @Patch('sellers/:id/logo/signed-upload')
+  @ApiOperation({
+    summary: 'Create signed upload URL for seller logo (admin)',
+    description:
+      'Return a signed upload URL for a seller organization logo and update the organization logo_url.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Signed upload URL for logo created successfully',
+    type: LogoUploadUrlResponseDto,
+  })
+  async createSellerLogoSignedUpload(
+    @Param('id') id: string,
+    @Body() body: { filename: string },
+  ): Promise<LogoUploadUrlResponseDto> {
+    return this.adminService.createSellerLogoSignedUpload(id, body.filename);
+  }
+
+  @Patch('sellers/:id/header-image/signed-upload')
+  @ApiOperation({
+    summary: 'Create signed upload URL for seller header image (admin)',
+    description:
+      'Return a signed upload URL for a seller organization header image and update the organization header_image_url.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Signed upload URL for header image created successfully',
+    type: LogoUploadUrlResponseDto,
+  })
+  async createSellerHeaderImageSignedUpload(
+    @Param('id') id: string,
+    @Body() body: { filename: string },
+  ): Promise<LogoUploadUrlResponseDto> {
+    return this.adminService.createSellerHeaderImageSignedUpload(
       id,
       body.filename,
     );
@@ -488,6 +529,30 @@ export class AdminController {
     @Body() dto: AssignDriverDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.assignDriver(id, dto.driverId);
+  }
+
+  // ===== Buyer reviews on seller orders (admin-triggered) =====
+
+  @Post('buyers/:buyerOrgId/orders/:orderId/review')
+  @ApiOperation({
+    summary: 'Create order review on behalf of buyer',
+    description:
+      'Allow an admin to create an order review for a delivered order on behalf of a buyer organization. Uses the same validation rules as the buyer-side review endpoint.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Order review submitted successfully',
+  })
+  async createBuyerOrderReview(
+    @Param('buyerOrgId') buyerOrgId: string,
+    @Param('orderId') orderId: string,
+    @Body() reviewDto: OrderReviewDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.createOrderReviewForBuyer(
+      buyerOrgId,
+      orderId,
+      reviewDto,
+    );
   }
 
   // ===== Admin products (catalog) =====

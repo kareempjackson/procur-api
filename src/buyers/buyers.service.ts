@@ -449,7 +449,7 @@ export class BuyersService {
       .from('organizations')
       .select(
         `
-        id, name, logo_url, created_at, business_type, country,
+        id, name, logo_url, header_image_url, created_at, business_type, country,
         products:products!seller_org_id(id, status)
       `,
         { count: 'exact' },
@@ -494,6 +494,7 @@ export class BuyersService {
         name: seller.name,
         description: undefined,
         business_type: seller.business_type,
+        header_image_url: (seller as any).header_image_url ?? undefined,
         logo_url: seller.logo_url,
         location: seller.country,
         average_rating: 0, // Will be calculated from reviews below

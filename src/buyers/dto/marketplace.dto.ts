@@ -213,6 +213,11 @@ export class MarketplaceSellerDto {
   @ApiPropertyOptional({ description: 'Business type' })
   business_type?: string;
 
+  @ApiPropertyOptional({
+    description: 'Public header / cover image URL for the seller profile',
+  })
+  header_image_url?: string;
+
   @ApiProperty({ description: 'Seller logo URL' })
   logo_url?: string;
 

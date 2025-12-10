@@ -34,6 +34,7 @@ import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { FarmersIdUploadUrlResponseDto } from '../users/dto/farmers-id-upload.dto';
+import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 import {
   CreateFarmVisitRequestDto,
   CreateProductDto,
@@ -41,6 +42,7 @@ import {
   ProductResponseDto,
   ProductStatus,
 } from '../sellers/dto';
+import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { SellersService } from '../sellers/sellers.service';
 
 export interface AdminOrganizationSummary {
@@ -58,6 +60,7 @@ export interface AdminOrganizationSummary {
   address: string | null;
   phoneNumber: string | null;
   logoUrl: string | null;
+  headerImageUrl: string | null;
   farmersId: string | null;
   farmersIdVerified: boolean;
   farmVerified: boolean;
@@ -320,6 +323,7 @@ export class AdminService {
               address: org.address ?? null,
               phoneNumber: org.phone_number ?? null,
               logoUrl: org.logo_url ?? null,
+              headerImageUrl: (org as any).header_image_url ?? null,
               farmersId,
               farmersIdVerified: Boolean(
                 (org as any).farmers_id_verified ?? false,
@@ -811,6 +815,7 @@ export class AdminService {
       address: data.address ?? null,
       phoneNumber: data.phone_number ?? null,
       logoUrl: data.logo_url ?? null,
+      headerImageUrl: (data as any).header_image_url ?? null,
       farmersId,
       farmersIdVerified: Boolean((data as any).farmers_id_verified ?? false),
       farmVerified: Boolean((data as any).farm_verified ?? false),
@@ -1174,6 +1179,81 @@ export class AdminService {
       recentOrders,
       latestFarmVisitRequest: latestFarmVisit,
     };
+  }
+
+  /**
+   * Create an order review on behalf of a buyer for a given seller order.
+   * This mirrors the buyer-side createOrderReview flow but can be triggered
+   * from the admin panel. It still enforces that the order belongs to the
+   * buyer org, is delivered, and has not already been reviewed.
+   */
+  async createOrderReviewForBuyer(
+    buyerOrgId: string,
+    orderId: string,
+    reviewDto: OrderReviewDto,
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    // Verify order ownership and completion
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select('id, status, seller_org_id')
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found for this buyer');
+    }
+
+    if (order.status !== 'delivered') {
+      throw new BadRequestException('Can only review delivered orders');
+    }
+
+    // Prevent duplicate reviews for the same order/buyer
+    const { data: existing } = await client
+      .from('order_reviews')
+      .select('id')
+      .eq('order_id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    if (existing) {
+      throw new BadRequestException('Order has already been reviewed');
+    }
+
+    const { error } = await client.from('order_reviews').insert({
+      order_id: orderId,
+      buyer_org_id: buyerOrgId,
+      seller_org_id: order.seller_org_id,
+      rating: reviewDto.overall_rating,
+      review_text: reviewDto.comment || null,
+      delivery_rating: reviewDto.delivery_rating,
+      product_quality_rating: reviewDto.product_quality_rating,
+      service_rating: reviewDto.service_rating,
+    });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create review: ${error.message}`,
+      );
+    }
+
+    await client.from('order_timeline').insert({
+      order_id: orderId,
+      event_type: 'buyer_left_review',
+      title: 'Buyer review recorded by admin',
+      description: reviewDto.title || null,
+      actor_type: 'admin',
+      metadata: {
+        overall_rating: reviewDto.overall_rating,
+        created_by_admin: true,
+      },
+      is_visible_to_buyer: true,
+      is_visible_to_seller: true,
+    });
+
+    return { success: true };
   }
 
   /**
@@ -2418,6 +2498,101 @@ export class AdminService {
       if (error) {
         throw new BadRequestException(
           `Failed to update organization with farmer ID path: ${error.message}`,
+        );
+      }
+
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e) {
+      throw new BadRequestException('Failed to create signed upload URL');
+    }
+  }
+
+  async createSellerLogoSignedUpload(
+    organizationId: string,
+    filename: string,
+  ): Promise<LogoUploadUrlResponseDto> {
+    const ext = filename.includes('.')
+      ? filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = 'public';
+    const objectPath = `logos/organizations/${organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    // Ensure bucket exists and is public
+    await this.supabase.ensureBucketExists(bucket, true);
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+
+      const publicUrl = this.supabase.getPublicUrl(bucket, objectPath);
+
+      const client = this.supabase.getClient();
+      const { error } = await client
+        .from('organizations')
+        .update({
+          logo_url: publicUrl,
+        })
+        .eq('id', organizationId)
+        .eq('account_type', 'seller');
+
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update organization with logo URL: ${error.message}`,
+        );
+      }
+
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e) {
+      throw new BadRequestException('Failed to create signed upload URL');
+    }
+  }
+
+  async createSellerHeaderImageSignedUpload(
+    organizationId: string,
+    filename: string,
+  ): Promise<LogoUploadUrlResponseDto> {
+    const ext = filename.includes('.')
+      ? filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = 'public';
+    const objectPath = `headers/organizations/${organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    // Ensure bucket exists and is public
+    await this.supabase.ensureBucketExists(bucket, true);
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+
+      const publicUrl = this.supabase.getPublicUrl(bucket, objectPath);
+
+      const client = this.supabase.getClient();
+      const { error } = await client
+        .from('organizations')
+        .update({
+          // Column expected to store public header image URL for marketplace seller profile
+          header_image_url: publicUrl,
+        })
+        .eq('id', organizationId)
+        .eq('account_type', 'seller');
+
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update organization with header image URL: ${error.message}`,
         );
       }
 
