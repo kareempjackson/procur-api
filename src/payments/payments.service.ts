@@ -544,10 +544,19 @@ export class PaymentsService {
         const firstOrderId = orderIds[0];
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
         const link = `${frontendUrl}/buyer/order-confirmation/${firstOrderId}`;
-        await this.emailService.sendBasicEmail(
+        const html = `
+            <h2>Thanks for your order</h2>
+            <p>Thanks for your order on Procur.</p>
+            <p>You can view your full order receipt and track updates here:</p>
+            <p style="margin-top: 16px;">
+              <a href="${link}" class="button">View order receipt</a>
+            </p>
+        `;
+        await this.emailService.sendBrandedEmail(
           buyer.email,
           'Your order receipt',
-          `<p>Thanks for your order!</p><p>You can view your order receipt here: <a href="${link}">${link}</a></p>`,
+          'Your order receipt',
+          html,
           `Thanks for your order! View your receipt: ${link}`,
         );
       }

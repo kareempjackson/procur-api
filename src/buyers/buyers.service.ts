@@ -1925,10 +1925,14 @@ export class BuyersService {
           if (recipients.length > 0) {
             const subject = `New order ${orderNum} received`;
             const link = manageUrl;
-            const html = `<p>Hello,</p>
-<p>You have a new order <strong>${orderNum}</strong> from <strong>${buyerName}</strong>.</p>
-<p>Total: <strong>${currency} ${totalAmt.toFixed(2)}</strong></p>
-<p>Manage this order here: <a href="${link}">${link}</a></p>`;
+            const html = `
+                <h2>New order received</h2>
+                <p>You have a new order <strong>${orderNum}</strong> from <strong>${buyerName}</strong>.</p>
+                <p>Total: <strong>${currency} ${totalAmt.toFixed(2)}</strong></p>
+                <p style="margin-top: 16px;">
+                  <a href="${link}" class="button">Review and manage this order</a>
+                </p>
+            `;
             const text = `You have a new order ${orderNum} from ${buyerName}.
 Total: ${currency} ${totalAmt.toFixed(2)}
 Manage this order: ${link}`;
@@ -1936,7 +1940,13 @@ Manage this order: ${link}`;
             // Send to each recipient (non-blocking failures)
             await Promise.all(
               recipients.map((r) =>
-                this.emailService.sendBasicEmail(r.email, subject, html, text),
+                this.emailService.sendBrandedEmail(
+                  r.email,
+                  subject,
+                  `New order ${orderNum} received`,
+                  html,
+                  text,
+                ),
               ),
             );
           }
@@ -1974,10 +1984,19 @@ Manage this order: ${link}`;
           process.env.FRONTEND_URL ||
           'http://localhost:3001';
         const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
-        await this.emailService.sendBasicEmail(
+        const html = `
+            <h2>Thanks for your order</h2>
+            <p>Thanks for your order on Procur.</p>
+            <p>You can view your full order receipt and track updates here:</p>
+            <p style="margin-top: 16px;">
+              <a href="${link}" class="button">View order receipt</a>
+            </p>
+        `;
+        await this.emailService.sendBrandedEmail(
           buyer.email,
           'Your order receipt',
-          `<p>Thanks for your order!</p><p>You can view your order receipt here: <a href="${link}">${link}</a></p>`,
+          'Your order receipt',
+          html,
           `Thanks for your order! View your receipt: ${link}`,
         );
       }

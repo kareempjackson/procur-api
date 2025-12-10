@@ -180,7 +180,8 @@ export class EmailService {
     return `
             </div>
             <div class="footer">
-              <p>© ${new Date().getFullYear()} Procur. All rights reserved.</p>
+              <p>© ${new Date().getFullYear()} Procur Grenada Ltd. All rights reserved.</p>
+              <p>Procur Grenada Ltd. Annandale, St. Georges, Grenada W.I., 473-538-4365</p>
             </div>
           </div>
         </div>
@@ -188,12 +189,30 @@ export class EmailService {
       </html>`;
   }
 
+  private buildBrandedBody(title: string, innerHtml: string): string {
+    return `
+      ${this.getBrandHead(title)}
+        ${innerHtml}
+      ${this.getBrandFoot()}
+    `;
+  }
+
+  async sendBrandedEmail(
+    to: string,
+    subject: string,
+    title: string,
+    innerHtml: string,
+    textBody?: string,
+  ) {
+    const htmlBody = this.buildBrandedBody(title, innerHtml);
+    return this.sendBasicEmail(to, subject, htmlBody, textBody);
+  }
+
   private getVerificationEmailTemplate(
     fullname: string,
     verificationUrl: string,
   ): string {
-    return `
-      ${this.getBrandHead('Verify Your Procur Account')}
+    const innerHtml = `
         <h2>Hi ${fullname},</h2>
         <p>Thanks for joining Procur. Please verify your email address to complete your account setup.</p>
         <p style="margin-top: 16px;">
@@ -203,14 +222,13 @@ export class EmailService {
         <p><a href="${verificationUrl}">${verificationUrl}</a></p>
         <p class="muted"><strong>This link will expire in 24 hours.</strong></p>
         <p class="muted">If you didn't create an account with Procur, you can safely ignore this email.</p>
-      ${this.getBrandFoot()}
     `;
+    return this.buildBrandedBody('Verify Your Procur Account', innerHtml);
   }
 
   private getWelcomeEmailTemplate(fullname: string): string {
     const dashboardUrl = `${this.configService.get('app.frontendUrl')}/dashboard`;
-    return `
-      ${this.getBrandHead('Welcome to Procur!')}
+    const innerHtml = `
         <h2>Hi ${fullname},</h2>
         <p>🎉 Your account has been verified. Welcome to Procur.</p>
         <p>Here’s what you can do next:</p>
@@ -223,8 +241,8 @@ export class EmailService {
           <a href="${dashboardUrl}" class="button">Go to Dashboard</a>
         </p>
         <p class="muted">Need help? Just reply to this email.</p>
-      ${this.getBrandFoot()}
     `;
+    return this.buildBrandedBody('Welcome to Procur!', innerHtml);
   }
 
   private getInvitationEmailTemplate(
@@ -232,8 +250,7 @@ export class EmailService {
     inviterName: string,
     invitationUrl: string,
   ): string {
-    return `
-      ${this.getBrandHead(`Invitation to join ${organizationName}`)}
+    const innerHtml = `
         <h2>Join ${organizationName} on Procur</h2>
         <p><strong>${inviterName}</strong> has invited you to join <strong>${organizationName}</strong> on Procur.</p>
         <p>By accepting this invitation, you'll be able to collaborate with your team and access organization resources.</p>
@@ -243,7 +260,10 @@ export class EmailService {
         <p class="muted">Or copy and paste this link:</p>
         <p><a href="${invitationUrl}">${invitationUrl}</a></p>
         <p class="muted"><strong>This invitation will expire in 7 days.</strong></p>
-      ${this.getBrandFoot()}
     `;
+    return this.buildBrandedBody(
+      `Invitation to join ${organizationName}`,
+      innerHtml,
+    );
   }
 }

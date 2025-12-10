@@ -2804,10 +2804,12 @@ export class AdminService {
     const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
     const loginUrl = `${frontendUrl}/login`;
     const htmlBody = `
-      <p>Hi ${input.adminFullname},</p>
-      <p>A Procur buyer account has been created for you for <strong>${input.businessName}</strong>.</p>
-      <p>You can sign in with this email address and the password provided by your admin.</p>
-      <p><a href="${loginUrl}">Go to Procur login</a></p>
+        <h2>Hi ${input.adminFullname},</h2>
+        <p>A Procur buyer account has been created for you for <strong>${input.businessName}</strong>.</p>
+        <p>You can sign in with this email address and the password provided by your admin.</p>
+        <p style="margin-top: 16px;">
+          <a href="${loginUrl}" class="button">Go to Procur login</a>
+        </p>
     `;
     const textBody = `Hi ${input.adminFullname},
 
@@ -2818,8 +2820,9 @@ You can sign in with this email address and the password provided by your admin.
 Login here: ${loginUrl}
 `;
 
-    void this.email.sendBasicEmail(
+    void this.email.sendBrandedEmail(
       input.adminEmail,
+      'Your Procur buyer account has been created',
       'Your Procur buyer account has been created',
       htmlBody,
       textBody,
@@ -2904,10 +2907,12 @@ Login here: ${loginUrl}
     const frontendUrl = this.configService.get<string>('app.frontendUrl') || '';
     const loginUrl = `${frontendUrl}/login`;
     const htmlBody = `
-      <p>Hi ${input.adminFullname},</p>
-      <p>A Procur seller account has been created for you for <strong>${input.businessName}</strong>.</p>
-      <p>You can sign in with this email address and the password provided by your admin.</p>
-      <p><a href="${loginUrl}">Go to Procur login</a></p>
+        <h2>Hi ${input.adminFullname},</h2>
+        <p>A Procur seller account has been created for you for <strong>${input.businessName}</strong>.</p>
+        <p>You can sign in with this email address and the password provided by your admin.</p>
+        <p style="margin-top: 16px;">
+          <a href="${loginUrl}" class="button">Go to Procur login</a>
+        </p>
     `;
     const textBody = `Hi ${input.adminFullname},
 
@@ -2918,8 +2923,9 @@ You can sign in with this email address and the password provided by your admin.
 Login here: ${loginUrl}
 `;
 
-    void this.email.sendBasicEmail(
+    void this.email.sendBrandedEmail(
       input.adminEmail,
+      'Your Procur seller account has been created',
       'Your Procur seller account has been created',
       htmlBody,
       textBody,
