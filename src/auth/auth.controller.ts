@@ -1,11 +1,12 @@
 import {
-  Controller,
-  Post,
   Body,
+  Controller,
   HttpCode,
   HttpStatus,
-  ValidationPipe,
+  Param,
+  Post,
   Query,
+  ValidationPipe,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import {
@@ -34,6 +35,8 @@ import { Public } from './decorators/public.decorator';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
+import { Roles } from './decorators/roles.decorator';
+import { UserRole } from '../common/enums/user-role.enum';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -264,6 +267,26 @@ export class AuthController {
     @Body(ValidationPipe) dto: AcceptInvitationDto,
   ): Promise<AuthResponseDto> {
     return this.authService.acceptInvitation(dto);
+  }
+
+  @Post('impersonate/:userId')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Impersonate a user (admin-only)',
+    description:
+      'Generate an access token that authenticates as the target user. Only SUPER_ADMIN can call this.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Impersonation token generated successfully',
+    type: AuthResponseDto,
+  })
+  async impersonate(
+    @CurrentUser() admin: UserContext,
+    @Param('userId') userId: string,
+  ): Promise<AuthResponseDto> {
+    return this.authService.impersonateUser(admin, userId);
   }
 
   @Post('change-password')

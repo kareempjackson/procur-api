@@ -205,6 +205,10 @@ class AdminCreateSimplePaymentLinkDto {
 
   @IsOptional()
   @IsString()
+  buyer_org_id?: string;
+
+  @IsOptional()
+  @IsString()
   buyer_name?: string;
 
   @IsOptional()
@@ -533,6 +537,7 @@ export class PaymentLinksController {
 
     return this.paymentLinks.createOrderAndLinkForSeller({
       sellerOrgId: body.seller_org_id,
+      buyerOrgId: body.buyer_org_id,
       buyerName: body.buyer_name,
       buyerCompany: body.buyer_company,
       buyerEmail: body.buyer_email,

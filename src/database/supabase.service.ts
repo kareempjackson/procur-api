@@ -125,6 +125,29 @@ export class SupabaseService {
   }
 
   // User operations
+
+  /**
+   * Delete a user from Supabase Auth (auth.users) using the service role key.
+   * This is best-effort and will not throw if the auth user does not exist,
+   * so that admin-side delete flows remain resilient.
+   */
+  async deleteAuthUser(userId: string): Promise<void> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { error } = await (this.supabase as any).auth.admin.deleteUser(
+        userId,
+      );
+      if (error) {
+        this.logger.error('Error deleting Supabase auth user:', error);
+      }
+    } catch (err) {
+      this.logger.error(
+        'Unexpected error while deleting Supabase auth user:',
+        err as any,
+      );
+    }
+  }
+
   async createUser(userData: CreateUserData): Promise<DatabaseUser> {
     const { data, error } = await this.supabase
       .from('users')

@@ -708,6 +708,67 @@ export class AdminService {
       );
     }
 
+    // Deactivate and remove associated buyer/seller user accounts as well.
+    // We scope this to users whose individual_account_type matches the
+    // organization accountType to avoid touching unrelated roles.
+    const { data: orgUsers, error: loadOrgUsersError } = await client
+      .from('organization_users')
+      .select('user_id')
+      .eq('organization_id', id);
+
+    if (loadOrgUsersError) {
+      throw new BadRequestException(
+        `Failed to load organization users for deletion: ${loadOrgUsersError.message}`,
+      );
+    }
+
+    const userIds = (orgUsers || [])
+      .map((ou: any) => ou.user_id as string | null) // eslint-disable-line @typescript-eslint/no-explicit-any
+      .filter((uid): uid is string => Boolean(uid));
+
+    if (userIds.length > 0) {
+      const { data: users, error: usersError } = await client
+        .from('users')
+        .select('id, individual_account_type')
+        .in('id', userIds);
+
+      if (usersError) {
+        throw new BadRequestException(
+          `Failed to load users for organization deletion: ${usersError.message}`,
+        );
+      }
+
+      const targetUserIds =
+        users
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ?.filter(
+            (u: any) =>
+              (u.individual_account_type as string | null) === accountType,
+          )
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((u: any) => u.id as string) || [];
+
+      if (targetUserIds.length > 0) {
+        const { error: deactivateUsersError } = await client
+          .from('users')
+          .update({ is_active: false })
+          .in('id', targetUserIds);
+
+        if (deactivateUsersError) {
+          throw new BadRequestException(
+            `Failed to deactivate buyer/seller users: ${deactivateUsersError.message}`,
+          );
+        }
+
+        // Best-effort removal from Supabase Auth so these buyer/seller users
+        // no longer appear in the Supabase Authentication user list. Failures
+        // here should not block the primary delete behaviour.
+        await Promise.all(
+          targetUserIds.map((userId) => this.supabase.deleteAuthUser(userId)),
+        );
+      }
+    }
+
     return { success: true };
   }
 
@@ -752,6 +813,69 @@ export class AdminService {
       throw new BadRequestException(
         `Failed to deactivate organization users: ${orgUsersError.message}`,
       );
+    }
+
+    // Deactivate and remove associated buyer/seller user accounts as well.
+    // We scope this to users whose individual_account_type matches the
+    // organization accountType to avoid touching unrelated roles.
+    const { data: orgUsers, error: loadOrgUsersError } = await client
+      .from('organization_users')
+      .select('user_id, organization_id')
+      .in('organization_id', affectedIds);
+
+    if (loadOrgUsersError) {
+      throw new BadRequestException(
+        `Failed to load organization users for bulk deletion: ${loadOrgUsersError.message}`,
+      );
+    }
+
+    const userIds = Array.from(
+      new Set(
+        (orgUsers || [])
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((ou: any) => ou.user_id as string | null)
+          .filter((uid): uid is string => Boolean(uid)),
+      ),
+    );
+
+    if (userIds.length > 0) {
+      const { data: users, error: usersError } = await client
+        .from('users')
+        .select('id, individual_account_type')
+        .in('id', userIds);
+
+      if (usersError) {
+        throw new BadRequestException(
+          `Failed to load users for bulk organization deletion: ${usersError.message}`,
+        );
+      }
+
+      const targetUserIds =
+        users
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ?.filter(
+            (u: any) =>
+              (u.individual_account_type as string | null) === accountType,
+          )
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          .map((u: any) => u.id as string) || [];
+
+      if (targetUserIds.length > 0) {
+        const { error: deactivateUsersError } = await client
+          .from('users')
+          .update({ is_active: false })
+          .in('id', targetUserIds);
+
+        if (deactivateUsersError) {
+          throw new BadRequestException(
+            `Failed to deactivate buyer/seller users: ${deactivateUsersError.message}`,
+          );
+        }
+
+        await Promise.all(
+          targetUserIds.map((userId) => this.supabase.deleteAuthUser(userId)),
+        );
+      }
     }
 
     return { deleted: affectedIds.length };
@@ -2324,6 +2448,11 @@ export class AdminService {
         `Failed to delete driver: ${error.message}`,
       );
     }
+
+    // Best-effort removal from Supabase Auth so the driver no longer appears
+    // in the Supabase Authentication user list. Failures here should not block
+    // the primary soft-delete behaviour.
+    await this.supabase.deleteAuthUser(id);
 
     return { success: true };
   }

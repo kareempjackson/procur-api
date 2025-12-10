@@ -32,6 +32,8 @@ import { SendService as WaSendService } from '../whatsapp/send/send.service';
 import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import { CaptchaService } from '../common/utils/captcha.service';
+import { UserRole } from '../common/enums/user-role.enum';
+import type { UserContext } from '../common/interfaces/jwt-payload.interface';
 
 @Injectable()
 export class AuthService {
@@ -816,6 +818,64 @@ export class AuthService {
         accountType,
         emailVerified: true,
         organizationId: effectiveOrgId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
+
+  async impersonateUser(
+    admin: UserContext,
+    targetUserId: string,
+  ): Promise<AuthResponseDto> {
+    // Only SUPER_ADMIN is allowed to impersonate
+    if (admin.role !== UserRole.SUPER_ADMIN) {
+      throw new UnauthorizedException(
+        'Only super admins can impersonate users',
+      );
+    }
+
+    const user = await this.supabaseService.findUserById(targetUserId);
+    if (!user || !user.is_active) {
+      throw new UnauthorizedException('Target user not found or inactive');
+    }
+
+    // Load organization/account context just like normal signin()
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(
+      user.id,
+    );
+    const { organizationId, organizationName, organizationRole, accountType } =
+      this.extractOrganizationInfo(user, userWithOrg);
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType,
+      organizationId,
+      organizationRole,
+      emailVerified: user.email_verified,
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    this.logger.log(
+      `Admin ${admin.email} is impersonating user ${user.email} (${user.id})`,
+    );
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType,
+        emailVerified: user.email_verified,
+        organizationId,
         organizationName,
         organizationRole,
       },
