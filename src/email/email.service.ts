@@ -266,4 +266,312 @@ export class EmailService {
       innerHtml,
     );
   }
+
+  /**
+   * Shared HTML body for a compact payment receipt, mirroring the layout
+   * showcased in procur-ui /test/receipts ("Compact slip").
+   */
+  private buildPaymentReceiptInnerHtml(params: {
+    receiptNumber: string;
+    paymentDate: string;
+    orderNumber: string;
+    buyerName: string;
+    buyerEmail: string;
+    buyerContact?: string | null;
+    paymentMethod: string;
+    paymentReference?: string | null;
+    paymentStatus: string;
+    subtotal: number;
+    delivery: number;
+    platformFee: number;
+    taxAmount: number;
+    discount: number;
+    totalPaid: number;
+    currency: string;
+  }): string {
+    const {
+      receiptNumber,
+      paymentDate,
+      orderNumber,
+      buyerName,
+      buyerEmail,
+      buyerContact,
+      paymentMethod,
+      paymentReference,
+      paymentStatus,
+      subtotal,
+      delivery,
+      platformFee,
+      taxAmount,
+      discount,
+      totalPaid,
+      currency,
+    } = params;
+
+    const formatCurrency = (value: number): string => {
+      const amount = Number.isFinite(value) ? Number(value) : 0;
+      return `${currency.toUpperCase()} ${amount.toFixed(2)}`;
+    };
+
+    const safeContact =
+      buyerContact && buyerContact.trim().length > 0
+        ? buyerContact.trim()
+        : null;
+
+    const contactLine = safeContact
+      ? `<p class="muted" style="margin:0 0 2px;">Contact: ${safeContact}</p>`
+      : '';
+
+    const safeReference =
+      paymentReference && paymentReference.trim().length > 0
+        ? paymentReference.trim()
+        : null;
+
+    const referenceLine = safeReference
+      ? `<p class="muted" style="margin:0 0 2px;">Ref: ${safeReference}</p>`
+      : '';
+
+    return `
+        <div style="display:flex;justify-content:space-between;gap:16px;border-bottom:1px dashed #e5e7eb;padding-bottom:12px;margin-bottom:12px;">
+          <div>
+            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 4px;">
+              Procur
+            </p>
+            <p style="font-size:16px;font-weight:600;color:#111827;margin:0 0 2px;">
+              Payment receipt
+            </p>
+            <p class="muted" style="margin:0;font-size:12px;color:#6b7280;">
+              Thank you for paying your Procur order.
+            </p>
+          </div>
+          <div style="text-align:right;font-size:12px;color:#6b7280;">
+            <p style="margin:0 0 2px;">
+              Receipt:
+              <span style="font-weight:500;color:#111827;">${receiptNumber}</span>
+            </p>
+            <p style="margin:0 0 2px;">${paymentDate}</p>
+            <p style="margin:0;">Order: ${orderNumber}</p>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;gap:16px;font-size:12px;margin-bottom:12px;">
+          <div>
+            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
+              Paid by
+            </p>
+            <p style="margin:0 0 2px;color:#111827;font-weight:500;">
+              ${buyerName}
+            </p>
+            <p class="muted" style="margin:0 0 2px;">
+              ${buyerEmail}
+            </p>
+            ${contactLine}
+          </div>
+          <div style="text-align:right;">
+            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
+              Payment
+            </p>
+            <p style="margin:0 0 2px;color:#111827;font-weight:500;">
+              ${paymentMethod}
+            </p>
+            ${referenceLine}
+            <p class="muted" style="margin:0;">
+              Status:
+              <span style="text-transform:capitalize;">${paymentStatus}</span>
+            </p>
+          </div>
+        </div>
+
+        <div style="border:1px solid #e5e7eb;border-radius:12px;padding:12px;font-size:12px;margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span class="muted">Subtotal</span>
+            <span style="font-weight:500;color:#111827;">${formatCurrency(
+              subtotal,
+            )}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span class="muted">Delivery</span>
+            <span style="font-weight:500;color:#111827;">${formatCurrency(
+              delivery,
+            )}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span class="muted">Platform fee</span>
+            <span style="font-weight:500;color:#111827;">${formatCurrency(
+              platformFee,
+            )}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span class="muted">Tax</span>
+            <span style="font-weight:500;color:#111827;">${formatCurrency(
+              taxAmount,
+            )}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:4px;padding-top:4px;border-top:1px dashed #e5e7eb;">
+            <span class="muted">Discount</span>
+            <span style="font-weight:500;color:#059669;">
+              -${formatCurrency(discount)}
+            </span>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:6px;border-top:1px solid #1118271a;">
+            <span style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:600;color:#111827;">
+              Total paid
+            </span>
+            <span style="font-size:15px;font-weight:600;color:#111827;">
+              ${formatCurrency(totalPaid)}
+            </span>
+          </div>
+        </div>
+
+        <p class="muted" style="font-size:11px;color:#6b7280;line-height:1.5;margin:0;">
+          This receipt confirms payment received via Procur for the above order.
+          Keep this for your internal reconciliation and audit records.
+        </p>
+    `;
+  }
+
+  async sendBuyerCompletionReceipt(params: {
+    email: string;
+    buyerName: string;
+    buyerEmail: string;
+    buyerContact?: string | null;
+    receiptNumber: string;
+    paymentDate: string;
+    orderNumber: string;
+    paymentMethod: string;
+    paymentReference?: string | null;
+    paymentStatus: string;
+    subtotal: number;
+    delivery: number;
+    platformFee: number;
+    taxAmount: number;
+    discount: number;
+    totalPaid: number;
+    currency: string;
+  }): Promise<void> {
+    const innerHtml = this.buildPaymentReceiptInnerHtml({
+      buyerName: params.buyerName,
+      buyerEmail: params.buyerEmail,
+      buyerContact: params.buyerContact,
+      receiptNumber: params.receiptNumber,
+      paymentDate: params.paymentDate,
+      orderNumber: params.orderNumber,
+      paymentMethod: params.paymentMethod,
+      paymentReference: params.paymentReference,
+      paymentStatus: params.paymentStatus,
+      subtotal: params.subtotal,
+      delivery: params.delivery,
+      platformFee: params.platformFee,
+      taxAmount: params.taxAmount,
+      discount: params.discount,
+      totalPaid: params.totalPaid,
+      currency: params.currency,
+    });
+
+    const cur = (v: number) =>
+      `${params.currency.toUpperCase()} ${Number(v || 0).toFixed(2)}`;
+
+    const textBody = [
+      'Payment receipt',
+      '',
+      `Receipt: ${params.receiptNumber}`,
+      `Order: ${params.orderNumber}`,
+      `Paid by: ${params.buyerName} (${params.buyerEmail})`,
+      `Payment method: ${params.paymentMethod}`,
+      `Status: ${params.paymentStatus}`,
+      '',
+      `Subtotal: ${cur(params.subtotal)}`,
+      `Delivery: ${cur(params.delivery)}`,
+      `Platform fee: ${cur(params.platformFee)}`,
+      `Tax: ${cur(params.taxAmount)}`,
+      `Discount: -${cur(params.discount)}`,
+      `Total paid: ${cur(params.totalPaid)}`,
+      '',
+      'This receipt confirms payment received via Procur for the above order.',
+      'Keep this for your internal reconciliation and audit records.',
+    ].join('\n');
+
+    const subject = `Payment receipt for your Procur order ${params.orderNumber}`;
+
+    await this.sendBrandedEmail(
+      params.email,
+      subject,
+      'Payment receipt',
+      innerHtml,
+      textBody,
+    );
+  }
+
+  async sendSellerCompletionReceipt(params: {
+    email: string;
+    sellerName: string;
+    buyerName: string;
+    buyerEmail: string;
+    buyerContact?: string | null;
+    receiptNumber: string;
+    paymentDate: string;
+    orderNumber: string;
+    paymentMethod: string;
+    paymentReference?: string | null;
+    paymentStatus: string;
+    subtotal: number;
+    delivery: number;
+    platformFee: number;
+    taxAmount: number;
+    discount: number;
+    totalPaid: number;
+    currency: string;
+  }): Promise<void> {
+    const innerHtml = this.buildPaymentReceiptInnerHtml({
+      buyerName: params.buyerName,
+      buyerEmail: params.buyerEmail,
+      buyerContact: params.buyerContact,
+      receiptNumber: params.receiptNumber,
+      paymentDate: params.paymentDate,
+      orderNumber: params.orderNumber,
+      paymentMethod: params.paymentMethod,
+      paymentReference: params.paymentReference,
+      paymentStatus: params.paymentStatus,
+      subtotal: params.subtotal,
+      delivery: params.delivery,
+      platformFee: params.platformFee,
+      taxAmount: params.taxAmount,
+      discount: params.discount,
+      totalPaid: params.totalPaid,
+      currency: params.currency,
+    });
+
+    const cur = (v: number) =>
+      `${params.currency.toUpperCase()} ${Number(v || 0).toFixed(2)}`;
+
+    const textBody = [
+      'Payment receipt (seller copy)',
+      '',
+      `Receipt: ${params.receiptNumber}`,
+      `Order: ${params.orderNumber}`,
+      `Paid by: ${params.buyerName} (${params.buyerEmail})`,
+      `Payment method: ${params.paymentMethod}`,
+      `Status: ${params.paymentStatus}`,
+      '',
+      `Subtotal: ${cur(params.subtotal)}`,
+      `Delivery: ${cur(params.delivery)}`,
+      `Platform fee: ${cur(params.platformFee)}`,
+      `Tax: ${cur(params.taxAmount)}`,
+      `Discount: -${cur(params.discount)}`,
+      `Total paid: ${cur(params.totalPaid)}`,
+      '',
+      'This receipt confirms payment received via Procur for the above order.',
+      'Keep this for your internal reconciliation and audit records.',
+    ].join('\n');
+
+    const subject = `Payment received for Procur order ${params.orderNumber}`;
+
+    await this.sendBrandedEmail(
+      params.email,
+      subject,
+      'Payment receipt',
+      innerHtml,
+      textBody,
+    );
+  }
 }

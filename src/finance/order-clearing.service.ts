@@ -5,12 +5,14 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
 import { BankInfoService } from '../bank-info/bank-info.service';
+import { EmailService } from '../email/email.service';
 
 @Injectable()
 export class OrderClearingService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly bankInfo: BankInfoService,
+    private readonly email: EmailService,
   ) {}
 
   /**
@@ -64,19 +66,21 @@ export class OrderClearingService {
     }
 
     // Helper to generate transaction_number using existing DB function
-    const { data: buyerTxnNum, error: buyerTxnErr } = await client.rpc(
+    const { data: buyerTxnNumRaw, error: buyerTxnErr } = await client.rpc(
       'generate_transaction_number',
     );
-    if (buyerTxnErr || !buyerTxnNum) {
+    const buyerTxnNum = buyerTxnNumRaw as string | null;
+    if (buyerTxnErr || !buyerTxnNum || typeof buyerTxnNum !== 'string') {
       throw new BadRequestException(
         `Failed to generate buyer transaction number: ${buyerTxnErr?.message ?? 'unknown'}`,
       );
     }
 
-    const { data: payoutTxnNum, error: payoutTxnErr } = await client.rpc(
+    const { data: payoutTxnNumRaw, error: payoutTxnErr } = await client.rpc(
       'generate_transaction_number',
     );
-    if (payoutTxnErr || !payoutTxnNum) {
+    const payoutTxnNum = payoutTxnNumRaw as string | null;
+    if (payoutTxnErr || !payoutTxnNum || typeof payoutTxnNum !== 'string') {
       throw new BadRequestException(
         `Failed to generate payout transaction number: ${payoutTxnErr?.message ?? 'unknown'}`,
       );
@@ -197,7 +201,17 @@ export class OrderClearingService {
       );
     }
 
-    const rows = (data || []) as any[];
+    const rows: {
+      id: string;
+      order_id: string | null;
+      buyer_org_id: string | null;
+      seller_org_id: string | null;
+      amount: number | null;
+      currency: string | null;
+      status: string | null;
+      metadata: Record<string, unknown> | null;
+      created_at: string | null;
+    }[] = (data || []) as any[];
     const orgIds = Array.from(
       new Set(
         rows
@@ -223,15 +237,18 @@ export class OrderClearingService {
         );
       }
       orgById = Object.fromEntries(
-        (orgs || []).map((o: any) => [
-          o.id as string,
-          { name: (o.name as string) ?? null },
-        ]),
+        (orgs || []).map((raw) => {
+          const o = raw as { id: string; name: string | null };
+          return [o.id, { name: o.name ?? null }];
+        }),
       );
     }
 
     const settlements = rows.map((r) => {
-      const meta = (r.metadata || {}) as any;
+      const meta = (r.metadata || {}) as {
+        bank_reference?: string | null;
+        bank_proof_url?: string | null;
+      };
       return {
         id: r.id as string,
         orderId: (r.order_id as string | null) ?? null,
@@ -312,7 +329,17 @@ export class OrderClearingService {
       );
     }
 
-    const rows = (data || []) as any[];
+    const rows: {
+      id: string;
+      order_id: string | null;
+      buyer_org_id: string | null;
+      seller_org_id: string | null;
+      amount: number | null;
+      currency: string | null;
+      status: string | null;
+      metadata: Record<string, unknown> | null;
+      created_at: string | null;
+    }[] = (data || []) as any[];
     const orgIds = Array.from(
       new Set(
         rows
@@ -338,15 +365,17 @@ export class OrderClearingService {
         );
       }
       orgById = Object.fromEntries(
-        (orgs || []).map((o: any) => [
-          o.id as string,
-          { name: (o.name as string) ?? null },
-        ]),
+        (orgs || []).map((raw) => {
+          const o = raw as { id: string; name: string | null };
+          return [o.id, { name: o.name ?? null }];
+        }),
       );
     }
 
     const payouts = rows.map((r) => {
-      const meta = (r.metadata || {}) as any;
+      const meta = (r.metadata || {}) as {
+        payout_proof_url?: string | null;
+      };
       return {
         id: r.id as string,
         orderId: (r.order_id as string | null) ?? null,
@@ -381,7 +410,9 @@ export class OrderClearingService {
 
     const { data: tx, error: txError } = await client
       .from('transactions')
-      .select('id, order_id, metadata, status')
+      .select(
+        'id, order_id, buyer_org_id, seller_org_id, amount, currency, payment_method, transaction_number, platform_fee, metadata, status',
+      )
       .eq('id', input.transactionId)
       .single();
 
@@ -389,10 +420,11 @@ export class OrderClearingService {
       throw new NotFoundException('Buyer settlement transaction not found');
     }
 
-    const meta = ((tx as any).metadata || {}) as any;
+    const txMeta =
+      (tx as { metadata?: Record<string, unknown> }).metadata ?? {};
     if (
-      meta.flow !== 'direct_deposit_clearing' ||
-      meta.leg !== 'buyer_settlement'
+      txMeta.flow !== 'direct_deposit_clearing' ||
+      txMeta.leg !== 'buyer_settlement'
     ) {
       throw new BadRequestException(
         'Transaction is not a buyer settlement for the direct deposit flow',
@@ -400,9 +432,15 @@ export class OrderClearingService {
     }
 
     const updatedMeta = {
-      ...meta,
-      bank_reference: input.bankReference ?? meta.bank_reference ?? null,
-      bank_proof_url: input.proofUrl ?? meta.bank_proof_url ?? null,
+      ...txMeta,
+      bank_reference:
+        input.bankReference ??
+        (txMeta.bank_reference as string | undefined | null) ??
+        null,
+      bank_proof_url:
+        input.proofUrl ??
+        (txMeta.bank_proof_url as string | undefined | null) ??
+        null,
       phase: 'completed',
     };
 
@@ -438,7 +476,8 @@ export class OrderClearingService {
         .maybeSingle();
 
       if (!payoutError && payoutTx) {
-        const payoutMeta = ((payoutTx as any).metadata || {}) as any;
+        const payoutMeta =
+          (payoutTx as { metadata?: Record<string, unknown> }).metadata ?? {};
         const newPayoutMeta = {
           ...payoutMeta,
           phase: 'pending_execution',
@@ -448,6 +487,140 @@ export class OrderClearingService {
           .update({ metadata: newPayoutMeta })
           .eq('id', payoutTx.id as string);
       }
+    }
+
+    // Send buyer payment receipt email (direct deposit flow)
+    try {
+      if (tx.order_id) {
+        const { data: order, error: orderError } = await client
+          .from('orders')
+          .select(
+            'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency',
+          )
+          .eq('id', tx.order_id as string)
+          .single();
+
+        if (!order || orderError) {
+          return { success: true };
+        }
+
+        const buyerOrgId = order.buyer_org_id as string | null;
+        const buyerUserId = order.buyer_user_id as string | null;
+
+        let buyerOrgName: string | null = null;
+        if (buyerOrgId) {
+          const { data: org } = await client
+            .from('organizations')
+            .select('name, business_name')
+            .eq('id', buyerOrgId)
+            .single();
+          if (org) {
+            const typedOrg = org as {
+              name?: string | null;
+              business_name?: string | null;
+            };
+            buyerOrgName =
+              typedOrg.business_name?.trim() || typedOrg.name?.trim() || null;
+          }
+        }
+
+        let buyerEmail: string | null = null;
+        let buyerContactName: string | null = null;
+
+        // Prefer the specific buyer user on the order
+        if (buyerUserId) {
+          const { data: buyerUser } = await client
+            .from('users')
+            .select('email, fullname')
+            .eq('id', buyerUserId)
+            .single();
+          if (buyerUser) {
+            const typedUser = buyerUser as {
+              email?: string | null;
+              fullname?: string | null;
+            };
+            buyerEmail = typedUser.email ?? null;
+            buyerContactName = typedUser.fullname ?? null;
+          }
+        }
+
+        // Fallback: first member in the buyer organization
+        if ((!buyerEmail || !buyerContactName) && buyerOrgId) {
+          const { data: orgUser } = await client
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', buyerOrgId)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          const orgUserId =
+            (orgUser as { user_id?: string | null } | null)?.user_id ?? null;
+
+          if (orgUserId) {
+            const { data: user } = await client
+              .from('users')
+              .select('email, fullname')
+              .eq('id', orgUserId)
+              .single();
+
+            if (user) {
+              const typedUser = user as {
+                email?: string | null;
+                fullname?: string | null;
+              };
+              buyerEmail = buyerEmail ?? typedUser.email ?? null;
+              buyerContactName =
+                buyerContactName ?? typedUser.fullname ?? null;
+            }
+          }
+        }
+
+        if (buyerEmail) {
+          const buyerName =
+            buyerOrgName || buyerContactName || buyerEmail || 'Customer';
+          const receiptNumber =
+            (tx as { transaction_number?: string | null }).transaction_number ||
+            input.transactionId;
+          const amountCurrency =
+            (tx as { currency?: string | null }).currency ||
+            (order.currency as string | null) ||
+            'XCD';
+          const platformFee =
+            (tx as { platform_fee?: number | null }).platform_fee ?? 0;
+
+          await this.email.sendBuyerCompletionReceipt({
+            email: buyerEmail,
+            buyerName,
+            buyerEmail,
+            buyerContact: buyerContactName,
+            receiptNumber,
+            paymentDate: nowIso,
+            orderNumber:
+              (order.order_number as string | null) || (order.id as string),
+            paymentMethod:
+              (tx as { payment_method?: string | null }).payment_method ||
+              'Bank transfer',
+            paymentReference:
+              (updatedMeta.bank_reference as string | undefined | null) ?? null,
+            paymentStatus: 'settled',
+            subtotal: Number(order.subtotal ?? 0),
+            delivery: Number(order.shipping_amount ?? 0),
+            platformFee: Number(platformFee ?? 0),
+            taxAmount: Number(order.tax_amount ?? 0),
+            discount: Number(order.discount_amount ?? 0),
+            totalPaid: Number(order.total_amount ?? 0),
+            currency: String(amountCurrency),
+          });
+        }
+      }
+    } catch (emailErr) {
+      // Do not block admin flows on email issues
+      // eslint-disable-next-line no-console
+      console.warn(
+        'Buyer completion receipt email failed:',
+        (emailErr as Error)?.message || emailErr,
+      );
     }
 
     return { success: true };
@@ -461,7 +634,9 @@ export class OrderClearingService {
 
     const { data: tx, error: txError } = await client
       .from('transactions')
-      .select('id, order_id, metadata, status')
+      .select(
+        'id, order_id, buyer_org_id, seller_org_id, amount, currency, payment_method, transaction_number, platform_fee, metadata, status',
+      )
       .eq('id', input.transactionId)
       .single();
 
@@ -469,10 +644,11 @@ export class OrderClearingService {
       throw new NotFoundException('Farmer payout transaction not found');
     }
 
-    const meta = ((tx as any).metadata || {}) as any;
+    const txMeta =
+      (tx as { metadata?: Record<string, unknown> }).metadata ?? {};
     if (
-      meta.flow !== 'direct_deposit_clearing' ||
-      meta.leg !== 'farmer_payout'
+      txMeta.flow !== 'direct_deposit_clearing' ||
+      txMeta.leg !== 'farmer_payout'
     ) {
       throw new BadRequestException(
         'Transaction is not a farmer payout for the direct deposit flow',
@@ -480,8 +656,11 @@ export class OrderClearingService {
     }
 
     const updatedMeta = {
-      ...meta,
-      payout_proof_url: input.proofUrl ?? meta.payout_proof_url ?? null,
+      ...txMeta,
+      payout_proof_url:
+        input.proofUrl ??
+        (txMeta.payout_proof_url as string | undefined | null) ??
+        null,
       phase: 'completed',
     };
 
@@ -533,6 +712,171 @@ export class OrderClearingService {
         is_visible_to_buyer: true,
         is_visible_to_seller: true,
       });
+
+      // Send seller payment receipt email (direct deposit flow)
+      try {
+        const { data: order, error: orderError2 } = await client
+          .from('orders')
+          .select(
+            'id, order_number, buyer_org_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency',
+          )
+          .eq('id', tx.order_id as string)
+          .single();
+
+        if (!order || orderError2) {
+          return { success: true };
+        }
+
+        const buyerOrgId = order.buyer_org_id as string | null;
+        const sellerOrgId = order.seller_org_id as string | null;
+
+        let buyerOrgName: string | null = null;
+        let sellerOrgName: string | null = null;
+
+        if (buyerOrgId || sellerOrgId) {
+          const orgIds: string[] = [];
+          if (buyerOrgId) orgIds.push(buyerOrgId);
+          if (sellerOrgId && sellerOrgId !== buyerOrgId) {
+            orgIds.push(sellerOrgId);
+          }
+
+          if (orgIds.length > 0) {
+            const { data: orgs } = await client
+              .from('organizations')
+              .select('id, name, business_name')
+              .in('id', orgIds);
+
+            for (const raw of orgs || []) {
+              const org = raw as {
+                id: string;
+                name?: string | null;
+                business_name?: string | null;
+              };
+              const orgName =
+                org.business_name?.trim() || org.name?.trim() || null;
+              if (org.id === buyerOrgId) buyerOrgName = orgName;
+              if (org.id === sellerOrgId) sellerOrgName = orgName;
+            }
+          }
+        }
+
+        // Resolve buyer contact details for "Paid by" section
+        let buyerEmail: string | null = null;
+        let buyerContactName: string | null = null;
+
+        if (buyerOrgId) {
+          const { data: orgUser } = await client
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', buyerOrgId)
+            .order('joined_at', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          const orgUserId =
+            (orgUser as { user_id?: string | null } | null)?.user_id ?? null;
+
+          if (orgUserId) {
+            const { data: user } = await client
+              .from('users')
+              .select('email, fullname')
+              .eq('id', orgUserId)
+              .single();
+
+            if (user) {
+              const typedUser = user as {
+                email?: string | null;
+                fullname?: string | null;
+              };
+              buyerEmail = typedUser.email ?? null;
+              buyerContactName = typedUser.fullname ?? null;
+            }
+          }
+        }
+
+        const buyerNameForSeller =
+          buyerOrgName || buyerContactName || buyerEmail || 'Customer';
+        const amountCurrency =
+          (tx as { currency?: string | null }).currency ||
+          (order.currency as string | null) ||
+          'XCD';
+        const platformFee =
+          (tx as { platform_fee?: number | null }).platform_fee ?? 0;
+        const receiptNumber =
+          (tx as { transaction_number?: string | null }).transaction_number ||
+          input.transactionId;
+        const orderNumber =
+          (order.order_number as string | null) || (order.id as string);
+
+        if (sellerOrgId) {
+          const { data: orgUsers } = await client
+            .from('organization_users')
+            .select('user_id, is_active')
+            .eq('organization_id', sellerOrgId)
+            .eq('is_active', true);
+
+          const sellerUserIds =
+            (orgUsers || [])
+              .map(
+                (row) => (row as { user_id?: string | null }).user_id ?? null,
+              )
+              .filter((id): id is string => Boolean(id)) || [];
+
+          if (sellerUserIds.length > 0) {
+            const { data: users } = await client
+              .from('users')
+              .select('id, email, fullname')
+              .in('id', sellerUserIds)
+              .not('email', 'is', null);
+
+            for (const rawUser of users || []) {
+              const sellerUser = rawUser as {
+                email?: string | null;
+                fullname?: string | null;
+              };
+              if (!sellerUser.email) continue;
+
+              const sellerDisplayName =
+                sellerOrgName ||
+                sellerUser.fullname ||
+                sellerUser.email ||
+                'Seller';
+
+              await this.email.sendSellerCompletionReceipt({
+                email: sellerUser.email,
+                sellerName: sellerDisplayName,
+                buyerName: buyerNameForSeller,
+                buyerEmail: buyerEmail ?? 'N/A',
+                buyerContact: buyerContactName,
+                receiptNumber,
+                paymentDate: nowIso,
+                orderNumber,
+                paymentMethod:
+                  (tx as { payment_method?: string | null }).payment_method ||
+                  'Bank transfer',
+                paymentReference:
+                  (updatedMeta.payout_proof_url as string | undefined | null) ??
+                  null,
+                paymentStatus: 'completed',
+                subtotal: Number(order.subtotal ?? 0),
+                delivery: Number(order.shipping_amount ?? 0),
+                platformFee: Number(platformFee ?? 0),
+                taxAmount: Number(order.tax_amount ?? 0),
+                discount: Number(order.discount_amount ?? 0),
+                totalPaid: Number(order.total_amount ?? 0),
+                currency: String(amountCurrency),
+              });
+            }
+          }
+        }
+      } catch (emailErr) {
+        // Do not block admin flows on email issues
+        // eslint-disable-next-line no-console
+        console.warn(
+          'Seller completion receipt email failed:',
+          (emailErr as Error)?.message || emailErr,
+        );
+      }
     }
 
     return { success: true };

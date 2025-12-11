@@ -188,7 +188,7 @@ export class PaymentsService {
         });
       }
 
-      // WhatsApp notify seller immediately (new order + accept/reject) on card path
+      // Notify seller immediately about the new order (email + WhatsApp) on the card path
       try {
         const frontendUrl =
           this.config.get<string>('frontend.url') ||
@@ -201,6 +201,71 @@ export class PaymentsService {
           (shippingAddressSnapshot as any)?.contact_name ||
           (shippingAddressSnapshot as any)?.name ||
           'Buyer';
+
+        // Email notify all active seller org members with email addresses
+        try {
+          const { data: orgUsers } = await client
+            .from('organization_users')
+            .select('user_id, is_active')
+            .eq('organization_id', sellerOrgId)
+            .eq('is_active', true);
+
+          const sellerUserIds =
+            (orgUsers || [])
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              .map((ou: any) => ou.user_id as string | null)
+              .filter((id): id is string => Boolean(id)) || [];
+
+          if (sellerUserIds.length > 0) {
+            const { data: sellerUsers } = await client
+              .from('users')
+              .select('email, fullname')
+              .in('id', sellerUserIds)
+              .not('email', 'is', null);
+
+            for (const su of (sellerUsers || []) as any[]) {
+              const email = su.email as string | null;
+              if (!email) continue;
+
+              const subject = `New order ${orderNum} received`;
+              const title = `New order ${orderNum} received`;
+              const innerHtml = `
+                <h2>Hello,</h2>
+                <p>You have a new order ${orderNum} from ${buyerName}.</p>
+                <p><strong>Total: ${currency} ${total.toFixed(2)}</strong></p>
+                <p>Manage this order:</p>
+                <p style="margin-top: 16px;">
+                  <a href="${manageUrl}" class="button">View order in Procur</a>
+                </p>
+                <p class="muted">You’ll receive updates as this order is processed and delivered.</p>
+              `;
+              const textBody = `Hello,
+
+You have a new order ${orderNum} from ${buyerName}.
+
+Total: ${currency} ${total.toFixed(2)}
+
+Manage this order: ${manageUrl}
+
+— The Procur team`;
+
+              await this.emailService.sendBrandedEmail(
+                email,
+                subject,
+                title,
+                innerHtml,
+                textBody,
+              );
+            }
+          }
+        } catch (emailErr) {
+          this.logger.warn(
+            `Failed to send seller new-order email for order ${order.id}: ${String(
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              (emailErr as any)?.message || emailErr,
+            )}`,
+          );
+        }
 
         // Prefer product creator from any order item snapshot
         const { data: anyItem } = await client
@@ -545,19 +610,29 @@ export class PaymentsService {
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001';
         const link = `${frontendUrl}/buyer/order-confirmation/${firstOrderId}`;
         const html = `
-            <h2>Thanks for your order</h2>
+            <h2>Hi ${buyer.fullname || 'there'},</h2>
             <p>Thanks for your order on Procur.</p>
-            <p>You can view your full order receipt and track updates here:</p>
+            <p>You can view your full order receipt here:</p>
             <p style="margin-top: 16px;">
               <a href="${link}" class="button">View order receipt</a>
             </p>
+            <p class="muted">We’ll keep you updated as your order is prepared, shipped, and delivered.</p>
         `;
         await this.emailService.sendBrandedEmail(
           buyer.email,
           'Your order receipt',
           'Your order receipt',
           html,
-          `Thanks for your order! View your receipt: ${link}`,
+          `Hi ${buyer.fullname || 'there'},
+
+Thanks for your order on Procur.
+
+You can view your full order receipt here:
+${link}
+
+We’ll keep you updated as your order is prepared, shipped, and delivered.
+
+— The Procur team`,
         );
       }
     }

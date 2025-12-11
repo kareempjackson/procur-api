@@ -34,6 +34,8 @@ export enum MeasurementUnit {
   G = 'g',
   LB = 'lb',
   OZ = 'oz',
+  BAG = 'bag',
+  BUCKET = 'bucket',
   PIECE = 'piece',
   DOZEN = 'dozen',
   LITER = 'liter',
