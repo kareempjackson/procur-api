@@ -77,23 +77,18 @@ export class UsersService {
       }
     }
 
-    // Build signed profile avatar URL if stored as path
+    // Build profile avatar URL
     let profileAvatarUrl: string | null = null;
     if ((dbUser as any)?.profile_img) {
       const imgPath = (dbUser as any).profile_img as string;
       if (typeof imgPath === 'string' && /^https?:\/\//i.test(imgPath)) {
         profileAvatarUrl = imgPath;
       } else {
-        try {
-          const signed = await this.supabase.createSignedDownloadUrl(
-            this.privateBucket,
-            imgPath,
-            60 * 60,
-          );
-          profileAvatarUrl = signed.signedUrl;
-        } catch {
-          profileAvatarUrl = null;
-        }
+        // Avatars are stored in a public bucket; build a public URL rather
+        // than using a signed download URL from the private bucket.
+        const publicBucket =
+          this.configService.get<string>('storage.publicBucket') || 'public';
+        profileAvatarUrl = this.supabase.getPublicUrl(publicBucket, imgPath);
       }
     }
 
@@ -558,10 +553,15 @@ export class UsersService {
     const ext = filename.includes('.')
       ? filename.split('.').pop()?.toLowerCase() || 'jpg'
       : 'jpg';
-    const bucket = this.privateBucket;
+    // Use a public bucket for profile avatars so they can be served without
+    // requiring signed URLs on every request.
+    const bucket =
+      this.configService.get<string>('storage.publicBucket') || 'public';
     const objectPath = `avatars/users/${user.id}/${crypto.randomUUID()}.${ext}`;
 
     try {
+      // Ensure the bucket exists and is public before creating the signed upload URL.
+      await this.supabase.ensureBucketExists(bucket, true);
       const signed = await this.supabase.createSignedUploadUrl(
         bucket,
         objectPath,

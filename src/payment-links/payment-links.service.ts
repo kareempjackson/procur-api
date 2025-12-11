@@ -30,6 +30,57 @@ export class PaymentLinksService {
   ) {}
 
   /**
+   * Load the current platform fee % and delivery flat fee from the shared config table.
+   * This is used to compute default fees for offline payment links.
+   */
+  private async getPlatformFeesConfig(): Promise<{
+    platformFeePercent: number;
+    deliveryFlatFee: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('platform_fees_config')
+      .select('platform_fee_percent, delivery_flat_fee, currency')
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(
+        'Failed to load platform fees configuration for payment links',
+        error,
+      );
+      // Fall back to defaults so seller flows still work even if config is misconfigured
+      return {
+        platformFeePercent: 5,
+        deliveryFlatFee: 20,
+        currency: 'XCD',
+      };
+    }
+
+    if (!data) {
+      return {
+        platformFeePercent: 5,
+        deliveryFlatFee: 20,
+        currency: 'XCD',
+      };
+    }
+
+    const row = data as {
+      platform_fee_percent: number | null;
+      delivery_flat_fee: number | null;
+      currency: string | null;
+    };
+
+    return {
+      platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
+      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
+      currency: (row.currency as string | null) ?? 'XCD',
+    };
+  }
+
+  /**
    * Generate a short public code for the payment link.
    * Example: grn-8F2K9A
    */
@@ -117,14 +168,22 @@ export class PaymentLinksService {
       typeof input.deliveryFeeAmountOverride === 'number'
         ? input.deliveryFeeAmountOverride
         : shipping;
-    const platformFeeAmount = Number(input.platformFeeAmount ?? 0);
+
+    // For existing orders, the caller passes in the buyer-facing portion of the
+    // platform fee (what is added on top of the order total). We treat this as
+    // the buyer share and do not infer the seller share here.
+    const buyerPlatformFeeAmount = Number(input.platformFeeAmount ?? 0);
     const taxAmount =
       typeof input.taxAmountOverride === 'number'
         ? input.taxAmountOverride
         : tax;
 
     const totalAmount =
-      subtotal + deliveryFeeAmount + platformFeeAmount + taxAmount - discount;
+      subtotal +
+      deliveryFeeAmount +
+      buyerPlatformFeeAmount +
+      taxAmount -
+      discount;
 
     if (totalAmount <= 0) {
       throw new BadRequestException(
@@ -146,7 +205,7 @@ export class PaymentLinksService {
     const feeBreakdown = {
       subtotal_amount: subtotal,
       delivery_fee_amount: deliveryFeeAmount,
-      platform_fee_amount: platformFeeAmount,
+      platform_fee_amount: buyerPlatformFeeAmount,
       tax_amount: taxAmount,
       discount_amount: discount,
     };
@@ -163,7 +222,7 @@ export class PaymentLinksService {
         currency: (order.currency as string | null) || 'XCD',
         subtotal_amount: subtotal,
         delivery_fee_amount: deliveryFeeAmount,
-        platform_fee_amount: platformFeeAmount,
+        platform_fee_amount: buyerPlatformFeeAmount,
         tax_amount: taxAmount,
         total_amount: totalAmount,
         allowed_payment_methods: input.allowedPaymentMethods,
@@ -327,11 +386,26 @@ export class PaymentLinksService {
       .substr(2, 4)
       .toUpperCase()}`;
 
-    const shippingAmount = 20;
+    const feesConfig = await this.getPlatformFeesConfig();
     const taxAmount = 0;
-    const platformFeeAmount = Number((subtotal * 0.05).toFixed(2));
+
+    // Delivery: platform_fees_config.deliveryFlatFee represents the total
+    // logistics cost. For offline flows, this is split between buyer and seller.
+    const fullDeliveryFee = Number(feesConfig.deliveryFlatFee || 0);
+    const buyerDeliveryAmount = fullDeliveryFee
+      ? Number((fullDeliveryFee / 2).toFixed(2))
+      : 0;
+    const sellerDeliveryAmount = fullDeliveryFee - buyerDeliveryAmount;
+
+    // Transaction fee: applied as a percentage of the items subtotal and
+    // fully paid by the buyer (added on top of the total they pay).
+    const platformFeeAmount = Number(
+      (subtotal * (feesConfig.platformFeePercent / 100)).toFixed(2),
+    );
+
     const discountAmount = 0;
-    const totalAmount = subtotal + shippingAmount + platformFeeAmount;
+    const totalAmount =
+      subtotal + buyerDeliveryAmount + platformFeeAmount + taxAmount;
 
     const shippingAddressSnapshot = input.shippingAddress
       ? {
@@ -357,8 +431,10 @@ export class PaymentLinksService {
         payment_status: 'pending',
         subtotal,
         tax_amount: taxAmount,
-        shipping_amount: shippingAmount,
+        // Buyer-facing delivery portion only
+        shipping_amount: buyerDeliveryAmount,
         discount_amount: discountAmount,
+        // Buyer pays subtotal + buyer delivery share + transaction fee
         total_amount: totalAmount,
         currency: (input.currency || 'XCD').toUpperCase(),
         shipping_address: shippingAddressSnapshot,
@@ -388,12 +464,24 @@ export class PaymentLinksService {
         email: input.buyerEmail,
         phone: input.buyerPhone,
       },
+      // Transaction fee (platform fee) is fully paid by the buyer
       platformFeeAmount,
-      deliveryFeeAmountOverride: shippingAmount,
+      // Only the buyer-facing portion of the delivery fee is added to their total
+      deliveryFeeAmountOverride: buyerDeliveryAmount,
       taxAmountOverride: taxAmount,
       meta: {
         flow: 'seller_offline_payment_link',
         line_items: input.lineItems,
+        delivery_fee_details: {
+          total: fullDeliveryFee,
+          buyer_share: buyerDeliveryAmount,
+          seller_share: sellerDeliveryAmount,
+        },
+        platform_fee_details: {
+          total: platformFeeAmount,
+          buyer_share: platformFeeAmount,
+          seller_share: 0,
+        },
       },
     });
 
@@ -528,17 +616,39 @@ export class PaymentLinksService {
       'XCD'
     ).toUpperCase();
 
+    const feesConfig = await this.getPlatformFeesConfig();
+
+    // Delivery fee: keep the existing buyer-facing delivery amount if present,
+    // otherwise derive it from the configured total delivery fee.
+    const defaultBuyerDelivery = feesConfig.deliveryFlatFee
+      ? Number((feesConfig.deliveryFlatFee / 2).toFixed(2))
+      : 0;
     const deliveryFeeAmount =
       typeof link.delivery_fee_amount === 'number'
         ? Number(link.delivery_fee_amount)
-        : 20;
+        : defaultBuyerDelivery;
+
+    const fullDeliveryFee =
+      (link.fee_breakdown as any)?.delivery_fee_details?.total ??
+      feesConfig.deliveryFlatFee ??
+      deliveryFeeAmount * 2;
+    const buyerDeliveryShare = deliveryFeeAmount;
+    const sellerDeliveryShare =
+      Number(fullDeliveryFee.toFixed?.(2) ?? fullDeliveryFee) -
+      buyerDeliveryShare;
+
     const taxAmount =
       typeof link.tax_amount === 'number' ? Number(link.tax_amount) : 0;
-    const platformFeeAmount = Number((subtotal * 0.05).toFixed(2));
+
+    // Transaction fee: fully paid by the buyer based on the updated subtotal.
+    const platformFeeAmount = Number(
+      (subtotal * (feesConfig.platformFeePercent / 100)).toFixed(2),
+    );
+
     const discountAmount = Number(link.fee_breakdown?.discount_amount ?? 0);
     const totalAmount =
       subtotal +
-      deliveryFeeAmount +
+      buyerDeliveryShare +
       platformFeeAmount +
       taxAmount -
       discountAmount;
@@ -600,17 +710,27 @@ export class PaymentLinksService {
 
     const updatedFeeBreakdown = {
       subtotal_amount: subtotal,
-      delivery_fee_amount: deliveryFeeAmount,
+      delivery_fee_amount: buyerDeliveryShare,
       platform_fee_amount: platformFeeAmount,
       tax_amount: taxAmount,
       discount_amount: discountAmount,
+      delivery_fee_details: {
+        total: fullDeliveryFee,
+        buyer_share: buyerDeliveryShare,
+        seller_share: sellerDeliveryShare,
+      },
+      platform_fee_details: {
+        total: platformFeeAmount,
+        buyer_share: platformFeeAmount,
+        seller_share: 0,
+      },
     };
 
     const { data: updatedLink, error: updateLinkError } = await client
       .from('payment_links')
       .update({
         subtotal_amount: subtotal,
-        delivery_fee_amount: deliveryFeeAmount,
+        delivery_fee_amount: buyerDeliveryShare,
         platform_fee_amount: platformFeeAmount,
         tax_amount: taxAmount,
         total_amount: totalAmount,
@@ -652,7 +772,7 @@ export class PaymentLinksService {
       currency: (updatedLink.currency as string) || currency,
       subtotal_amount: Number(updatedLink.subtotal_amount ?? subtotal),
       delivery_fee_amount: Number(
-        updatedLink.delivery_fee_amount ?? deliveryFeeAmount,
+        updatedLink.delivery_fee_amount ?? buyerDeliveryShare,
       ),
       platform_fee_amount: Number(
         updatedLink.platform_fee_amount ?? platformFeeAmount,
@@ -750,6 +870,13 @@ export class PaymentLinksService {
       ];
     }
 
+    // Buyer-facing platform fee is always the full transaction fee applied
+    // to the subtotal and paid by the buyer. Prefer the structured breakdown
+    // when available, otherwise fall back to the stored column.
+    const buyerPlatformFeeForDisplay =
+      Number(pl.fee_breakdown?.platform_fee_amount ?? 0) ||
+      Number(pl.platform_fee_amount ?? 0);
+
     return {
       code: pl.link_code,
       status: pl.status,
@@ -757,7 +884,7 @@ export class PaymentLinksService {
       amounts: {
         subtotal: Number(pl.subtotal_amount),
         delivery_fee: Number(pl.delivery_fee_amount),
-        platform_fee: Number(pl.platform_fee_amount),
+        platform_fee: buyerPlatformFeeForDisplay,
         tax: Number(pl.tax_amount),
         discount: Number(order?.discount_amount ?? 0),
         total: Number(pl.total_amount),

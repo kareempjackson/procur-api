@@ -50,7 +50,11 @@ import {
   CreateAdminProductDto,
   UpdateAdminProductDto,
 } from './dto/admin-product.dto';
-import { AdminUserResponseDto, CreateAdminUserDto } from './dto/admin-user.dto';
+import {
+  AdminUserResponseDto,
+  CreateAdminUserDto,
+  UpdateAdminUserDto,
+} from './dto/admin-user.dto';
 import { UpdateAdminOrganizationStatusDto } from './dto/admin-org-status.dto';
 import { AdminAuditLogQueryDto } from './dto/admin-audit.dto';
 import {
@@ -62,11 +66,13 @@ import { UserContext } from '../common/interfaces/jwt-payload.interface';
 import {
   CreateFarmVisitRequestDto,
   CreateProductDto,
+  UpdateProductDto,
   ProductQueryDto,
   ProductResponseDto,
   ProductStatus,
 } from '../sellers/dto';
 import { OrderReviewDto } from '../buyers/dto/order.dto';
+import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
 import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 
 @ApiTags('Admin')
@@ -314,6 +320,31 @@ export class AdminController {
     return this.adminService.createSellerProduct(orgId, dto, user.id);
   }
 
+  @Patch('sellers/:orgId/products/:productId')
+  @ApiOperation({
+    summary: 'Update product for seller (admin)',
+    description:
+      'Update core product fields for a seller product on behalf of a seller organization.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product updated successfully',
+    type: ProductResponseDto,
+  })
+  async updateSellerProduct(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+    @CurrentUser() user: UserContext,
+    @Body() dto: UpdateProductDto,
+  ): Promise<ProductResponseDto> {
+    return this.adminService.updateSellerProduct(
+      orgId,
+      productId,
+      dto,
+      user.id,
+    );
+  }
+
   @Patch('sellers/:orgId/products/:productId/status')
   @ApiOperation({
     summary: 'Update product status for seller (admin)',
@@ -371,6 +402,22 @@ export class AdminController {
   })
   async listOrders(@Query() query: AdminOrderQueryDto) {
     return this.adminService.listOrders(query);
+  }
+
+  @Post('orders/offline')
+  @ApiOperation({
+    summary: 'Create offline order (no payment link)',
+    description:
+      'Record an order that happened off-platform between a buyer and seller organization without creating a payment link.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Offline order created successfully',
+  })
+  async createOfflineOrder(
+    @Body() dto: AdminCreateOfflineOrderDto,
+  ): Promise<{ id: string; order_number: string }> {
+    return this.adminService.createOfflineOrder(dto);
   }
 
   @Get('orders/:id')
@@ -745,6 +792,47 @@ export class AdminController {
     return this.adminService.getDashboardCharts();
   }
 
+  // ===== Platform fees configuration =====
+
+  @Get('settings/fees')
+  @ApiOperation({
+    summary: 'Get platform fees configuration',
+    description:
+      'Returns the current platform fee percentage and flat delivery fee used across the app for offline orders and payment links.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Platform fees configuration retrieved successfully',
+  })
+  async getPlatformFeesSettings() {
+    return this.adminService.getPlatformFeesSettings();
+  }
+
+  @Patch('settings/fees')
+  @ApiOperation({
+    summary: 'Update platform fees configuration',
+    description:
+      'Update the platform fee percentage and flat delivery fee used across the app. Only SUPER_ADMINs should call this endpoint.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Platform fees configuration updated successfully',
+  })
+  async updatePlatformFeesSettings(
+    @Body()
+    body: {
+      platformFeePercent?: number;
+      deliveryFlatFee?: number;
+      currency?: string;
+    },
+  ) {
+    return this.adminService.updatePlatformFeesSettings({
+      platformFeePercent: body.platformFeePercent,
+      deliveryFlatFee: body.deliveryFlatFee,
+      currency: body.currency,
+    });
+  }
+
   // ===== Audit log =====
 
   @Get('audit/logs')
@@ -891,6 +979,40 @@ export class AdminController {
     @Body() dto: CreateAdminUserDto,
   ): Promise<AdminUserResponseDto> {
     return this.adminService.createAdminUser(dto);
+  }
+
+  @Patch('admins/:id')
+  @ApiOperation({
+    summary: 'Update platform admin user',
+    description:
+      'Update core fields for a platform-level admin or super admin account. Only SUPER_ADMIN can call this endpoint.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin user updated successfully',
+    type: AdminUserResponseDto,
+  })
+  async updateAdminUser(
+    @Param('id') id: string,
+    @Body() dto: UpdateAdminUserDto,
+  ): Promise<AdminUserResponseDto> {
+    return this.adminService.updateAdminUser(id, dto);
+  }
+
+  @Delete('admins/:id')
+  @ApiOperation({
+    summary: 'Delete (deactivate) platform admin user',
+    description:
+      'Soft-delete a platform-level admin or super admin account by marking it inactive. Only SUPER_ADMIN can call this endpoint.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Admin user deleted successfully',
+  })
+  async deleteAdminUser(
+    @Param('id') id: string,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.deleteAdminUser(id);
   }
 
   // ===== User WhatsApp management (admin-triggered) =====

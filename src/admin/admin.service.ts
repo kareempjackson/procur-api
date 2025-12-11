@@ -20,7 +20,11 @@ import {
   CreateDriverDto,
   UpdateDriverDto,
 } from './dto/driver.dto';
-import { AdminUserResponseDto, CreateAdminUserDto } from './dto/admin-user.dto';
+import {
+  AdminUserResponseDto,
+  CreateAdminUserDto,
+  UpdateAdminUserDto,
+} from './dto/admin-user.dto';
 import { UserRole } from '../common/enums/user-role.enum';
 import {
   AdminProductResponseDto,
@@ -41,9 +45,11 @@ import {
   ProductQueryDto,
   ProductResponseDto,
   ProductStatus,
+  UpdateProductDto,
 } from '../sellers/dto';
 import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { SellersService } from '../sellers/sellers.service';
+import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
 
 export interface AdminOrganizationSummary {
   id: string;
@@ -130,6 +136,12 @@ export interface AdminAuditLogItem {
   createdAt: string;
 }
 
+export interface PlatformFeesSettings {
+  platformFeePercent: number;
+  deliveryFlatFee: number;
+  currency: string;
+}
+
 @Injectable()
 export class AdminService {
   constructor(
@@ -144,6 +156,133 @@ export class AdminService {
 
   private get privateBucket(): string {
     return this.configService.get<string>('storage.privateBucket') || 'private';
+  }
+
+  /**
+   * Load (or lazily create) the single platform_fees_config row.
+   * This is the source of truth for platform fee % and delivery fee across the app.
+   */
+  private async loadPlatformFeesRow(): Promise<{
+    id: string;
+    platform_fee_percent: number;
+    delivery_flat_fee: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('platform_fees_config')
+      .select('id, platform_fee_percent, delivery_flat_fee, currency')
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to load platform fees configuration: ${error.message}`,
+      );
+    }
+
+    if (data) {
+      const row = data as {
+        id: string;
+        platform_fee_percent: number | null;
+        delivery_flat_fee: number | null;
+        currency: string | null;
+      };
+
+      return {
+        id: row.id,
+        platform_fee_percent: Number(row.platform_fee_percent ?? 0),
+        delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
+        currency: (row.currency as string | null) ?? 'XCD',
+      };
+    }
+
+    // Fallback: create a default row if none exists (defensive guard in case seed failed)
+    const { data: inserted, error: insertError } = await client
+      .from('platform_fees_config')
+      .insert({
+        platform_fee_percent: 5,
+        delivery_flat_fee: 20,
+        currency: 'XCD',
+      })
+      .select('id, platform_fee_percent, delivery_flat_fee, currency')
+      .single();
+
+    if (insertError || !inserted) {
+      throw new BadRequestException(
+        `Failed to initialize platform fees configuration: ${
+          insertError?.message ?? 'Unknown error'
+        }`,
+      );
+    }
+
+    const row = inserted as {
+      id: string;
+      platform_fee_percent: number | null;
+      delivery_flat_fee: number | null;
+      currency: string | null;
+    };
+
+    return {
+      id: row.id,
+      platform_fee_percent: Number(row.platform_fee_percent ?? 0),
+      delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
+      currency: (row.currency as string | null) ?? 'XCD',
+    };
+  }
+
+  async getPlatformFeesSettings(): Promise<PlatformFeesSettings> {
+    const row = await this.loadPlatformFeesRow();
+    return {
+      platformFeePercent: Number(row.platform_fee_percent ?? 0),
+      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0),
+      currency: row.currency || 'XCD',
+    };
+  }
+
+  async updatePlatformFeesSettings(input: {
+    platformFeePercent?: number;
+    deliveryFlatFee?: number;
+    currency?: string;
+  }): Promise<PlatformFeesSettings> {
+    const client = this.supabase.getClient();
+    const row = await this.loadPlatformFeesRow();
+
+    const patch: Record<string, unknown> = {};
+
+    if (typeof input.platformFeePercent === 'number') {
+      if (input.platformFeePercent < 0) {
+        throw new BadRequestException('Platform fee percent must be >= 0');
+      }
+      patch.platform_fee_percent = input.platformFeePercent;
+    }
+
+    if (typeof input.deliveryFlatFee === 'number') {
+      if (input.deliveryFlatFee < 0) {
+        throw new BadRequestException('Delivery fee must be >= 0');
+      }
+      patch.delivery_flat_fee = input.deliveryFlatFee;
+    }
+
+    if (typeof input.currency === 'string' && input.currency.trim()) {
+      patch.currency = input.currency.trim().toUpperCase();
+    }
+
+    if (Object.keys(patch).length > 0) {
+      const { error } = await client
+        .from('platform_fees_config')
+        .update(patch)
+        .eq('id', row.id);
+
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update platform fees configuration: ${error.message}`,
+        );
+      }
+    }
+
+    return this.getPlatformFeesSettings();
   }
 
   private async getOrganizationAdminContact(orgId: string): Promise<{
@@ -345,6 +484,9 @@ export class AdminService {
   async getDashboardSummary(): Promise<AdminDashboardSummary> {
     const client = this.supabase.getClient();
 
+    // Load current platform fees config (used to normalize offline orders)
+    const platformFees = await this.getPlatformFeesSettings();
+
     // Buyers count (active only)
     const { count: buyersCount, error: buyersError } = await client
       .from('organizations')
@@ -371,51 +513,77 @@ export class AdminService {
       );
     }
 
-    // Orders stats
+    // Orders stats (includes online + offline flows)
     const { data: orderStatsRaw, error: ordersError } = await client
       .from('orders')
-      .select('status, total_amount')
-      .in('status', [
-        'pending',
-        'accepted',
-        'processing',
-        'shipped',
-        'delivered',
-        'completed',
-        'cancelled',
-        'disputed',
-      ]);
+      .select(
+        'status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount',
+      );
 
     const orderStats = ordersError || !orderStatsRaw ? [] : orderStatsRaw;
 
     let completedOrders = 0;
     let currentOrders = 0;
     let totalVolume = 0;
+    let derivedPlatformFees = 0;
 
     (orderStats || []).forEach((o: any) => {
       const status = (o.status as string) ?? '';
-      const amount = Number(o.total_amount ?? 0);
-      totalVolume += amount;
+      const paymentStatus = (o.payment_status as string) ?? '';
+      const totalAmount = Number(o.total_amount ?? 0);
+      const subtotal = Number(o.subtotal ?? 0);
+      const shipping = Number(o.shipping_amount ?? 0);
+      const tax = Number(o.tax_amount ?? 0);
+      const discount = Number(o.discount_amount ?? 0);
 
-      if (status === 'delivered' || status === 'completed') {
+      if (
+        (status === 'delivered' || status === 'completed') &&
+        paymentStatus === 'paid'
+      ) {
         completedOrders += 1;
-      } else if (status !== 'cancelled' && status !== 'disputed') {
+      } else if (
+        status !== 'cancelled' &&
+        status !== 'disputed' &&
+        paymentStatus !== 'failed'
+      ) {
         currentOrders += 1;
+      }
+
+      // For offline orders, the platform (transaction) fee is baked into
+      // total_amount. For paid orders, derive metrics as either:
+      //  - config-based calculation (for orders that clearly use the platform
+      //    fee config), or
+      //  - residual above subtotal + shipping + tax - discount.
+      if (paymentStatus === 'paid') {
+        let volumeContribution = 0;
+        let feeContribution = 0;
+
+        const isUsingPlatformFees =
+          !!platformFees &&
+          shipping > 0 &&
+          Math.abs(shipping * 2 - platformFees.deliveryFlatFee) < 0.01;
+
+        if (isUsingPlatformFees) {
+          const buyerDelivery = shipping;
+          const platformFeeFromConfig = Number(
+            ((subtotal * platformFees.platformFeePercent) / 100).toFixed(2),
+          );
+          volumeContribution = subtotal + buyerDelivery + platformFeeFromConfig;
+          feeContribution = platformFeeFromConfig;
+        } else {
+          volumeContribution = totalAmount;
+          const residual = totalAmount - (subtotal + shipping + tax - discount);
+          if (residual > 0.005) {
+            feeContribution = residual;
+          }
+        }
+
+        totalVolume += volumeContribution;
+        derivedPlatformFees += feeContribution;
       }
     });
 
-    // Platform fees from transactions
-    const { data: feeRowsRaw, error: feesError } = await client
-      .from('transactions')
-      .select('platform_fee');
-
-    const feeRows = feesError || !feeRowsRaw ? [] : feeRowsRaw;
-
-    const totalPlatformFees =
-      feeRows.reduce(
-        (sum: number, row: any) => sum + Number(row.platform_fee ?? 0),
-        0,
-      ) ?? 0;
+    const totalPlatformFees = derivedPlatformFees;
 
     return {
       totalBuyers: buyersCount || 0,
@@ -1108,6 +1276,20 @@ export class AdminService {
     );
   }
 
+  async updateSellerProduct(
+    orgId: string,
+    productId: string,
+    dto: UpdateProductDto,
+    adminUserId: string,
+  ): Promise<ProductResponseDto> {
+    return this.sellersService.updateProduct(
+      orgId,
+      productId,
+      dto,
+      adminUserId,
+    );
+  }
+
   async createSellerProduct(
     orgId: string,
     dto: CreateProductDto,
@@ -1470,10 +1652,13 @@ export class AdminService {
 
     const client = this.supabase.getClient();
 
+    // Load platform fees config so we can normalize totals for offline orders
+    const platformFees = await this.getPlatformFeesSettings();
+
     let builder = client
       .from('orders')
       .select(
-        'id, order_number, status, payment_status, total_amount, currency, buyer_org_id, seller_org_id, created_at, driver_user_id, assigned_driver_at',
+        'id, order_number, status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, buyer_org_id, seller_org_id, created_at, driver_user_id, assigned_driver_at',
         { count: 'exact' },
       );
 
@@ -1533,22 +1718,51 @@ export class AdminService {
       );
     }
 
-    const orders: AdminOrderSummary[] = ordersRaw.map((o) => ({
-      id: o.id as string,
-      orderNumber: String(o.order_number ?? o.id),
-      status: o.status as string,
-      paymentStatus: o.payment_status as string,
-      totalAmount: Number(o.total_amount ?? 0),
-      currency: (o.currency as string) ?? 'XCD',
-      createdAt: o.created_at as string,
-      buyerOrgId: (o.buyer_org_id as string) ?? undefined,
-      buyerOrgName: orgById[(o.buyer_org_id as string) ?? '']?.name ?? null,
-      sellerOrgId: (o.seller_org_id as string) ?? undefined,
-      sellerOrgName: orgById[(o.seller_org_id as string) ?? '']?.name ?? null,
-      driverUserId: (o.driver_user_id as string | null) ?? null,
-      driverName: null,
-      assignedDriverAt: (o.assigned_driver_at as string | null) ?? null,
-    }));
+    const orders: AdminOrderSummary[] = ordersRaw.map((o) => {
+      const subtotal = Number(o.subtotal ?? 0);
+      const shippingAmount = Number(o.shipping_amount ?? 0);
+      const taxAmount = Number(o.tax_amount ?? 0);
+      const discountAmount = Number(o.discount_amount ?? 0);
+      const storedTotal = Number(o.total_amount ?? 0);
+
+      // If this order matches the current platform fees config (offline flow),
+      // compute the buyer-paid total as subtotal + buyer delivery share +
+      // transaction fee from config; otherwise fall back to stored total.
+      const isUsingPlatformFees =
+        !!platformFees &&
+        shippingAmount > 0 &&
+        Math.abs(shippingAmount * 2 - platformFees.deliveryFlatFee) < 0.01;
+
+      let displayTotal = storedTotal;
+
+      if (isUsingPlatformFees) {
+        const buyerDelivery = shippingAmount;
+        const txFeeFromConfig = Number(
+          ((subtotal * platformFees.platformFeePercent) / 100).toFixed(2),
+        );
+        displayTotal = subtotal + buyerDelivery + txFeeFromConfig;
+      } else if (storedTotal === 0 && subtotal > 0) {
+        // Fallback: derive from basic math when total wasn't stored correctly.
+        displayTotal = subtotal + shippingAmount + taxAmount - discountAmount;
+      }
+
+      return {
+        id: o.id as string,
+        orderNumber: String(o.order_number ?? o.id),
+        status: o.status as string,
+        paymentStatus: o.payment_status as string,
+        totalAmount: displayTotal,
+        currency: (o.currency as string) ?? 'XCD',
+        createdAt: o.created_at as string,
+        buyerOrgId: (o.buyer_org_id as string) ?? undefined,
+        buyerOrgName: orgById[(o.buyer_org_id as string) ?? '']?.name ?? null,
+        sellerOrgId: (o.seller_org_id as string) ?? undefined,
+        sellerOrgName: orgById[(o.seller_org_id as string) ?? '']?.name ?? null,
+        driverUserId: (o.driver_user_id as string | null) ?? null,
+        driverName: null,
+        assignedDriverAt: (o.assigned_driver_at as string | null) ?? null,
+      };
+    });
 
     // Optional basic text search over orderNumber / org names
     const searched = search
@@ -1567,6 +1781,187 @@ export class AdminService {
       total: count || 0,
       page,
       limit,
+    };
+  }
+
+  async createOfflineOrder(
+    input: AdminCreateOfflineOrderDto,
+  ): Promise<{ id: string; order_number: string }> {
+    const client = this.supabase.getClient();
+
+    if (!input.seller_org_id || !input.buyer_org_id) {
+      throw new BadRequestException(
+        'buyer_org_id and seller_org_id are required',
+      );
+    }
+
+    // Ensure buyer organization exists and is a buyer
+    const { data: buyerOrg } = await client
+      .from('organizations')
+      .select('id')
+      .eq('id', input.buyer_org_id)
+      .eq('account_type', 'buyer')
+      .maybeSingle();
+
+    if (!buyerOrg) {
+      throw new BadRequestException('Buyer organization not found');
+    }
+
+    // Ensure seller organization exists and is a seller
+    const { data: sellerOrg } = await client
+      .from('organizations')
+      .select('id')
+      .eq('id', input.seller_org_id)
+      .eq('account_type', 'seller')
+      .maybeSingle();
+
+    if (!sellerOrg) {
+      throw new BadRequestException('Seller organization not found');
+    }
+
+    const now = new Date();
+    const orderNumber = `ORD-${now.getTime()}-${Math.random()
+      .toString(36)
+      .substr(2, 4)
+      .toUpperCase()}`;
+
+    // Compute subtotal from optional line items or fallback to provided amount
+    const rawLineItems = Array.isArray(input.line_items)
+      ? input.line_items
+      : [];
+
+    const hasLineItems = rawLineItems.length > 0;
+
+    let subtotal = 0;
+
+    if (hasLineItems) {
+      for (const item of rawLineItems) {
+        if (
+          !item.product_id ||
+          !item.product_name ||
+          !item.quantity ||
+          !item.unit_price ||
+          Number(item.quantity) <= 0 ||
+          Number(item.unit_price) <= 0
+        ) {
+          throw new BadRequestException(
+            'Each product must have a product_id, name, quantity, and cost per unit greater than zero',
+          );
+        }
+        subtotal += Number(item.unit_price) * Number(item.quantity);
+      }
+    } else {
+      const amount = Number(input.amount);
+      if (!amount || amount <= 0) {
+        throw new BadRequestException(
+          'Amount must be a number greater than zero',
+        );
+      }
+      subtotal = amount;
+    }
+
+    if (!subtotal || subtotal <= 0) {
+      throw new BadRequestException(
+        'Total amount must be greater than zero for offline order',
+      );
+    }
+    const hasShippingAddress =
+      input.shipping_address && input.shipping_address.line1;
+
+    // Use platform fees configuration. For offline orders recorded in the admin
+    // panel, we treat the delivery fee as split between buyer and seller, while
+    // the transaction fee (platform fee) is fully paid by the buyer.
+    const platformFees = await this.getPlatformFeesSettings();
+    const taxAmount = 0;
+    const discountAmount = 0;
+
+    const fullDeliveryFee = hasShippingAddress
+      ? platformFees.deliveryFlatFee
+      : 0;
+    const buyerDeliveryAmount = fullDeliveryFee
+      ? Number((fullDeliveryFee / 2).toFixed(2))
+      : 0;
+
+    // Entire platform fee is paid by the buyer (applied on items subtotal)
+    const platformFeeAmount = Number(
+      (subtotal * (platformFees.platformFeePercent / 100)).toFixed(2),
+    );
+
+    const totalAmount = subtotal + buyerDeliveryAmount + platformFeeAmount;
+
+    const shippingAddressSnapshot = hasShippingAddress
+      ? {
+          contact_name: null,
+          line1: input.shipping_address.line1,
+          line2: input.shipping_address.line2,
+          city: input.shipping_address.city,
+          state: input.shipping_address.state,
+          postal_code: input.shipping_address.postal_code,
+          country: input.shipping_address.country,
+        }
+      : null;
+
+    const { data: order, error } = await client
+      .from('orders')
+      .insert({
+        order_number: orderNumber,
+        buyer_org_id: input.buyer_org_id,
+        seller_org_id: input.seller_org_id,
+        status: input.status || 'delivered',
+        payment_status: input.payment_status || 'paid',
+        subtotal,
+        tax_amount: taxAmount,
+        // Only the buyer-facing portion of delivery is stored in shipping_amount
+        shipping_amount: buyerDeliveryAmount,
+        discount_amount: discountAmount,
+        // Buyer-paid total: subtotal + buyer delivery share + transaction fee
+        total_amount: totalAmount,
+        currency: (input.currency || 'XCD').toUpperCase(),
+        shipping_address: shippingAddressSnapshot,
+        billing_address: shippingAddressSnapshot,
+        buyer_notes: input.description,
+        estimated_delivery_date: input.delivery_date || null,
+      })
+      .select('id, order_number')
+      .single();
+
+    if (error || !order) {
+      throw new BadRequestException(
+        `Failed to create offline order: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    // Optionally attach basic order_items rows so reviews and detail views
+    // have product-level context
+    if (hasLineItems) {
+      const itemsToInsert = rawLineItems.map((item) => ({
+        order_id: order.id as string,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        unit_price: Number(item.unit_price),
+        quantity: Number(item.quantity),
+        total_price: Number(item.unit_price) * Number(item.quantity),
+        product_snapshot: item.unit ? { unit: item.unit } : null,
+      }));
+
+      const { error: itemsError } = await client
+        .from('order_items')
+        .insert(itemsToInsert);
+
+      if (itemsError) {
+        // Do not block the main offline order creation if item rows fail;
+        // the core order header is still valuable for admin reporting.
+        // eslint-disable-next-line no-console
+        console.error(
+          'Failed to create offline order items',
+          itemsError.message,
+        );
+      }
+    }
+
+    return {
+      id: order.id as string,
+      order_number: String(order.order_number ?? order.id),
     };
   }
 
@@ -2539,6 +2934,94 @@ export class AdminService {
       isActive: Boolean(data.is_active),
       createdAt: data.created_at as string,
     };
+  }
+
+  async updateAdminUser(
+    id: string,
+    dto: UpdateAdminUserDto,
+  ): Promise<AdminUserResponseDto> {
+    const client = this.supabase.getClient();
+
+    // Only allow admin or super_admin roles to be assigned via this endpoint
+    if (
+      dto.role &&
+      dto.role !== UserRole.ADMIN &&
+      dto.role !== UserRole.SUPER_ADMIN
+    ) {
+      throw new BadRequestException(
+        'Only admin or super_admin roles can be assigned via this endpoint',
+      );
+    }
+
+    const patch: Record<string, unknown> = {};
+
+    if (dto.email !== undefined) patch.email = dto.email;
+    if (dto.fullname !== undefined) patch.fullname = dto.fullname;
+    if (dto.role !== undefined) patch.role = dto.role;
+    if (dto.phoneNumber !== undefined) patch.phone_number = dto.phoneNumber;
+    if (dto.isActive !== undefined) patch.is_active = dto.isActive;
+
+    if (dto.password !== undefined) {
+      const saltRounds = 12;
+      patch.password = await bcrypt.hash(dto.password, saltRounds);
+    }
+
+    const { data, error } = await client
+      .from('users')
+      .update(patch)
+      .eq('id', id)
+      .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
+      .select('id, email, fullname, role, is_active, created_at, last_login')
+      .single();
+
+    if (error || !data) {
+      // Map unique constraint violation to a friendlier message
+      const pgCode = (error as any)?.code as string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
+      if (pgCode === '23505') {
+        throw new BadRequestException('A user with this email already exists');
+      }
+
+      throw new BadRequestException(
+        `Failed to update admin user: ${
+          (error as any)?.message ?? 'Unknown error'
+        }`,
+      );
+    }
+
+    return {
+      id: data.id as string,
+      email: data.email as string,
+      fullname: data.fullname as string,
+      role: data.role as UserRole,
+      isActive: Boolean(data.is_active),
+      createdAt: data.created_at as string,
+      lastLogin: (data.last_login as string | null) ?? null,
+    };
+  }
+
+  async deleteAdminUser(id: string): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('users')
+      .update({ is_active: false })
+      .eq('id', id)
+      .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to delete admin user: ${error?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    // Best-effort removal from Supabase Auth so the admin no longer appears
+    // in the Supabase Authentication user list. Failures here should not
+    // block the primary soft-delete behaviour.
+    await this.supabase.deleteAuthUser(id);
+
+    return { success: true };
   }
 
   // ===== User WhatsApp helpers (admin-triggered) =====

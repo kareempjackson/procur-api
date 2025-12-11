@@ -7,6 +7,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsBoolean } from 'class-validator';
 import { UserRole } from '../../common/enums/user-role.enum';
 
 export class AdminUserResponseDto {
@@ -64,4 +65,48 @@ export class CreateAdminUserDto {
   @IsOptional()
   @IsString()
   phoneNumber?: string;
+}
+
+export class UpdateAdminUserDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsEmail()
+  email?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  fullname?: string;
+
+  @ApiPropertyOptional({
+    enum: UserRole,
+    description: 'Updated role for the admin user (admin or super_admin)',
+  })
+  @IsOptional()
+  @IsEnum(UserRole)
+  role?: UserRole;
+
+  @ApiPropertyOptional({
+    minLength: 8,
+    description:
+      'Optional new password for the admin (min 8 characters). If omitted, password is unchanged.',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  password?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  phoneNumber?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Whether the admin account is active. Setting to false effectively disables admin access.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
 }
