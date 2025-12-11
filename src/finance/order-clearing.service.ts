@@ -69,8 +69,8 @@ export class OrderClearingService {
     const { data: buyerTxnNumRaw, error: buyerTxnErr } = await client.rpc(
       'generate_transaction_number',
     );
-    const buyerTxnNum = buyerTxnNumRaw as string | null;
-    if (buyerTxnErr || !buyerTxnNum || typeof buyerTxnNum !== 'string') {
+    const buyerTxnNum = buyerTxnNumRaw ?? null;
+    if (buyerTxnErr || !buyerTxnNum) {
       throw new BadRequestException(
         `Failed to generate buyer transaction number: ${buyerTxnErr?.message ?? 'unknown'}`,
       );
@@ -79,8 +79,8 @@ export class OrderClearingService {
     const { data: payoutTxnNumRaw, error: payoutTxnErr } = await client.rpc(
       'generate_transaction_number',
     );
-    const payoutTxnNum = payoutTxnNumRaw as string | null;
-    if (payoutTxnErr || !payoutTxnNum || typeof payoutTxnNum !== 'string') {
+    const payoutTxnNum = payoutTxnNumRaw ?? null;
+    if (payoutTxnErr || !payoutTxnNum) {
       throw new BadRequestException(
         `Failed to generate payout transaction number: ${payoutTxnErr?.message ?? 'unknown'}`,
       );
@@ -570,8 +570,7 @@ export class OrderClearingService {
                 fullname?: string | null;
               };
               buyerEmail = buyerEmail ?? typedUser.email ?? null;
-              buyerContactName =
-                buyerContactName ?? typedUser.fullname ?? null;
+              buyerContactName = buyerContactName ?? typedUser.fullname ?? null;
             }
           }
         }
@@ -817,9 +816,7 @@ export class OrderClearingService {
 
           const sellerUserIds =
             (orgUsers || [])
-              .map(
-                (row) => (row as { user_id?: string | null }).user_id ?? null,
-              )
+              .map((row: { user_id: string | null }) => row.user_id ?? null)
               .filter((id): id is string => Boolean(id)) || [];
 
           if (sellerUserIds.length > 0) {
