@@ -1,6 +1,6 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule, seconds } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -31,6 +31,7 @@ import { AuditModule } from './audit/audit.module';
 import { BankInfoModule } from './bank-info/bank-info.module';
 import { PaymentLinksModule } from './payment-links/payment-links.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
+import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.filter';
 
 @Module({
   imports: [
@@ -70,6 +71,10 @@ import { MarketplaceModule } from './marketplace/marketplace.module';
   controllers: [AppController, HealthController],
   providers: [
     AppService,
+    {
+      provide: APP_FILTER,
+      useClass: SentryAllExceptionsFilter,
+    },
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

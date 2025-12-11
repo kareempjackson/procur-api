@@ -58,4 +58,11 @@ export default () => ({
   turnstile: {
     secret: process.env.TURNSTILE_SECRET,
   },
+  sentry: {
+    dsn: process.env.SENTRY_DSN,
+    tracesSampleRate: parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE || '0'),
+    profilesSampleRate: parseFloat(
+      process.env.SENTRY_PROFILES_SAMPLE_RATE || '0',
+    ),
+  },
 });

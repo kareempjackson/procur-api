@@ -85,6 +85,24 @@ export class EnvironmentVariables {
   @IsString()
   @IsOptional()
   TURNSTILE_SECRET?: string;
+
+  @IsString()
+  @IsOptional()
+  SENTRY_DSN?: string;
+
+  @IsNumber()
+  @Transform(({ value }) =>
+    value !== undefined && value !== null ? parseFloat(value) : undefined,
+  )
+  @IsOptional()
+  SENTRY_TRACES_SAMPLE_RATE?: number;
+
+  @IsNumber()
+  @Transform(({ value }) =>
+    value !== undefined && value !== null ? parseFloat(value) : undefined,
+  )
+  @IsOptional()
+  SENTRY_PROFILES_SAMPLE_RATE?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

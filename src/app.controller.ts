@@ -18,4 +18,19 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  @Public()
+  @Get('debug-sentry')
+  @ApiOperation({
+    summary: 'Trigger a test error for Sentry',
+    description:
+      'Throws an error to verify that Sentry is correctly capturing exceptions.',
+  })
+  @ApiResponse({
+    status: 500,
+    description: 'Intentional error used to test Sentry integration',
+  })
+  getError() {
+    throw new Error('My first Sentry error!');
+  }
 }

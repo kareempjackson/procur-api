@@ -4,6 +4,23 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { json, raw } from 'express';
+import * as Sentry from '@sentry/node';
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV || 'development',
+  tracesSampleRate:
+    process.env.SENTRY_TRACES_SAMPLE_RATE !== undefined
+      ? Number(process.env.SENTRY_TRACES_SAMPLE_RATE)
+      : 0,
+  profilesSampleRate:
+    process.env.SENTRY_PROFILES_SAMPLE_RATE !== undefined
+      ? Number(process.env.SENTRY_PROFILES_SAMPLE_RATE)
+      : 0,
+  release: process.env.npm_package_version
+    ? `procur-api@${process.env.npm_package_version}`
+    : undefined,
+});
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
