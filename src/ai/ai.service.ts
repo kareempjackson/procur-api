@@ -1,46 +1,72 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import OpenAI from 'openai';
-import { SupabaseService } from '../database/supabase.service';
-import { OpenAIEmbeddings, ChatOpenAI } from '@langchain/openai';
-import { z } from 'zod';
+import { ChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
 import IORedis from 'ioredis';
+import OpenAI from 'openai';
+import { z } from 'zod';
+
+import { SupabaseService } from '../database/supabase.service';
+
+type Metadata = Record<string, unknown>;
+
+interface UpsertEmbeddingParams {
+  orgId: string;
+  scope: string;
+  refId?: string;
+  title?: string;
+  content: string;
+  metadata?: Metadata;
+}
+
+interface SearchResult {
+  id: string;
+  scope: string;
+  ref_id: string | null;
+  title: string | null;
+  content: string;
+  metadata: Metadata | null;
+  score: number;
+}
+
+interface RagAnswer {
+  answer: string;
+  citations: Array<{ title: string; ref_id: string | null }>;
+}
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private client?: OpenAI;
-  private embeddingModel = 'text-embedding-3-small';
-  private chatModel = 'gpt-4o-mini';
+  private readonly embeddingModel = 'text-embedding-3-small';
+  private readonly chatModel = 'gpt-4o-mini';
 
   constructor(
     private readonly config: ConfigService,
     private readonly supabase: SupabaseService,
     @Inject('REDIS') private readonly redis: IORedis,
   ) {
-    const key = this.config.get<string>('OPENAI_API_KEY');
-    if (key) {
-      this.client = new OpenAI({ apiKey: key });
-    } else {
+    const apiKey = this.config.get<string>('OPENAI_API_KEY');
+    if (!apiKey) {
       this.logger.warn('OPENAI_API_KEY not set; AI features are disabled.');
+      return;
     }
+
+    this.client = new OpenAI({ apiKey });
   }
 
   private ensureClient(): OpenAI {
     if (!this.client) {
-      const key = this.config.get<string>('OPENAI_API_KEY');
-      if (!key) throw new Error('OPENAI_API_KEY missing');
-      this.client = new OpenAI({ apiKey: key });
+      const apiKey = this.config.get<string>('OPENAI_API_KEY');
+      if (!apiKey) {
+        throw new Error('OPENAI_API_KEY missing');
+      }
+      this.client = new OpenAI({ apiKey });
     }
-    const client = this.client;
-    if (!client) {
-      throw new Error('OPENAI client not initialized');
-    }
-    return client;
+
+    return this.client;
   }
 
   async embed(text: string): Promise<number[]> {
-    // Prefer LangChain embeddings for consistency with RAG
     const apiKey = this.config.get<string>('OPENAI_API_KEY');
     if (apiKey) {
       const emb = new OpenAIEmbeddings({
@@ -48,9 +74,9 @@ export class AiService {
         model: this.embeddingModel,
       });
       const vec = await emb.embedQuery(text);
-      return vec as unknown as number[];
+      return vec;
     }
-    // Fallback to direct OpenAI client if needed
+
     const client = this.ensureClient();
     const res = await client.embeddings.create({
       model: this.embeddingModel,
@@ -59,17 +85,10 @@ export class AiService {
     return res.data[0].embedding as unknown as number[];
   }
 
-  async upsertEmbedding(params: {
-    orgId: string;
-    scope: string;
-    refId?: string;
-    title?: string;
-    content: string;
-    metadata?: Record<string, any>;
-  }) {
+  async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
     const embedding = await this.embed(params.content);
     const client = this.supabase.getClient();
-    // Simple strategy: delete existing row for same org/scope/refId, then insert
+
     if (params.refId) {
       await client
         .from('ai_embeddings')
@@ -97,28 +116,9 @@ export class AiService {
     scopes: string[];
     query: string;
     k?: number;
-  }): Promise<
-    Array<{
-      id: string;
-      scope: string;
-      ref_id: string | null;
-      title: string | null;
-      content: string;
-      metadata: any;
-      score: number;
-    }>
-  > {
+  }): Promise<SearchResult[]> {
     const queryEmbedding = await this.embed(params.query);
     const client = this.supabase.getClient();
-    type SearchRow = {
-      id: string;
-      scope: string;
-      ref_id: string | null;
-      title: string | null;
-      content: string;
-      metadata: any;
-      score: number;
-    };
     const result = await client.rpc('search_ai_embeddings', {
       p_org: params.orgId,
       p_scopes: params.scopes,
@@ -130,7 +130,7 @@ export class AiService {
       return [];
     }
     if (Array.isArray(result.data)) {
-      return result.data as SearchRow[];
+      return result.data as SearchResult[];
     }
     return [];
   }
@@ -140,18 +140,9 @@ export class AiService {
     scopes: string[];
     question: string;
     k?: number;
-  }) {
+  }): Promise<SearchResult[]> {
     const queryEmbedding = await this.embed(params.question);
     const client = this.supabase.getClient();
-    type SearchRow = {
-      id: string;
-      scope: string;
-      ref_id: string | null;
-      title: string | null;
-      content: string;
-      metadata: any;
-      score: number;
-    };
     const result = await client.rpc('search_ai_embeddings_hybrid', {
       p_org: params.orgId,
       p_scopes: params.scopes,
@@ -161,10 +152,10 @@ export class AiService {
     });
     if (result.error) {
       this.logger.error('search_ai_embeddings_hybrid failed', result.error);
-      return [] as SearchRow[];
+      return [];
     }
     if (Array.isArray(result.data)) {
-      return result.data as SearchRow[];
+      return result.data as SearchResult[];
     }
     return [];
   }
@@ -173,11 +164,7 @@ export class AiService {
     orgId: string;
     question: string;
     scopes: string[];
-  }): Promise<{
-    answer: string;
-    citations: Array<{ title: string; ref_id: string | null }>;
-  }> {
-    // Cache key
+  }): Promise<RagAnswer> {
     const cacheKey = `rag:${params.orgId}:${params.scopes.join(',')}:${params.question
       .toLowerCase()
       .trim()}`;
@@ -194,7 +181,6 @@ export class AiService {
       }
     }
 
-    // Prefer hybrid search
     let contexts = await this.hybridSearch({
       orgId: params.orgId,
       scopes: params.scopes,
@@ -259,16 +245,10 @@ export class AiService {
       currency: z.string().nullable(),
       unit: z.string().nullable(),
     });
-    const llm = new ChatOpenAI({
-      modelName: this.chatModel,
-      temperature: 0.2,
-      apiKey: this.config.get<string>('OPENAI_API_KEY'),
-    });
-    const model = llm.withStructuredOutput(schema);
-    const res = await model.invoke(
+    return this.invokeStructuredModel(
+      schema,
       `Extract product fields. If unit missing, omit it. Text: ${text}`,
     );
-    return res as any;
   }
 
   async extractHarvest(text: string): Promise<{
@@ -285,16 +265,10 @@ export class AiService {
       expected_harvest_window: z.string().nullable(),
       notes: z.string().nullable(),
     });
-    const llm = new ChatOpenAI({
-      modelName: this.chatModel,
-      temperature: 0.2,
-      apiKey: this.config.get<string>('OPENAI_API_KEY'),
-    });
-    const model = llm.withStructuredOutput(schema);
-    const res = await model.invoke(
+    return this.invokeStructuredModel(
+      schema,
       `Extract upcoming harvest info. Text: ${text}`,
     );
-    return res as any;
   }
 
   async extractQuote(text: string): Promise<{
@@ -313,14 +287,10 @@ export class AiService {
       delivery_date: z.string().nullable(),
       notes: z.string().nullable(),
     });
-    const llm = new ChatOpenAI({
-      modelName: this.chatModel,
-      temperature: 0.2,
-      apiKey: this.config.get<string>('OPENAI_API_KEY'),
-    });
-    const model = llm.withStructuredOutput(schema);
-    const res = await model.invoke(`Extract quote fields. Text: ${text}`);
-    return res as any;
+    return this.invokeStructuredModel(
+      schema,
+      `Extract quote fields. Text: ${text}`,
+    );
   }
 
   async extractOrderAction(text: string): Promise<{
@@ -339,16 +309,10 @@ export class AiService {
       status: z.string().nullable(),
       estimated_delivery_date: z.string().nullable(),
     });
-    const llm = new ChatOpenAI({
-      modelName: this.chatModel,
-      temperature: 0.2,
-      apiKey: this.config.get<string>('OPENAI_API_KEY'),
-    });
-    const model = llm.withStructuredOutput(schema);
-    const res = await model.invoke(
+    return this.invokeStructuredModel(
+      schema,
       `Extract order action fields: accept/reject/update. Text: ${text}`,
     );
-    return res as any;
   }
 
   async moderate(text: string): Promise<boolean> {
@@ -370,5 +334,25 @@ export class AiService {
       this.logger.warn('Moderation failed; allowing text', e as Error);
       return false;
     }
+  }
+
+  private async invokeStructuredModel<TSchema extends z.ZodType<unknown>>(
+    schema: TSchema,
+    prompt: string,
+  ): Promise<z.infer<TSchema>> {
+    const apiKey = this.config.get<string>('OPENAI_API_KEY');
+    if (!apiKey) {
+      throw new Error('OPENAI_API_KEY missing');
+    }
+    const llm = new ChatOpenAI({
+      modelName: this.chatModel,
+      temperature: 0.2,
+      apiKey,
+    });
+    const model = llm.withStructuredOutput(schema) as {
+      invoke: (input: string) => Promise<z.infer<TSchema>>;
+    };
+    const result = await model.invoke(prompt);
+    return schema.parse(result);
   }
 }
