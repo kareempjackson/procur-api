@@ -10,7 +10,10 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { SupabaseService } from '../database/supabase.service';
 import { EmailService } from '../email/email.service';
-import { DatabaseUser } from '../database/types/database.types';
+import {
+  DatabaseUser,
+  DatabaseUserWithOrganization,
+} from '../database/types/database.types';
 import { newId } from '../common/utils/id.utils';
 import { SignupDto } from './dto/signup.dto';
 import { SigninDto } from './dto/signin.dto';
@@ -35,19 +38,65 @@ import { CaptchaService } from '../common/utils/captcha.service';
 import { UserRole } from '../common/enums/user-role.enum';
 import type { UserContext } from '../common/interfaces/jwt-payload.interface';
 
+type InvitationRecord = {
+  id: string;
+  email: string;
+  organization_id: string;
+  role_id: string;
+  expires_at: string;
+  accepted_at: string | null;
+};
+
+type OrganizationUserRecord = {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  role_id: string;
+  is_active: boolean;
+};
+
+const isInvitationRecord = (value: unknown): value is InvitationRecord => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.email === 'string' &&
+    typeof record.organization_id === 'string' &&
+    typeof record.role_id === 'string'
+  );
+};
+
+const isOrganizationUserRecord = (
+  value: unknown,
+): value is OrganizationUserRecord => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === 'string' &&
+    typeof record.organization_id === 'string' &&
+    typeof record.user_id === 'string' &&
+    typeof record.role_id === 'string' &&
+    typeof record.is_active === 'boolean'
+  );
+};
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    private supabaseService: SupabaseService,
-    private emailService: EmailService,
-    private jwtService: JwtService,
-    private configService: ConfigService,
-    private captchaService: CaptchaService,
+    private readonly supabaseService: SupabaseService,
+    private readonly emailService: EmailService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly captchaService: CaptchaService,
     // Optional: present if WhatsappModule is loaded
-    private waSend?: WaSendService,
-    private waTemplates?: WaTemplateService,
+    private readonly waSend?: WaSendService,
+    private readonly waTemplates?: WaTemplateService,
   ) {}
 
   async signup(signupDto: SignupDto): Promise<SignupResponseDto> {
@@ -199,8 +248,9 @@ export class AuthService {
           code,
         );
       }
-    } catch (e) {
-      this.logger.error('Failed to deliver OTP', e as any);
+    } catch (e: unknown) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      this.logger.error('Failed to deliver OTP', error);
       // continue to hide delivery errors
     }
 
@@ -227,11 +277,12 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired code');
     }
 
-    await this.supabaseService.updateUser(user.id, {
-      email_verification_token: null as any,
-      email_verification_expires: null as any,
+    const verificationCleared = {
+      email_verification_token: null,
+      email_verification_expires: null,
       email_verified: true,
-    });
+    };
+    await this.supabaseService.updateUser(user.id, verificationCleared);
 
     // Get user with organization info if applicable
     const userWithOrg = await this.supabaseService.getUserWithOrganization(
@@ -639,19 +690,21 @@ export class AuthService {
     return 7 * 24 * 60 * 60;
   }
 
-  private extractOrganizationInfo(user: DatabaseUser, userWithOrg: any) {
+  private extractOrganizationInfo(
+    user: DatabaseUser,
+    userWithOrg: DatabaseUserWithOrganization | null,
+  ) {
     let organizationId: string | undefined;
     let organizationName: string | undefined;
     let organizationRole: string | undefined;
-    let accountType: AccountType | undefined =
-      user.individual_account_type as AccountType;
+    let accountType: AccountType | undefined = user.individual_account_type;
 
     if (userWithOrg?.organization_users?.[0]) {
       const orgUser = userWithOrg.organization_users[0];
       organizationId = orgUser.organization_id;
       organizationName = orgUser.organizations.name;
       organizationRole = orgUser.organization_roles.name;
-      accountType = orgUser.organizations.account_type as AccountType;
+      accountType = orgUser.organizations.account_type;
     }
 
     return { organizationId, organizationName, organizationRole, accountType };
@@ -674,21 +727,23 @@ export class AuthService {
     const nowIso = new Date().toISOString();
 
     // 1) Look up invitation
-    const { data: invite, error: inviteError } = await client
+    const inviteResult = await client
       .from('organization_invitations')
       .select('*')
       .eq('token', token)
       .gt('expires_at', nowIso)
       .is('accepted_at', null)
       .single();
+    const inviteData: unknown = inviteResult.data;
+    const inviteError = inviteResult.error;
 
-    if (inviteError || !invite) {
+    const inviteCandidate: unknown = inviteData;
+    if (inviteError || !isInvitationRecord(inviteCandidate)) {
       throw new BadRequestException('Invalid or expired invitation');
     }
 
-    const email: string = invite.email;
-    const organizationId: string = invite.organization_id;
-    const roleId: string = invite.role_id;
+    const invite = inviteCandidate;
+    const { email, organization_id: organizationId, role_id: roleId } = invite;
 
     // 2) Check if user already exists
     let user = await this.supabaseService.findUserByEmail(email);
@@ -706,11 +761,11 @@ export class AuthService {
         phone_number: undefined,
         country: undefined,
         // Invitation-based accounts skip separate email verification
-        email_verification_token: null as any,
+        email_verification_token: newId(),
         email_verification_expires: new Date(),
       };
 
-      user = await this.supabaseService.createUser(userData as any);
+      user = await this.supabaseService.createUser(userData);
 
       // Mark email as verified
       await this.supabaseService.updateUser(user.id, {
@@ -726,19 +781,23 @@ export class AuthService {
 
     // 3) Ensure membership in organization with the invited role
     const supabase = this.supabaseService.getClient();
-    const { data: existingMembership, error: membershipErr } = await supabase
+    const membershipResult = await supabase
       .from('organization_users')
       .select('*')
       .eq('organization_id', organizationId)
       .eq('user_id', user.id)
       .maybeSingle();
+    const existingMembershipData: unknown = membershipResult.data;
+    const membershipErr = membershipResult.error;
 
     if (membershipErr) {
       this.logger.error('Error checking existing membership:', membershipErr);
       throw new BadRequestException('Failed to attach user to organization');
     }
 
-    if (!existingMembership) {
+    const membershipCandidate: unknown = existingMembershipData;
+
+    if (!membershipCandidate) {
       const { error: createErr } = await supabase
         .from('organization_users')
         .insert({
@@ -754,11 +813,13 @@ export class AuthService {
         );
         throw new BadRequestException('Failed to attach user to organization');
       }
-    } else if (!existingMembership.is_active) {
+    } else if (!isOrganizationUserRecord(membershipCandidate)) {
+      throw new BadRequestException('Membership record is malformed');
+    } else if (!membershipCandidate.is_active) {
       const { error: reactivateErr } = await supabase
         .from('organization_users')
         .update({ is_active: true, role_id: roleId })
-        .eq('id', existingMembership.id);
+        .eq('id', membershipCandidate.id);
       if (reactivateErr) {
         this.logger.error(
           'Error reactivating membership from invitation:',

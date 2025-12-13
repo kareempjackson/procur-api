@@ -12,7 +12,7 @@ import { UserRole } from '../../common/enums/user-role.enum';
 export class PermissionsGuard implements CanActivate {
   private readonly logger = new Logger(PermissionsGuard.name);
 
-  constructor(private reflector: Reflector) {}
+  constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
     // Check if route is marked as public
@@ -39,8 +39,10 @@ export class PermissionsGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user: UserContext = request.user;
+    const request = context.switchToHttp().getRequest<{
+      user?: UserContext;
+    }>();
+    const { user } = request;
 
     if (!user) {
       throw new ForbiddenException('User not authenticated');

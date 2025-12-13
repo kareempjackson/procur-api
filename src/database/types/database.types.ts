@@ -2,8 +2,8 @@ import { UserRole } from '../../common/enums/user-role.enum';
 import { AccountType } from '../../common/enums/account-type.enum';
 import { OrganizationStatus } from '../../common/enums/organization-status.enum';
 import {
-  BuyerBusinessType,
-  SellerBusinessType,
+  // BuyerBusinessType,
+  // SellerBusinessType,
   BusinessType,
 } from '../../common/enums/business-types.enum';
 
@@ -99,8 +99,8 @@ export interface CreateUserData {
 }
 
 export interface UpdateUserData {
-  email_verification_token?: string;
-  email_verification_expires?: string;
+  email_verification_token?: string | null;
+  email_verification_expires?: string | null;
   email_verified?: boolean;
   last_login?: string;
 }

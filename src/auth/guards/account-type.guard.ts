@@ -10,7 +10,7 @@ import { UserContext } from '../../common/interfaces/jwt-payload.interface';
 
 @Injectable()
 export class AccountTypeGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
+  constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
     const requiredAccountTypes = this.reflector.getAllAndOverride<
@@ -21,8 +21,10 @@ export class AccountTypeGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user: UserContext = request.user;
+    const request = context.switchToHttp().getRequest<{
+      user?: UserContext;
+    }>();
+    const { user } = request;
 
     if (!user) {
       throw new ForbiddenException('User not authenticated');

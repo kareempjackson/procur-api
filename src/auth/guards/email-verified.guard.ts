@@ -9,7 +9,7 @@ import { UserContext } from '../../common/interfaces/jwt-payload.interface';
 
 @Injectable()
 export class EmailVerifiedGuard implements CanActivate {
-  constructor(private reflector: Reflector) {}
+  constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
     // Check if route is marked as public
@@ -32,8 +32,10 @@ export class EmailVerifiedGuard implements CanActivate {
       return true;
     }
 
-    const request = context.switchToHttp().getRequest();
-    const user: UserContext = request.user;
+    const request = context.switchToHttp().getRequest<{
+      user?: UserContext;
+    }>();
+    const { user } = request;
 
     if (!user) {
       throw new ForbiddenException('User not authenticated');

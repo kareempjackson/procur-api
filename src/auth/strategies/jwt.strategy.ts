@@ -13,8 +13,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   private readonly logger = new Logger(JwtStrategy.name);
 
   constructor(
-    private configService: ConfigService,
-    private supabaseService: SupabaseService,
+    private readonly configService: ConfigService,
+    private readonly supabaseService: SupabaseService,
   ) {
     const jwtSecret = configService.get<string>('jwt.secret');
     if (!jwtSecret) {
@@ -29,44 +29,40 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload): Promise<UserContext> {
-    try {
-      // Get user from database to ensure they still exist and are active
-      const user = await this.supabaseService.findUserById(payload.sub);
+    // Get user from database to ensure they still exist and are active
+    const user = await this.supabaseService.findUserById(payload.sub);
 
-      if (!user || !user.is_active) {
-        throw new UnauthorizedException('User not found or inactive');
-      }
-
-      // In development, allow devPermissions to short-circuit DB lookup
-      let permissions: string[] = [];
-      if (payload.devPermissions && payload.devPermissions.length > 0) {
-        permissions = payload.devPermissions;
-        this.logger.debug(
-          `Using dev permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
-        );
-      } else if (payload.organizationId) {
-        const userPermissions = await this.supabaseService.getUserPermissions(
-          payload.sub,
-          payload.organizationId,
-        );
-        permissions = userPermissions.map((p) => p.permission_name);
-        this.logger.debug(
-          `Loaded ${permissions.length} permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
-        );
-      }
-
-      return {
-        id: payload.sub,
-        email: payload.email,
-        role: payload.role,
-        accountType: payload.accountType,
-        organizationId: payload.organizationId,
-        organizationRole: payload.organizationRole,
-        emailVerified: payload.emailVerified,
-        permissions,
-      };
-    } catch (error) {
-      throw new UnauthorizedException('Invalid token');
+    if (!user || !user.is_active) {
+      throw new UnauthorizedException('User not found or inactive');
     }
+
+    // In development, allow devPermissions to short-circuit DB lookup
+    let permissions: string[] = [];
+    if (payload.devPermissions?.length) {
+      permissions = payload.devPermissions;
+      this.logger.debug(
+        `Using dev permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
+      );
+    } else if (payload.organizationId) {
+      const userPermissions = await this.supabaseService.getUserPermissions(
+        payload.sub,
+        payload.organizationId,
+      );
+      permissions = userPermissions.map((p) => p.permission_name);
+      this.logger.debug(
+        `Loaded ${permissions.length} permissions for ${payload.email}: ${JSON.stringify(permissions)}`,
+      );
+    }
+
+    return {
+      id: payload.sub,
+      email: payload.email,
+      role: payload.role,
+      accountType: payload.accountType,
+      organizationId: payload.organizationId,
+      organizationRole: payload.organizationRole,
+      emailVerified: payload.emailVerified,
+      permissions,
+    };
   }
 }

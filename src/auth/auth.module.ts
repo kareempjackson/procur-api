@@ -12,10 +12,11 @@ import { CaptchaService } from '../common/utils/captcha.service';
 
 @Module({
   imports: [
+    ConfigModule,
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
+      useFactory: (configService: ConfigService) => ({
         secret: configService.get<string>('jwt.secret'),
         signOptions: {
           expiresIn: configService.get<string>('jwt.expiresIn'),

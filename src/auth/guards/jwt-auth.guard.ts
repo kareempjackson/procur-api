@@ -4,15 +4,19 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Observable } from 'rxjs';
 import { Reflector } from '@nestjs/core';
+import { UserContext } from '../../common/interfaces/jwt-payload.interface';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
-  constructor(private reflector: Reflector) {
+  constructor(private readonly reflector: Reflector) {
     super();
   }
 
-  canActivate(context: ExecutionContext) {
+  canActivate(
+    context: ExecutionContext,
+  ): boolean | Promise<boolean> | Observable<boolean> {
     // Check if route is marked as public
     const isPublic = this.reflector.getAllAndOverride<boolean>('isPublic', [
       context.getHandler(),
@@ -26,9 +30,12 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     return super.canActivate(context);
   }
 
-  handleRequest(err: any, user: any, info: any) {
-    if (err || !user) {
-      throw err || new UnauthorizedException('Invalid or expired token');
+  handleRequest<TUser = UserContext>(err: unknown, user: TUser): TUser {
+    if (err instanceof Error) {
+      throw err;
+    }
+    if (!user) {
+      throw new UnauthorizedException('Invalid or expired token');
     }
     return user;
   }
