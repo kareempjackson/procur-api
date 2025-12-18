@@ -823,12 +823,16 @@ export class AdminController {
     body: {
       platformFeePercent?: number;
       deliveryFlatFee?: number;
+      buyerDeliveryShare?: number;
+      sellerDeliveryShare?: number;
       currency?: string;
     },
   ) {
     return this.adminService.updatePlatformFeesSettings({
       platformFeePercent: body.platformFeePercent,
       deliveryFlatFee: body.deliveryFlatFee,
+      buyerDeliveryShare: body.buyerDeliveryShare,
+      sellerDeliveryShare: body.sellerDeliveryShare,
       currency: body.currency,
     });
   }

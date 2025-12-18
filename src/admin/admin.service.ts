@@ -108,6 +108,7 @@ export interface AdminDashboardSummary {
   currentOrders: number;
   totalVolume: number;
   totalPlatformFees: number;
+  totalShippingFees: number;
   currency: string;
 }
 
@@ -139,6 +140,8 @@ export interface AdminAuditLogItem {
 export interface PlatformFeesSettings {
   platformFeePercent: number;
   deliveryFlatFee: number;
+  buyerDeliveryShare: number;
+  sellerDeliveryShare: number;
   currency: string;
 }
 
@@ -166,13 +169,17 @@ export class AdminService {
     id: string;
     platform_fee_percent: number;
     delivery_flat_fee: number;
+    buyer_delivery_share: number | null;
+    seller_delivery_share: number | null;
     currency: string;
   }> {
     const client = this.supabase.getClient();
 
     const { data, error } = await client
       .from('platform_fees_config')
-      .select('id, platform_fee_percent, delivery_flat_fee, currency')
+      .select(
+        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+      )
       .limit(1)
       .maybeSingle();
 
@@ -187,6 +194,8 @@ export class AdminService {
         id: string;
         platform_fee_percent: number | null;
         delivery_flat_fee: number | null;
+        buyer_delivery_share: number | null;
+        seller_delivery_share: number | null;
         currency: string | null;
       };
 
@@ -194,6 +203,8 @@ export class AdminService {
         id: row.id,
         platform_fee_percent: Number(row.platform_fee_percent ?? 0),
         delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
+        buyer_delivery_share: row.buyer_delivery_share ?? null,
+        seller_delivery_share: row.seller_delivery_share ?? null,
         currency: (row.currency as string | null) ?? 'XCD',
       };
     }
@@ -204,9 +215,13 @@ export class AdminService {
       .insert({
         platform_fee_percent: 5,
         delivery_flat_fee: 20,
+        buyer_delivery_share: null,
+        seller_delivery_share: null,
         currency: 'XCD',
       })
-      .select('id, platform_fee_percent, delivery_flat_fee, currency')
+      .select(
+        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+      )
       .single();
 
     if (insertError || !inserted) {
@@ -221,6 +236,8 @@ export class AdminService {
       id: string;
       platform_fee_percent: number | null;
       delivery_flat_fee: number | null;
+      buyer_delivery_share: number | null;
+      seller_delivery_share: number | null;
       currency: string | null;
     };
 
@@ -228,15 +245,25 @@ export class AdminService {
       id: row.id,
       platform_fee_percent: Number(row.platform_fee_percent ?? 0),
       delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
+      buyer_delivery_share: row.buyer_delivery_share ?? null,
+      seller_delivery_share: row.seller_delivery_share ?? null,
       currency: (row.currency as string | null) ?? 'XCD',
     };
   }
 
   async getPlatformFeesSettings(): Promise<PlatformFeesSettings> {
     const row = await this.loadPlatformFeesRow();
+    const baseDelivery = Number(row.delivery_flat_fee ?? 0);
+    const buyerShare =
+      row.buyer_delivery_share != null ? Number(row.buyer_delivery_share) : 0;
+    const sellerShare =
+      row.seller_delivery_share != null ? Number(row.seller_delivery_share) : 0;
+
     return {
       platformFeePercent: Number(row.platform_fee_percent ?? 0),
-      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0),
+      deliveryFlatFee: baseDelivery,
+      buyerDeliveryShare: buyerShare,
+      sellerDeliveryShare: sellerShare,
       currency: row.currency || 'XCD',
     };
   }
@@ -244,6 +271,8 @@ export class AdminService {
   async updatePlatformFeesSettings(input: {
     platformFeePercent?: number;
     deliveryFlatFee?: number;
+    buyerDeliveryShare?: number;
+    sellerDeliveryShare?: number;
     currency?: string;
   }): Promise<PlatformFeesSettings> {
     const client = this.supabase.getClient();
@@ -263,6 +292,24 @@ export class AdminService {
         throw new BadRequestException('Delivery fee must be >= 0');
       }
       patch.delivery_flat_fee = input.deliveryFlatFee;
+    }
+
+    if (typeof input.buyerDeliveryShare === 'number') {
+      if (input.buyerDeliveryShare < 0) {
+        throw new BadRequestException(
+          'Buyer delivery share must be greater than or equal to zero',
+        );
+      }
+      patch.buyer_delivery_share = input.buyerDeliveryShare;
+    }
+
+    if (typeof input.sellerDeliveryShare === 'number') {
+      if (input.sellerDeliveryShare < 0) {
+        throw new BadRequestException(
+          'Seller delivery share must be greater than or equal to zero',
+        );
+      }
+      patch.seller_delivery_share = input.sellerDeliveryShare;
     }
 
     if (typeof input.currency === 'string' && input.currency.trim()) {
@@ -526,6 +573,7 @@ export class AdminService {
     let currentOrders = 0;
     let totalVolume = 0;
     let derivedPlatformFees = 0;
+    let totalShippingFees = 0;
 
     (orderStats || []).forEach((o: any) => {
       const status = (o.status as string) ?? '';
@@ -557,6 +605,7 @@ export class AdminService {
       if (paymentStatus === 'paid') {
         let volumeContribution = 0;
         let feeContribution = 0;
+        let shippingContribution = 0;
 
         const isUsingPlatformFees =
           !!platformFees &&
@@ -568,18 +617,22 @@ export class AdminService {
           const platformFeeFromConfig = Number(
             ((subtotal * platformFees.platformFeePercent) / 100).toFixed(2),
           );
+          const totalDelivery = platformFees.deliveryFlatFee;
           volumeContribution = subtotal + buyerDelivery + platformFeeFromConfig;
           feeContribution = platformFeeFromConfig;
+          shippingContribution = totalDelivery;
         } else {
           volumeContribution = totalAmount;
           const residual = totalAmount - (subtotal + shipping + tax - discount);
           if (residual > 0.005) {
             feeContribution = residual;
           }
+          shippingContribution = shipping;
         }
 
         totalVolume += volumeContribution;
         derivedPlatformFees += feeContribution;
+        totalShippingFees += shippingContribution;
       }
     });
 
@@ -592,6 +645,7 @@ export class AdminService {
       currentOrders,
       totalVolume,
       totalPlatformFees,
+      totalShippingFees,
       currency: 'XCD',
     };
   }

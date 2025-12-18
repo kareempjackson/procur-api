@@ -36,13 +36,17 @@ export class PaymentLinksService {
   private async getPlatformFeesConfig(): Promise<{
     platformFeePercent: number;
     deliveryFlatFee: number;
+    buyerDeliveryShare: number;
+    sellerDeliveryShare: number;
     currency: string;
   }> {
     const client = this.supabase.getClient();
 
     const { data, error } = await client
       .from('platform_fees_config')
-      .select('platform_fee_percent, delivery_flat_fee, currency')
+      .select(
+        'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+      )
       .limit(1)
       .maybeSingle();
 
@@ -55,6 +59,8 @@ export class PaymentLinksService {
       return {
         platformFeePercent: 5,
         deliveryFlatFee: 20,
+        buyerDeliveryShare: 0,
+        sellerDeliveryShare: 0,
         currency: 'XCD',
       };
     }
@@ -63,6 +69,8 @@ export class PaymentLinksService {
       return {
         platformFeePercent: 5,
         deliveryFlatFee: 20,
+        buyerDeliveryShare: 0,
+        sellerDeliveryShare: 0,
         currency: 'XCD',
       };
     }
@@ -70,12 +78,16 @@ export class PaymentLinksService {
     const row = data as {
       platform_fee_percent: number | null;
       delivery_flat_fee: number | null;
+      buyer_delivery_share: number | null;
+      seller_delivery_share: number | null;
       currency: string | null;
     };
 
     return {
       platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
       deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
+      buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
+      sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
       currency: (row.currency as string | null) ?? 'XCD',
     };
   }
@@ -389,13 +401,18 @@ export class PaymentLinksService {
     const feesConfig = await this.getPlatformFeesConfig();
     const taxAmount = 0;
 
-    // Delivery: platform_fees_config.deliveryFlatFee represents the total
-    // logistics cost. For offline flows, this is split between buyer and seller.
-    const fullDeliveryFee = Number(feesConfig.deliveryFlatFee || 0);
-    const buyerDeliveryAmount = fullDeliveryFee
-      ? Number((fullDeliveryFee / 2).toFixed(2))
-      : 0;
-    const sellerDeliveryAmount = fullDeliveryFee - buyerDeliveryAmount;
+    // Delivery splits are now configurable. Use the configured buyer/seller
+    // shares; if not set, they remain zero and the total is the configured flat
+    // fee (if any).
+    const configuredFlatFee = Number(feesConfig.deliveryFlatFee || 0);
+    const buyerDeliveryAmount = Number(feesConfig.buyerDeliveryShare || 0);
+    const sellerDeliveryAmount = Number(feesConfig.sellerDeliveryShare || 0);
+    const fullDeliveryFee = Number(
+      (
+        (buyerDeliveryAmount || 0) + (sellerDeliveryAmount || 0) ||
+        configuredFlatFee
+      ).toFixed(2),
+    );
 
     // Transaction fee: applied as a percentage of the items subtotal and
     // fully paid by the buyer (added on top of the total they pay).
@@ -619,23 +636,20 @@ export class PaymentLinksService {
     const feesConfig = await this.getPlatformFeesConfig();
 
     // Delivery fee: keep the existing buyer-facing delivery amount if present,
-    // otherwise derive it from the configured total delivery fee.
-    const defaultBuyerDelivery = feesConfig.deliveryFlatFee
-      ? Number((feesConfig.deliveryFlatFee / 2).toFixed(2))
-      : 0;
-    const deliveryFeeAmount =
+    // otherwise use configured buyer/seller shares (no implicit 50/50 split).
+    const buyerDeliveryShare =
       typeof link.delivery_fee_amount === 'number'
         ? Number(link.delivery_fee_amount)
-        : defaultBuyerDelivery;
+        : Number(feesConfig.buyerDeliveryShare ?? 0);
+
+    const sellerDeliveryShare =
+      (link.fee_breakdown as any)?.delivery_fee_details?.seller_share ??
+      Number(feesConfig.sellerDeliveryShare ?? 0);
 
     const fullDeliveryFee =
       (link.fee_breakdown as any)?.delivery_fee_details?.total ??
-      feesConfig.deliveryFlatFee ??
-      deliveryFeeAmount * 2;
-    const buyerDeliveryShare = deliveryFeeAmount;
-    const sellerDeliveryShare =
-      Number(fullDeliveryFee.toFixed?.(2) ?? fullDeliveryFee) -
-      buyerDeliveryShare;
+      (buyerDeliveryShare + sellerDeliveryShare ||
+        Number(feesConfig.deliveryFlatFee ?? 0));
 
     const taxAmount =
       typeof link.tax_amount === 'number' ? Number(link.tax_amount) : 0;
@@ -686,7 +700,7 @@ export class PaymentLinksService {
         .from('orders')
         .update({
           subtotal,
-          shipping_amount: deliveryFeeAmount,
+          shipping_amount: buyerDeliveryShare,
           tax_amount: taxAmount,
           discount_amount: discountAmount,
           total_amount: totalAmount,
@@ -1037,6 +1051,7 @@ export class PaymentLinksService {
         currency,
         created_at,
         expires_at,
+        allowed_payment_methods,
         meta
       `,
       )
@@ -1062,8 +1077,101 @@ export class PaymentLinksService {
       currency: (pl.currency as string) || 'XCD',
       created_at: pl.created_at as string,
       expires_at: pl.expires_at as string | null,
+      allowed_payment_methods:
+        (pl.allowed_payment_methods as OfflinePaymentMethod[] | null) ??
+        undefined,
       public_url: `${frontendUrl}/p/${pl.link_code}`,
     }));
+  }
+
+  // ========== ADMIN: Update payment link ==========
+  async adminUpdatePaymentLink(input: {
+    paymentLinkId: string;
+    allowedPaymentMethods?: OfflinePaymentMethod[];
+    expiresAt?: string | null;
+    status?: PaymentLinkStatus;
+    updatedByUserId: string;
+  }) {
+    const client = this.supabase.getClient();
+
+    const { data: link, error: linkError } = await client
+      .from('payment_links')
+      .select('id, status, meta')
+      .eq('id', input.paymentLinkId)
+      .single();
+
+    if (linkError || !link) {
+      throw new NotFoundException('Payment link not found');
+    }
+
+    const patch: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+      meta: {
+        ...(link as any)?.meta,
+        last_updated_by: input.updatedByUserId,
+      },
+    };
+
+    if (input.allowedPaymentMethods) {
+      patch.allowed_payment_methods = input.allowedPaymentMethods;
+    }
+
+    if (input.expiresAt !== undefined) {
+      patch.expires_at = input.expiresAt;
+    }
+
+    if (input.status) {
+      patch.status = input.status;
+    }
+
+    const { data: updated, error: updateError } = await client
+      .from('payment_links')
+      .update(patch)
+      .eq('id', input.paymentLinkId)
+      .select(
+        'id, link_code, status, total_amount, currency, created_at, expires_at, allowed_payment_methods',
+      )
+      .single();
+
+    if (updateError || !updated) {
+      throw new BadRequestException(
+        `Failed to update payment link: ${updateError?.message ?? 'unknown error'}`,
+      );
+    }
+
+    const frontendUrl =
+      process.env.FRONTEND_PUBLIC_URL ||
+      process.env.FRONTEND_URL ||
+      'http://localhost:3001';
+
+    return {
+      id: updated.id as string,
+      code: updated.link_code as string,
+      status: updated.status as string,
+      total_amount: Number(updated.total_amount ?? 0),
+      currency: (updated.currency as string) || 'XCD',
+      created_at: updated.created_at as string,
+      expires_at: updated.expires_at as string | null,
+      allowed_payment_methods:
+        (updated.allowed_payment_methods as OfflinePaymentMethod[] | null) ??
+        undefined,
+      public_url: `${frontendUrl}/p/${updated.link_code}`,
+    };
+  }
+
+  // ========== ADMIN: Delete payment link ==========
+  async adminDeletePaymentLink(id: string) {
+    const client = this.supabase.getClient();
+
+    const { error } = await client.from('payment_links').delete().eq('id', id);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete payment link: ${error.message}`,
+      );
+    }
+
+    return { success: true };
   }
 
   /**

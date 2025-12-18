@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -14,6 +15,7 @@ import {
 import {
   PaymentLinksService,
   OfflinePaymentMethod,
+  PaymentLinkStatus,
 } from './payment-links.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
@@ -571,5 +573,52 @@ export class PaymentLinksController {
       throw new BadRequestException('seller_org_id is required');
     }
     return this.paymentLinks.listForSeller(sellerOrgId);
+  }
+
+  // ========== ADMIN: Update payment link ==========
+
+  @UseGuards(JwtAuthGuard, EmailVerifiedGuard, PermissionsGuard)
+  @RequirePermissions('manage_orders')
+  @Patch('admin/payment-links/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Update a payment link (admin)',
+    description:
+      'Admin can update basic payment link properties such as allowed payment methods, expiry, and status.',
+  })
+  async updatePaymentLinkAdmin(
+    @CurrentUser() user: UserContext,
+    @Param('id') id: string,
+    @Body()
+    body: {
+      allowed_payment_methods?: OfflinePaymentMethod[];
+      expires_at?: string | null;
+      status?: PaymentLinkStatus;
+    },
+  ) {
+    return this.paymentLinks.adminUpdatePaymentLink({
+      paymentLinkId: id,
+      allowedPaymentMethods: body.allowed_payment_methods,
+      expiresAt: body.expires_at,
+      status: body.status,
+      updatedByUserId: user.id,
+    });
+  }
+
+  // ========== ADMIN: Delete payment link ==========
+
+  @UseGuards(JwtAuthGuard, EmailVerifiedGuard, PermissionsGuard)
+  @RequirePermissions('manage_orders')
+  @Delete('admin/payment-links/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth('JWT-auth')
+  @ApiOperation({
+    summary: 'Delete a payment link (admin)',
+    description:
+      'Admin can delete a payment link. This removes the link record but leaves the underlying order intact.',
+  })
+  async deletePaymentLinkAdmin(@Param('id') id: string) {
+    return this.paymentLinks.adminDeletePaymentLink(id);
   }
 }
