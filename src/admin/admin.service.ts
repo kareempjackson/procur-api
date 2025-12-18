@@ -1838,6 +1838,18 @@ export class AdminService {
     };
   }
 
+  async sendOrderReceiptEmail(input: {
+    orderId: string;
+    email: string;
+    paymentReference?: string | null;
+  }): Promise<{ success: boolean }> {
+    return this.clearing.sendReceiptToEmail({
+      orderId: input.orderId,
+      email: input.email,
+      paymentReference: input.paymentReference,
+    });
+  }
+
   async createOfflineOrder(
     input: AdminCreateOfflineOrderDto,
   ): Promise<{ id: string; order_number: string }> {

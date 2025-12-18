@@ -14,6 +14,7 @@ import {
   ApiOperation,
   ApiResponse,
   ApiTags,
+  ApiBody,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -432,6 +433,37 @@ export class AdminController {
   })
   async getOrderById(@Param('id') id: string) {
     return this.adminService.getOrderDetail(id);
+  }
+
+  @Post('orders/:id/send-receipt')
+  @ApiOperation({
+    summary: 'Send receipt to a custom email',
+    description:
+      'Sends the existing buyer receipt template to the provided email address for this order.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', format: 'email' },
+        paymentReference: { type: 'string' },
+      },
+      required: ['email'],
+    },
+  })
+  async sendOrderReceipt(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      email: string;
+      paymentReference?: string | null;
+    },
+  ) {
+    return this.adminService.sendOrderReceiptEmail({
+      orderId: id,
+      email: body.email,
+      paymentReference: body.paymentReference,
+    });
   }
 
   @Post('orders/bulk-delete')

@@ -15,6 +15,108 @@ export class OrderClearingService {
     private readonly email: EmailService,
   ) {}
 
+  async sendReceiptToEmail(input: {
+    orderId: string;
+    email: string;
+    paymentReference?: string | null;
+  }): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select(
+        'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, payment_status, shipping_address',
+      )
+      .eq('id', input.orderId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const buyerOrgId = order.buyer_org_id as string | null;
+    const buyerUserId = order.buyer_user_id as string | null;
+
+    let buyerOrgName: string | null = null;
+    if (buyerOrgId) {
+      const { data: org } = await client
+        .from('organizations')
+        .select('name, business_name')
+        .eq('id', buyerOrgId)
+        .single();
+      if (org) {
+        const typedOrg = org as {
+          name?: string | null;
+          business_name?: string | null;
+        };
+        buyerOrgName =
+          typedOrg.business_name?.trim() || typedOrg.name?.trim() || null;
+      }
+    }
+
+    let buyerContactName: string | null = null;
+    let buyerAddress: string | null = null;
+
+    if (buyerUserId) {
+      const { data: buyerUser } = await client
+        .from('users')
+        .select('fullname')
+        .eq('id', buyerUserId)
+        .single();
+      buyerContactName =
+        ((buyerUser as { fullname?: string | null } | null)?.fullname ??
+          null) ||
+        null;
+    }
+
+    const email = input.email;
+    const nowIso = new Date().toISOString();
+    const receiptNumber = order.order_number || order.id;
+    const paymentStatus = (order.payment_status as string | null) ?? 'paid';
+
+    // Build a simple address line from shipping_address if present
+    const shippingAddr = order.shipping_address as
+      | {
+          line1?: string;
+          city?: string;
+          country?: string;
+        }
+      | null
+      | undefined;
+    if (shippingAddr) {
+      const parts = [
+        shippingAddr.line1,
+        shippingAddr.city,
+        shippingAddr.country,
+      ].filter(Boolean);
+      buyerAddress = parts.length ? parts.join(', ') : null;
+    }
+
+    await this.email.sendBuyerCompletionReceipt({
+      email,
+      buyerName: buyerOrgName || buyerContactName || email || 'Customer',
+      buyerEmail: email,
+      buyerAddress,
+      buyerContact: buyerContactName,
+      receiptNumber,
+      paymentDate: nowIso,
+      orderNumber:
+        (order.order_number as string | null) || (order.id as string),
+      paymentMethod: 'Card/transfer',
+      paymentReference: input.paymentReference || null,
+      paymentStatus,
+      subtotal: Number(order.subtotal ?? 0),
+      delivery: Number(order.shipping_amount ?? 0),
+      platformFee: 0,
+      taxAmount: Number(order.tax_amount ?? 0),
+      discount: Number(order.discount_amount ?? 0),
+      totalPaid: Number(order.total_amount ?? 0),
+      currency: String(order.currency || 'XCD'),
+    });
+
+    return { success: true };
+  }
+
   /**
    * After inspection approval, create the two-leg clearing transactions:
    *  - buyer_settlement: supermarket → Procur

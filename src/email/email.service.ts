@@ -277,6 +277,7 @@ export class EmailService {
     orderNumber: string;
     buyerName: string;
     buyerEmail: string;
+    buyerAddress?: string | null;
     buyerContact?: string | null;
     paymentMethod: string;
     paymentReference?: string | null;
@@ -295,6 +296,7 @@ export class EmailService {
       orderNumber,
       buyerName,
       buyerEmail,
+      buyerAddress,
       buyerContact,
       paymentMethod,
       paymentReference,
@@ -320,6 +322,15 @@ export class EmailService {
 
     const contactLine = safeContact
       ? `<p class="muted" style="margin:0 0 2px;">Contact: ${safeContact}</p>`
+      : '';
+
+    const safeAddress =
+      buyerAddress && buyerAddress.trim().length > 0
+        ? buyerAddress.trim()
+        : null;
+
+    const addressLine = safeAddress
+      ? `<p class="muted" style="margin:0 0 2px;">${safeAddress}</p>`
       : '';
 
     const safeReference =
@@ -362,17 +373,12 @@ export class EmailService {
             <p style="margin:0 0 2px;color:#111827;font-weight:500;">
               ${buyerName}
             </p>
-            <p class="muted" style="margin:0 0 2px;">
-              ${buyerEmail}
-            </p>
+            ${addressLine}
             ${contactLine}
           </div>
           <div style="text-align:right;">
             <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
               Payment
-            </p>
-            <p style="margin:0 0 2px;color:#111827;font-weight:500;">
-              ${paymentMethod}
             </p>
             ${referenceLine}
             <p class="muted" style="margin:0;">
@@ -401,18 +407,6 @@ export class EmailService {
               platformFee,
             )}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span class="muted">Tax</span>
-            <span style="font-weight:500;color:#111827;">${formatCurrency(
-              taxAmount,
-            )}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;margin-top:4px;padding-top:4px;border-top:1px dashed #e5e7eb;">
-            <span class="muted">Discount</span>
-            <span style="font-weight:500;color:#059669;">
-              -${formatCurrency(discount)}
-            </span>
-          </div>
           <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:6px;border-top:1px solid #1118271a;">
             <span style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:600;color:#111827;">
               Total paid
@@ -434,6 +428,7 @@ export class EmailService {
     email: string;
     buyerName: string;
     buyerEmail: string;
+    buyerAddress?: string | null;
     buyerContact?: string | null;
     receiptNumber: string;
     paymentDate: string;
@@ -452,6 +447,7 @@ export class EmailService {
     const innerHtml = this.buildPaymentReceiptInnerHtml({
       buyerName: params.buyerName,
       buyerEmail: params.buyerEmail,
+      buyerAddress: params.buyerAddress,
       buyerContact: params.buyerContact,
       receiptNumber: params.receiptNumber,
       paymentDate: params.paymentDate,
