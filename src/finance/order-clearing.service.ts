@@ -15,6 +15,49 @@ export class OrderClearingService {
     private readonly email: EmailService,
   ) {}
 
+  private async computeSellerDeliveryFee(input: {
+    hasShippingAddress: boolean;
+    buyerDeliveryStored: number;
+  }): Promise<number> {
+    if (!input.hasShippingAddress) return 0;
+
+    const client = this.supabase.getClient();
+    const { data } = await client
+      .from('platform_fees_config')
+      .select('delivery_flat_fee, buyer_delivery_share, seller_delivery_share')
+      .limit(1)
+      .maybeSingle();
+
+    const row = (data || {}) as {
+      delivery_flat_fee?: number | string | null;
+      buyer_delivery_share?: number | string | null;
+      seller_delivery_share?: number | string | null;
+    };
+
+    const configuredFlat = Number(row.delivery_flat_fee ?? 0) || 0;
+    const configuredBuyer = Number(row.buyer_delivery_share ?? 0) || 0;
+    const configuredSeller = Number(row.seller_delivery_share ?? 0) || 0;
+
+    // Prefer explicit admin-configured seller share when present.
+    if (configuredSeller > 0) return Number(configuredSeller.toFixed(2));
+
+    // Otherwise, derive from the configured full fee (shares sum if present, else flat fee).
+    const sharesSum = configuredBuyer + configuredSeller;
+    const fullDeliveryFee = sharesSum > 0 ? sharesSum : configuredFlat;
+
+    const buyerShare =
+      configuredBuyer > 0
+        ? configuredBuyer
+        : Number(input.buyerDeliveryStored ?? 0) > 0
+          ? Number(input.buyerDeliveryStored)
+          : fullDeliveryFee > 0
+            ? Number((fullDeliveryFee / 2).toFixed(2))
+            : 0;
+
+    const sellerShare = Math.max(0, fullDeliveryFee - buyerShare);
+    return Number(sellerShare.toFixed(2));
+  }
+
   private mapPaymentLinkMetaToReceiptItems(meta: any): {
     name: string;
     quantity: number;
@@ -234,6 +277,150 @@ export class OrderClearingService {
       taxAmount,
       discount,
       totalPaid: totalFromApi,
+      currency: String(order.currency || 'XCD'),
+    });
+
+    return { success: true };
+  }
+
+  async sendSellerReceiptToEmail(input: {
+    orderId: string;
+    email: string;
+    paymentReference?: string | null;
+  }): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select(
+        'id, order_number, buyer_org_id, buyer_user_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, payment_status, shipping_address, created_at',
+      )
+      .eq('id', input.orderId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const buyerOrgId = order.buyer_org_id as string | null;
+    const sellerOrgId = order.seller_org_id as string | null;
+    const buyerUserId = order.buyer_user_id as string | null;
+
+    let buyerOrgName: string | null = null;
+    if (buyerOrgId) {
+      const { data: org } = await client
+        .from('organizations')
+        .select('name, business_name')
+        .eq('id', buyerOrgId)
+        .single();
+      if (org) {
+        const typedOrg = org as {
+          name?: string | null;
+          business_name?: string | null;
+        };
+        buyerOrgName =
+          typedOrg.business_name?.trim() || typedOrg.name?.trim() || null;
+      }
+    }
+
+    let sellerOrgName: string | null = null;
+    if (sellerOrgId) {
+      const { data: org } = await client
+        .from('organizations')
+        .select('name, business_name')
+        .eq('id', sellerOrgId)
+        .single();
+      if (org) {
+        const typedOrg = org as {
+          name?: string | null;
+          business_name?: string | null;
+        };
+        sellerOrgName =
+          typedOrg.business_name?.trim() || typedOrg.name?.trim() || null;
+      }
+    }
+
+    let buyerContactName: string | null = null;
+    let buyerEmail: string | null = null;
+
+    if (buyerUserId) {
+      const { data: buyerUser } = await client
+        .from('users')
+        .select('fullname, email')
+        .eq('id', buyerUserId)
+        .single();
+      const typed = buyerUser as
+        | { fullname?: string | null; email?: string | null }
+        | null;
+      buyerContactName = typed?.fullname ?? null;
+      buyerEmail = typed?.email ?? null;
+    }
+
+    // Fallback: use the first active org user email for the buyer org if buyer_user_id is missing
+    if (!buyerEmail && buyerOrgId) {
+      const { data: orgUsers } = await client
+        .from('organization_users')
+        .select('user_id, is_active')
+        .eq('organization_id', buyerOrgId)
+        .eq('is_active', true)
+        .limit(1);
+      const userId = (orgUsers?.[0] as { user_id?: string | null } | null)
+        ?.user_id;
+      if (userId) {
+        const { data: user } = await client
+          .from('users')
+          .select('email')
+          .eq('id', userId)
+          .single();
+        buyerEmail = (user as { email?: string | null } | null)?.email ?? null;
+      }
+    }
+
+    const email = input.email;
+    const nowIso = new Date().toISOString();
+    const orderDateIso =
+      (order as { created_at?: string | null } | null)?.created_at ?? nowIso;
+    const receiptNumber = order.order_number || order.id;
+    const paymentStatus = (order.payment_status as string | null) ?? 'paid';
+
+    const items = await this.loadReceiptItems(client, order.id as string);
+
+    // Platform fee (buyer-paid): same logic as buyer receipt.
+    const subtotalAmount = Number(order.subtotal ?? 0);
+    const buyerDeliveryStored = Number(order.shipping_amount ?? 0);
+    const shippingAddr = (order as any)?.shipping_address as any;
+    const hasShippingAddress = Boolean(
+      shippingAddr &&
+        (shippingAddr.line1 ||
+          shippingAddr.address_line1 ||
+          shippingAddr.street ||
+          shippingAddr.street_address),
+    );
+    const sellerDeliveryFee = await this.computeSellerDeliveryFee({
+      hasShippingAddress,
+      buyerDeliveryStored,
+    });
+
+    await this.email.sendSellerCompletionReceipt({
+      email,
+      sellerName: sellerOrgName || 'Seller',
+      buyerName: buyerOrgName || buyerContactName || 'Buyer',
+      buyerEmail: buyerEmail || 'N/A',
+      buyerContact: buyerContactName,
+      receiptNumber,
+      paymentDate: orderDateIso,
+      orderNumber:
+        (order.order_number as string | null) || (order.id as string),
+      paymentMethod: 'Offline payment',
+      paymentReference: input.paymentReference || null,
+      paymentStatus,
+      items,
+      subtotal: subtotalAmount,
+      delivery: sellerDeliveryFee,
+      platformFee: 0,
+      taxAmount: 0,
+      discount: 0,
+      totalPaid: Number((subtotalAmount - sellerDeliveryFee).toFixed(2)),
       currency: String(order.currency || 'XCD'),
     });
 
@@ -948,7 +1135,7 @@ export class OrderClearingService {
         const { data: order, error: orderError2 } = await client
           .from('orders')
           .select(
-            'id, order_number, buyer_org_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, created_at',
+            'id, order_number, buyer_org_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, shipping_address, created_at',
           )
           .eq('id', tx.order_id as string)
           .single();
@@ -1074,6 +1261,20 @@ export class OrderClearingService {
                 sellerUser.email ||
                 'Seller';
 
+              const buyerDeliveryStored = Number(order.shipping_amount ?? 0);
+              const shippingAddr = (order as any)?.shipping_address as any;
+              const hasShippingAddress = Boolean(
+                shippingAddr &&
+                  (shippingAddr.line1 ||
+                    shippingAddr.address_line1 ||
+                    shippingAddr.street ||
+                    shippingAddr.street_address),
+              );
+              const sellerDeliveryFee = await this.computeSellerDeliveryFee({
+                hasShippingAddress,
+                buyerDeliveryStored,
+              });
+
               await this.email.sendSellerCompletionReceipt({
                 email: sellerUser.email,
                 sellerName: sellerDisplayName,
@@ -1092,11 +1293,13 @@ export class OrderClearingService {
                 paymentStatus: 'completed',
                 items,
                 subtotal: Number(order.subtotal ?? 0),
-                delivery: Number(order.shipping_amount ?? 0),
-                platformFee: Number(platformFee ?? 0),
-                taxAmount: Number(order.tax_amount ?? 0),
-                discount: Number(order.discount_amount ?? 0),
-                totalPaid: Number(order.total_amount ?? 0),
+                delivery: sellerDeliveryFee,
+                platformFee: 0,
+                taxAmount: 0,
+                discount: 0,
+                totalPaid: Number(
+                  (Number(order.subtotal ?? 0) - sellerDeliveryFee).toFixed(2),
+                ),
                 currency: String(amountCurrency),
               });
             }

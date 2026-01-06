@@ -66,6 +66,56 @@ export class SellersService {
   constructor(private readonly supabaseService: SupabaseService) {}
 
   /**
+   * Load platform fee configuration (shared settings controlled in the admin panel).
+   * For seller receipts/invoices, we use `seller_delivery_share` to show what the
+   * seller covers for delivery (distinct from `orders.shipping_amount`, which is
+   * the buyer-facing delivery share).
+   */
+  async getPlatformFeesConfig(): Promise<{
+    platformFeePercent: number;
+    deliveryFlatFee: number;
+    buyerDeliveryShare: number;
+    sellerDeliveryShare: number;
+    currency: string;
+  }> {
+    const client = this.supabaseService.getClient();
+    const { data, error } = await client
+      .from('platform_fees_config')
+      .select(
+        'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      // Fail-open: keep seller flows working with sensible defaults.
+      return {
+        platformFeePercent: 5,
+        deliveryFlatFee: 20,
+        buyerDeliveryShare: 0,
+        sellerDeliveryShare: 0,
+        currency: 'XCD',
+      };
+    }
+
+    const row = data as {
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      currency: string | null;
+    };
+
+    return {
+      platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
+      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
+      buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
+      sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
+      currency: (row.currency as string | null) ?? 'XCD',
+    };
+  }
+
+  /**
    * Ensure the seller organization is allowed to sell / earn on the platform.
    * - Organization must exist and be a seller
    * - Organization status must be ACTIVE (not pending_verification / suspended)
@@ -574,7 +624,7 @@ export class SellersService {
       .select(
         `
         *,
-        order_items(*),
+        order_items(*, products:products(id, product_images(id, image_url, is_primary, display_order))),
         organizations!buyer_org_id(name, business_name)
       `,
         { count: 'exact' },
@@ -644,7 +694,7 @@ export class SellersService {
       .select(
         `
         *,
-        order_items(*),
+        order_items(*, products:products(id, product_images(id, image_url, is_primary, display_order))),
         order_timeline(*),
         organizations!buyer_org_id(name, business_name)
       `,
@@ -693,7 +743,7 @@ export class SellersService {
       .select(
         `
         *,
-        order_items(*),
+        order_items(*, products:products(id, product_images(id, image_url, is_primary, display_order))),
         order_timeline(*),
         organizations!buyer_org_id(name, business_name)
       `,
@@ -738,7 +788,7 @@ export class SellersService {
       .select(
         `
         *,
-        order_items(*),
+        order_items(*, products:products(id, product_images(id, image_url, is_primary, display_order))),
         order_timeline(*),
         organizations!buyer_org_id(name, business_name)
       `,
@@ -776,7 +826,7 @@ export class SellersService {
       .select(
         `
         *,
-        order_items(*),
+        order_items(*, products:products(id, product_images(id, image_url, is_primary, display_order))),
         order_timeline(*),
         organizations!buyer_org_id(name, business_name)
       `,
@@ -1473,6 +1523,16 @@ export class SellersService {
         product_id: item.product_id,
         product_name: item.product_name,
         product_sku: item.product_sku,
+        product_image:
+          item.product_image ||
+          item?.products?.product_images?.find((img: any) => img.is_primary)
+            ?.image_url ||
+          item?.products?.product_images?.[0]?.image_url ||
+          item?.product_snapshot?.product_images?.find((img: any) => img.is_primary)
+            ?.image_url ||
+          item?.product_snapshot?.product_images?.[0]?.image_url ||
+          item?.product_snapshot?.image_url ||
+          null,
         unit_price: parseFloat(item.unit_price),
         quantity: item.quantity,
         total_price: parseFloat(item.total_price),

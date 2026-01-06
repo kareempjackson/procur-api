@@ -11,8 +11,10 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
@@ -27,6 +29,7 @@ import {
 } from '@nestjs/swagger';
 import { SellersService } from './sellers.service';
 import { BankInfoService } from '../bank-info/bank-info.service';
+import { BuyersService } from '../buyers/buyers.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
@@ -87,6 +90,7 @@ export class SellersController {
   constructor(
     private readonly sellersService: SellersService,
     private readonly bankInfoService: BankInfoService,
+    private readonly buyersService: BuyersService,
   ) {}
 
   // ==================== PRODUCT MANAGEMENT ====================
@@ -332,6 +336,89 @@ export class SellersController {
     @Param('id', ParseUUIDPipe) orderId: string,
   ): Promise<OrderResponseDto> {
     return this.sellersService.getOrderById(user.organizationId!, orderId);
+  }
+
+  @Get('orders/:id/invoice')
+  @RequirePermissions('view_orders')
+  @ApiOperation({
+    summary: 'Download Order Receipt (PDF)',
+    description:
+      'Generate and download a PDF receipt/invoice for an order (seller copy).',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'PDF generated successfully',
+    content: {
+      'application/pdf': {
+        schema: {
+          type: 'string',
+          format: 'binary',
+        },
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  async downloadOrderInvoice(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    // Authorize as seller first (ensures the order belongs to this seller org)
+    const order = await this.sellersService.getOrderById(
+      user.organizationId!,
+      orderId,
+    );
+
+    // Reuse the existing PDF invoice generator (single source of truth)
+    const buyerOrgId = (order as any)?.buyer_org_id as string | undefined;
+    if (!buyerOrgId) {
+      throw new BadRequestException('Order is missing buyer organization ID');
+    }
+
+    // Delivery fee (seller share) comes from admin-controlled platform fee config.
+    const fees = await this.sellersService.getPlatformFeesConfig();
+    const configuredBuyerShare = Number(fees.buyerDeliveryShare || 0);
+    const configuredSellerShare = Number(fees.sellerDeliveryShare || 0);
+    const configuredFlatDelivery = Number(fees.deliveryFlatFee || 0);
+
+    const shipping = (order as any)?.shipping_address as any;
+    const hasShippingAddress = Boolean(
+      shipping &&
+        (shipping.line1 ||
+          shipping.address_line1 ||
+          shipping.street ||
+          shipping.street_address),
+    );
+
+    const fullDeliveryFee = hasShippingAddress
+      ? configuredBuyerShare + configuredSellerShare || configuredFlatDelivery
+      : 0;
+
+    const buyerDeliveryAmount = hasShippingAddress
+      ? configuredBuyerShare || Number((fullDeliveryFee / 2).toFixed(2))
+      : 0;
+
+    const sellerDeliveryAmount = hasShippingAddress
+      ? Number((fullDeliveryFee - buyerDeliveryAmount).toFixed(2))
+      : 0;
+
+    const { buffer, invoiceNumber } =
+      await this.buyersService.generateOrderInvoicePdf(buyerOrgId, orderId, {
+        billedToCompanyName:
+          (order as any)?.buyer_info?.organization_name ||
+          (order as any)?.buyer_info?.business_name ||
+          '',
+        deliveryFeeAmountOverride: sellerDeliveryAmount,
+        totalsMode: 'seller',
+      });
+
+    // Keep filename stable for users (prefer invoice number / order number)
+    const filename = `procur-receipt-${invoiceNumber}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.end(buffer);
   }
 
   @Patch('orders/:id/accept')

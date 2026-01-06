@@ -351,6 +351,12 @@ export class OrderItemResponseDto {
   @ApiPropertyOptional({ description: 'Product SKU at time of order' })
   product_sku?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Primary product image URL (derived from product images or snapshot when available)',
+  })
+  product_image?: string;
+
   @ApiProperty({ description: 'Unit price at time of order' })
   unit_price: number;
 

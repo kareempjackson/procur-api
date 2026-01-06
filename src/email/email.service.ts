@@ -43,6 +43,27 @@ export class EmailService {
     }
   }
 
+  /**
+   * Strict send for admin-triggered actions where we want to surface errors.
+   */
+  async sendBasicEmailStrict(
+    to: string,
+    subject: string,
+    htmlBody: string,
+    textBody?: string,
+  ) {
+    const result = await this.postmarkClient.sendEmail({
+      From: this.fromEmail,
+      To: to,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody ?? '',
+      MessageStream: 'outbound',
+    });
+    this.logger.log(`Email sent to ${to}`, { messageId: result.MessageID });
+    return result;
+  }
+
   async sendVerificationEmail(
     email: string,
     fullname: string,
@@ -236,6 +257,17 @@ export class EmailService {
     return this.sendBasicEmail(to, subject, htmlBody, textBody);
   }
 
+  async sendBrandedEmailStrict(
+    to: string,
+    subject: string,
+    title: string,
+    innerHtml: string,
+    textBody?: string,
+  ) {
+    const htmlBody = this.buildBrandedBody(title, innerHtml);
+    return this.sendBasicEmailStrict(to, subject, htmlBody, textBody);
+  }
+
   private getVerificationEmailTemplate(
     fullname: string,
     verificationUrl: string,
@@ -323,6 +355,11 @@ export class EmailService {
     discount: number;
     totalPaid: number;
     currency: string;
+    totalsMode?: 'buyer' | 'seller';
+    deliveryLabel?: string;
+    totalLabel?: string;
+    showPlatformFee?: boolean;
+    deliveryIsDeduction?: boolean;
   }): string {
     const {
       receiptNumber,
@@ -343,6 +380,11 @@ export class EmailService {
       discount,
       totalPaid,
       currency,
+      totalsMode = 'buyer',
+      deliveryLabel,
+      totalLabel,
+      showPlatformFee,
+      deliveryIsDeduction,
     } = params;
 
     const safeText = (value: unknown): string => {
@@ -421,8 +463,25 @@ export class EmailService {
         `
       : '';
 
+    const effectiveShowPlatformFee =
+      typeof showPlatformFee === 'boolean'
+        ? showPlatformFee
+        : totalsMode === 'buyer';
+
+    const effectiveDeliveryLabel =
+      deliveryLabel?.trim() ||
+      (totalsMode === 'seller' ? 'Delivery fee' : 'Delivery');
+
+    const effectiveDeliveryIsDeduction =
+      typeof deliveryIsDeduction === 'boolean'
+        ? deliveryIsDeduction
+        : totalsMode === 'seller';
+
+    const effectiveTotalLabel =
+      totalLabel?.trim() || (totalsMode === 'seller' ? 'Total received' : 'Total paid');
+
     const discountRow =
-      Number(discount || 0) > 0
+      totalsMode === 'buyer' && Number(discount || 0) > 0
         ? `
             <tr>
               <td style="padding:0 0 0 0;color:#6b7280;font-size:12px;line-height:1.4;">Discount</td>
@@ -432,6 +491,21 @@ export class EmailService {
             </tr>
           `
         : '';
+
+    const platformFeeRow = effectiveShowPlatformFee
+      ? `
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Platform fee</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
+                    platformFee,
+                  )}</td>
+                </tr>
+      `
+      : '';
+
+    const deliveryValue = effectiveDeliveryIsDeduction
+      ? `-${formatCurrency(delivery)}`
+      : formatCurrency(delivery);
 
     const itemRows = Array.isArray(items)
       ? items
@@ -496,6 +570,13 @@ export class EmailService {
           `
         : '';
 
+    const receiptTitle =
+      totalsMode === 'seller' ? 'Payment receipt (seller copy)' : 'Payment receipt';
+    const receiptSubtitle =
+      totalsMode === 'seller'
+        ? 'A confirmation of payment received for your Procur order.'
+        : 'Thank you for paying your Procur order.';
+
     return `
         <!-- Receipt header (table-based for email client compatibility) -->
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
@@ -508,10 +589,10 @@ export class EmailService {
                       Procur
                     </p>
                     <p style="font-size:16px;font-weight:600;color:#111827;margin:0 0 2px;">
-                      Payment receipt
+                      ${safeText(receiptTitle)}
                     </p>
                     <p style="margin:0;font-size:12px;color:#6b7280;line-height:1.4;">
-                      Thank you for paying your Procur order.
+                      ${safeText(receiptSubtitle)}
                     </p>
                   </td>
                   <td valign="top" align="right" style="padding:0;text-align:right;">
@@ -604,24 +685,21 @@ export class EmailService {
                   )}</td>
                 </tr>
                 <tr>
-                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Delivery</td>
-                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
-                    delivery,
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">${safeText(
+                    effectiveDeliveryLabel,
+                  )}</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${safeText(
+                    deliveryValue,
                   )}</td>
                 </tr>
-                <tr>
-                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Platform fee</td>
-                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
-                    platformFee,
-                  )}</td>
-                </tr>
+                ${platformFeeRow}
                 ${discountRow}
                 <tr>
                   <td colspan="2" style="padding:10px 0 0 0;border-top:1px solid #1118271a;">
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
                       <tr>
                         <td style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:700;color:#111827;padding:0;">
-                          Total paid
+                          ${safeText(effectiveTotalLabel)}
                         </td>
                         <td align="right" style="font-size:15px;font-weight:800;color:#111827;padding:0;">
                           ${formatCurrency(totalPaid)}
@@ -765,6 +843,7 @@ export class EmailService {
     totalPaid: number;
     currency: string;
   }): Promise<void> {
+    const totalReceived = Number((Number(params.subtotal || 0) - Number(params.delivery || 0)).toFixed(2));
     const innerHtml = this.buildPaymentReceiptInnerHtml({
       buyerName: params.buyerName,
       buyerEmail: params.buyerEmail,
@@ -778,11 +857,16 @@ export class EmailService {
       items: params.items,
       subtotal: params.subtotal,
       delivery: params.delivery,
-      platformFee: params.platformFee,
-      taxAmount: params.taxAmount,
-      discount: params.discount,
-      totalPaid: params.totalPaid,
+      platformFee: 0,
+      taxAmount: 0,
+      discount: 0,
+      totalPaid: totalReceived,
       currency: params.currency,
+      totalsMode: 'seller',
+      deliveryLabel: 'Delivery fee',
+      deliveryIsDeduction: true,
+      showPlatformFee: false,
+      totalLabel: 'Total received',
     });
 
     const cur = (v: number) =>
@@ -813,12 +897,8 @@ export class EmailService {
       ...itemsText,
       '',
       `Subtotal: ${cur(params.subtotal)}`,
-      `Delivery: ${cur(params.delivery)}`,
-      `Platform fee: ${cur(params.platformFee)}`,
-      ...(Number(params.discount || 0) > 0
-        ? [`Discount: -${cur(params.discount)}`]
-        : []),
-      `Total paid: ${cur(params.totalPaid)}`,
+      `Delivery fee: -${cur(params.delivery)}`,
+      `Total received: ${cur(totalReceived)}`,
       '',
       'This receipt confirms payment received via Procur for the above order.',
       'Keep this for your internal reconciliation and audit records.',

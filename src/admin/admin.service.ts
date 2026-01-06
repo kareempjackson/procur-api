@@ -1654,6 +1654,104 @@ export class AdminService {
   }
 
   /**
+   * Send a review-request email to the buyer admin contact for a delivered order.
+   * Includes a deep link to the buyer order review page in the frontend.
+   */
+  async sendBuyerOrderReviewRequestEmail(
+    buyerOrgId: string,
+    orderId: string,
+  ): Promise<{ success: boolean; to: string; reviewUrl: string }> {
+    const client = this.supabase.getClient();
+
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select(
+        `
+        id,
+        order_number,
+        status,
+        buyer_org_id,
+        seller_organization:organizations!seller_org_id(name)
+      `,
+      )
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found for this buyer');
+    }
+
+    if ((order.status as string) !== 'delivered') {
+      throw new BadRequestException(
+        'Can only request a review email for delivered orders',
+      );
+    }
+
+    const { adminEmail, adminFullname } =
+      await this.getOrganizationAdminContact(buyerOrgId);
+
+    if (!adminEmail) {
+      throw new BadRequestException(
+        'Buyer has no admin email on file (cannot send review email)',
+      );
+    }
+
+    const frontendUrl =
+      this.configService.get<string>('app.frontendUrl') ||
+      process.env.FRONTEND_URL ||
+      'http://localhost:3001';
+    const reviewUrl = `${frontendUrl}/buyer/orders/${orderId}/review`;
+
+    const orderNum = (order as any)?.order_number || orderId;
+    const sellerName = (order as any)?.seller_organization?.name || 'the seller';
+    const greetingName = adminFullname || 'there';
+
+    const subject = 'How was your Procur experience?';
+    const title = 'How was your Procur experience?';
+    const innerHtml = `
+      <h2 style="margin:0 0 12px;">Hi ${greetingName},</h2>
+      <p style="margin:0 0 12px;">
+        Thanks again for ordering on Procur. We’d love your feedback.
+      </p>
+      <p style="margin:0 0 12px;">
+        <strong>Please write a review</strong> for your recent order
+        <strong>${orderNum}</strong> from <strong>${sellerName}</strong> and let us know how your overall experience went.
+      </p>
+      <p style="margin-top: 16px;">
+        <a href="${reviewUrl}" class="button">Write a review</a>
+      </p>
+      <p class="muted" style="margin:12px 0 0;">
+        Or copy and paste this link into your browser:
+        <a href="${reviewUrl}">${reviewUrl}</a>
+      </p>
+    `;
+
+    const text = `How was your Procur experience?\n\nPlease write a review for order ${orderNum} from ${sellerName}:\n${reviewUrl}\n`;
+
+    // Strict so admin gets a real error if Postmark fails.
+    await this.email.sendBrandedEmailStrict(adminEmail, subject, title, innerHtml, text);
+
+    // Optional: timeline entry (best-effort)
+    try {
+      await client.from('order_timeline').insert({
+        order_id: orderId,
+        event_type: 'review_requested',
+        title: 'Review requested',
+        description: 'Admin sent a review request email to the buyer.',
+        actor_type: 'admin',
+        metadata: { channel: 'email' },
+        is_visible_to_buyer: true,
+        is_visible_to_seller: false,
+      });
+    } catch {
+      // ignore timeline failures
+    }
+
+    return { success: true, to: adminEmail, reviewUrl };
+  }
+
+  /**
    * Create a farm visit request on behalf of a seller organization.
    * This is used from the admin panel so staff can book a visit even
    * if the seller hasn't initiated the request from their dashboard.
@@ -1887,6 +1985,18 @@ export class AdminService {
     });
   }
 
+  async sendOrderSellerReceiptEmail(input: {
+    orderId: string;
+    email: string;
+    paymentReference?: string | null;
+  }): Promise<{ success: boolean }> {
+    return this.clearing.sendSellerReceiptToEmail({
+      orderId: input.orderId,
+      email: input.email,
+      paymentReference: input.paymentReference,
+    });
+  }
+
   async createOfflineOrder(
     input: AdminCreateOfflineOrderDto,
   ): Promise<{ id: string; order_number: string }> {
@@ -1978,11 +2088,20 @@ export class AdminService {
     const taxAmount = 0;
     const discountAmount = 0;
 
+    // Delivery splits are configurable. For offline orders created in the admin
+    // panel, store ONLY the buyer-facing portion in `orders.shipping_amount`.
+    // If buyer/seller shares are not configured, fall back to an even split of
+    // the configured flat delivery fee for backwards compatibility.
+    const configuredBuyerShare = Number(platformFees.buyerDeliveryShare ?? 0);
+    const configuredSellerShare = Number(platformFees.sellerDeliveryShare ?? 0);
+    const configuredFlatDelivery = Number(platformFees.deliveryFlatFee ?? 0);
+
     const fullDeliveryFee = hasShippingAddress
-      ? platformFees.deliveryFlatFee
+      ? configuredBuyerShare + configuredSellerShare || configuredFlatDelivery
       : 0;
-    const buyerDeliveryAmount = fullDeliveryFee
-      ? Number((fullDeliveryFee / 2).toFixed(2))
+
+    const buyerDeliveryAmount = hasShippingAddress
+      ? configuredBuyerShare || Number((fullDeliveryFee / 2).toFixed(2))
       : 0;
 
     // Entire platform fee is paid by the buyer (applied on items subtotal)

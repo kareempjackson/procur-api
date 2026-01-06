@@ -705,6 +705,54 @@ export class BuyersService {
 
   // ==================== CART METHODS ====================
 
+  /**
+   * Load platform fee configuration used to estimate buyer-facing delivery fees.
+   * Buyer apps should use `buyer_delivery_share` (not an implicit 50/50 split).
+   */
+  private async getPlatformFeesConfig(): Promise<{
+    platformFeePercent: number;
+    deliveryFlatFee: number;
+    buyerDeliveryShare: number;
+    sellerDeliveryShare: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+    const { data, error } = await client
+      .from('platform_fees_config')
+      .select(
+        'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+      )
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      // Fail-open: keep buyer flows working with sensible defaults.
+      return {
+        platformFeePercent: 5,
+        deliveryFlatFee: 20,
+        buyerDeliveryShare: 0,
+        sellerDeliveryShare: 0,
+        currency: 'XCD',
+      };
+    }
+
+    const row = data as {
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      currency: string | null;
+    };
+
+    return {
+      platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
+      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
+      buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
+      sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
+      currency: (row.currency as string | null) ?? 'XCD',
+    };
+  }
+
   async getCart(
     buyerOrgId: string,
     buyerUserId: string,
@@ -777,6 +825,18 @@ export class BuyersService {
       };
     }
 
+    const feesConfig = await this.getPlatformFeesConfig();
+    const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
+    const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
+    const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
+    const totalDeliveryFee =
+      configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
+    // Cart is an estimate (no route/address-based shipping yet). Use buyer share
+    // from config; if not configured, fall back to an even split.
+    const estimatedBuyerShipping = configuredBuyerShare
+      ? Number(configuredBuyerShare.toFixed(2))
+      : Number((totalDeliveryFee / 2).toFixed(2));
+
     // Group items by seller
     const sellerGroups = new Map<string, CartSellerGroupDto>();
     let totalItems = 0;
@@ -800,7 +860,7 @@ export class BuyersService {
             (product.seller_organization as any)?.name || 'Unknown Seller',
           items: [],
           subtotal: 0,
-          estimated_shipping: 10, // TODO: Calculate actual shipping
+          estimated_shipping: estimatedBuyerShipping,
           total: 0,
         });
       }
@@ -1531,7 +1591,16 @@ export class BuyersService {
     const unitPrice = quote.unit_price;
     const subtotal = unitPrice * acceptedQuantity;
     const taxAmount = subtotal * 0.08; // TODO: Calculate actual tax
-    const shippingAmount = 15; // TODO: Calculate actual shipping
+    // Buyer-facing delivery fee should come from platform fees config (buyer_delivery_share).
+    const feesConfig = await this.getPlatformFeesConfig();
+    const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
+    const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
+    const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
+    const totalDeliveryFee =
+      configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
+    const shippingAmount = configuredBuyerShare
+      ? Number(configuredBuyerShare.toFixed(2))
+      : Number((totalDeliveryFee / 2).toFixed(2));
     const totalAmount = subtotal + taxAmount + shippingAmount;
 
     // Get shipping address
@@ -1775,6 +1844,16 @@ export class BuyersService {
     // Create separate orders for each seller
     const createdOrders: any[] = [];
 
+    const feesConfig = await this.getPlatformFeesConfig();
+    const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
+    const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
+    const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
+    const totalDeliveryFee =
+      configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
+    const buyerDeliveryForOrder = configuredBuyerShare
+      ? Number(configuredBuyerShare.toFixed(2))
+      : Number((totalDeliveryFee / 2).toFixed(2));
+
     for (const [sellerOrgId, items] of sellerGroups) {
       this.logger.log(
         `Creating order for seller ${sellerOrgId} with ${items.length} item(s)`,
@@ -1783,7 +1862,9 @@ export class BuyersService {
         (sum, item) => sum + item.total_price,
         0,
       );
-      const shippingAmount = 10; // TODO: Calculate actual shipping
+      // Buyer-facing delivery fee should come from platform fees config (buyer_delivery_share).
+      // Note: This is per-seller order (the cart is split into multiple orders by seller).
+      const shippingAmount = buyerDeliveryForOrder;
       const taxAmount = orderSubtotal * 0.08; // TODO: Calculate actual tax
       const totalAmount = orderSubtotal + shippingAmount + taxAmount;
 
@@ -2580,8 +2661,47 @@ Manage this order: ${link}`;
   async generateOrderInvoicePdf(
     buyerOrgId: string,
     orderId: string,
+    options?: {
+      /**
+       * Allows callers (e.g. seller invoice download) to explicitly set the
+       * buyer company name shown under "BILLED TO" rather than relying on a lookup.
+       */
+      billedToCompanyName?: string;
+      /**
+       * Allows callers (e.g. seller receipts) to override the delivery fee line
+       * amount used in totals calculations.
+       */
+      deliveryFeeAmountOverride?: number;
+      /**
+       * Controls totals rendering. "buyer" keeps existing invoice math.
+       * "seller" renders a seller-facing payout view:
+       *  - Subtotal
+       *  - Minus delivery fee (seller share from admin config)
+       *  - No platform fee line
+       *  - "Amount received" label
+       */
+      totalsMode?: 'buyer' | 'seller';
+    },
   ): Promise<{ buffer: Buffer; invoiceNumber: string }> {
     const order = await this.getOrderById(buyerOrgId, orderId);
+
+    // Resolve buyer company name (used in "BILLED TO") BEFORE entering the PDF render Promise.
+    // The PDF rendering path must stay synchronous (no `await` inside the Promise executor).
+    let resolvedBuyerCompanyName = (options?.billedToCompanyName || '').trim();
+    try {
+      if (!resolvedBuyerCompanyName) {
+        const client = this.supabase.getClient();
+        const { data: buyerOrg } = await client
+          .from('organizations')
+          .select('name, business_name')
+          .eq('id', buyerOrgId)
+          .single();
+        resolvedBuyerCompanyName =
+          (buyerOrg as any)?.business_name || (buyerOrg as any)?.name || '';
+      }
+    } catch {
+      // Non-fatal: fall back to shipping/company fields in the renderer
+    }
 
     // Dynamically require pdfkit to avoid ESM/CJS interop issues
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2846,10 +2966,30 @@ Manage this order: ${link}`;
         .text('BILLED TO', billedX, partiesTopY, { width: partiesColW });
 
       const shipping = order.shipping_address as any;
+      // Include company/organization name (not just address), then contact person (Attn) if available.
+      // Buyer org name is the most reliable source of truth for "Billed To".
+      const buyerCompanyName = resolvedBuyerCompanyName;
+
+      const buyerContactName =
+        shipping?.contact_name ||
+        (buyerCompanyName ? shipping?.name : shipping?.name || '') ||
+        (order as any)?.buyer_name ||
+        '';
+
       const buyerName =
-        shipping?.name || shipping?.contact_name || (order as any)?.buyer_name || '';
+        buyerCompanyName ||
+        shipping?.company ||
+        shipping?.organization_name ||
+        shipping?.name ||
+        shipping?.contact_name ||
+        (order as any)?.buyer_name ||
+        '';
       const buyerContact =
-        shipping?.contact_name && shipping?.name ? shipping?.contact_name : '';
+        buyerCompanyName && buyerContactName && buyerContactName !== buyerName
+          ? buyerContactName
+          : shipping?.contact_name && shipping?.name
+            ? shipping?.contact_name
+            : '';
       const buyerAddr1 =
         shipping?.address_line1 ||
         shipping?.street_address ||
@@ -3062,7 +3202,9 @@ Manage this order: ${link}`;
         instrY += 12;
       });
 
-      const subtotalAmount = Number((order as any)?.subtotal ?? order.subtotal ?? 0);
+      const subtotalAmount = Number(
+        (order as any)?.subtotal ?? order.subtotal ?? 0,
+      );
       const delivery = Number((order as any)?.shipping_amount ?? 0);
       const discount = Number((order as any)?.discount_amount ?? 0);
       const taxAmount = Number((order as any)?.tax_amount ?? 0);
@@ -3080,47 +3222,81 @@ Manage this order: ${link}`;
           ? explicitPlatformFee
           : Math.max(0, computedPlatformFee);
       const totalAmount =
-        totalFromApi || subtotalAmount + delivery + platformFee + taxAmount - discount;
+        totalFromApi ||
+        subtotalAmount + delivery + platformFee + taxAmount - discount;
 
-      const totalRow = (label: string, value: string, y: number, bold = false) => {
+      const totalRow = (
+        label: string,
+        value: string,
+        y: number,
+        bold = false,
+        color?: string,
+      ) => {
         doc
-          .fillColor(colors.muted)
+          .fillColor(color || colors.muted)
           .font('Helvetica')
           .fontSize(9)
           .text(label, totalsX, y, { width: totalsW / 2, align: 'left' });
         doc
-          .fillColor(colors.text)
+          .fillColor(color ? color : colors.text)
           .font(bold ? 'Helvetica-Bold' : 'Helvetica')
           .fontSize(bold ? 12 : 9)
           .text(value, totalsX, y, { width: totalsW, align: 'right' });
       };
 
       let ty = totalsTopY + 2;
-      totalRow('Subtotal', formatCurrency(subtotalAmount), ty);
-      ty += 12;
-      totalRow('Delivery & handling', formatCurrency(delivery), ty);
-      ty += 12;
-      totalRow('Platform fee', formatCurrency(platformFee), ty);
-      ty += 12;
-      if (taxAmount > 0) {
-        totalRow('Tax', formatCurrency(taxAmount), ty);
+      const totalsMode = options?.totalsMode || 'buyer';
+      if (totalsMode === 'seller') {
+        // Seller-facing payout view:
+        // - Start with subtotal (product revenue)
+        // - Subtract delivery fee (seller share from admin config)
+        // - No platform fee
+        const deliveryFeeAmount =
+          typeof options?.deliveryFeeAmountOverride === 'number'
+            ? Number(options.deliveryFeeAmountOverride || 0)
+            : delivery;
+        totalRow('Subtotal', formatCurrency(subtotalAmount), ty);
         ty += 12;
-      }
-      if (discount > 0) {
-        doc
-          .fillColor('#059669')
-          .font('Helvetica')
-          .fontSize(9)
-          .text('Discount', totalsX, ty, { width: totalsW / 2, align: 'left' });
-        doc
-          .fillColor('#059669')
-          .font('Helvetica')
-          .fontSize(9)
-          .text(`-${formatCurrency(discount)}`, totalsX, ty, {
-            width: totalsW,
-            align: 'right',
-          });
+        if (deliveryFeeAmount > 0) {
+          totalRow(
+            'Delivery fee',
+            `-${formatCurrency(deliveryFeeAmount)}`,
+            ty,
+            false,
+            '#6C715D',
+          );
+          ty += 12;
+        }
+      } else {
+        totalRow('Subtotal', formatCurrency(subtotalAmount), ty);
         ty += 12;
+        totalRow('Delivery & handling', formatCurrency(delivery), ty);
+        ty += 12;
+        totalRow('Platform fee', formatCurrency(platformFee), ty);
+        ty += 12;
+        if (taxAmount > 0) {
+          totalRow('Tax', formatCurrency(taxAmount), ty);
+          ty += 12;
+        }
+        if (discount > 0) {
+          doc
+            .fillColor('#059669')
+            .font('Helvetica')
+            .fontSize(9)
+            .text('Discount', totalsX, ty, {
+              width: totalsW / 2,
+              align: 'left',
+            });
+          doc
+            .fillColor('#059669')
+            .font('Helvetica')
+            .fontSize(9)
+            .text(`-${formatCurrency(discount)}`, totalsX, ty, {
+              width: totalsW,
+              align: 'right',
+            });
+          ty += 12;
+        }
       }
 
       // divider
@@ -3131,7 +3307,16 @@ Manage this order: ${link}`;
         .lineWidth(1)
         .stroke();
       ty += 14;
-      totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+      if ((options?.totalsMode || 'buyer') === 'seller') {
+        const deliveryFeeAmount =
+          typeof options?.deliveryFeeAmountOverride === 'number'
+            ? Number(options.deliveryFeeAmountOverride || 0)
+            : delivery;
+        const amountReceived = subtotalAmount - deliveryFeeAmount;
+        totalRow('Amount received', formatCurrency(amountReceived), ty, true);
+      } else {
+        totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+      }
 
       // Footer note (match UI ClassicInvoice: note sits BELOW the main card)
       const footerNote =

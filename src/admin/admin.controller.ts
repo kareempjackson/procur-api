@@ -467,6 +467,37 @@ export class AdminController {
     });
   }
 
+  @Post('orders/:id/send-seller-receipt')
+  @ApiOperation({
+    summary: 'Send seller receipt to a custom email',
+    description:
+      'Sends the existing seller receipt template to the provided email address for this order.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', format: 'email' },
+        paymentReference: { type: 'string' },
+      },
+      required: ['email'],
+    },
+  })
+  async sendOrderSellerReceipt(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      email: string;
+      paymentReference?: string | null;
+    },
+  ) {
+    return this.adminService.sendOrderSellerReceiptEmail({
+      orderId: id,
+      email: body.email,
+      paymentReference: body.paymentReference,
+    });
+  }
+
   @Post('orders/bulk-delete')
   @ApiOperation({
     summary: 'Bulk delete orders (admin)',
@@ -632,6 +663,26 @@ export class AdminController {
       buyerOrgId,
       orderId,
       reviewDto,
+    );
+  }
+
+  @Post('buyers/:buyerOrgId/orders/:orderId/review-email')
+  @ApiOperation({
+    summary: 'Send review request email to buyer',
+    description:
+      'Sends an email to the buyer admin contact asking them to write a review for a delivered order. Includes a link to the buyer order review page.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Review request email sent successfully',
+  })
+  async sendBuyerReviewRequestEmail(
+    @Param('buyerOrgId') buyerOrgId: string,
+    @Param('orderId') orderId: string,
+  ): Promise<{ success: boolean; to: string; reviewUrl: string }> {
+    return this.adminService.sendBuyerOrderReviewRequestEmail(
+      buyerOrgId,
+      orderId,
     );
   }
 
