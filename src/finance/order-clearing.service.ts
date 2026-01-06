@@ -15,6 +15,95 @@ export class OrderClearingService {
     private readonly email: EmailService,
   ) {}
 
+  private mapPaymentLinkMetaToReceiptItems(meta: any): {
+    name: string;
+    quantity: number;
+    unitPrice: number;
+    lineTotal: number;
+  }[] {
+    const metaLineItems = Array.isArray(meta?.line_items) ? meta.line_items : [];
+    const metaLineItem = meta?.line_item as any | undefined;
+
+    const itemsForDisplay =
+      metaLineItems.length > 0 ? metaLineItems : metaLineItem ? [metaLineItem] : [];
+
+    if (!itemsForDisplay.length) return [];
+
+    return itemsForDisplay.map((li: any) => {
+      const quantity = Number(li?.quantity || 0) || 0;
+      const unitPrice = Number(li?.unit_price ?? li?.price ?? 0) || 0;
+      const lineTotal =
+        li?.total_price != null
+          ? Number(li.total_price) || quantity * unitPrice
+          : quantity * unitPrice;
+
+      return {
+        name: String(li?.product_name || li?.name || 'Item'),
+        quantity,
+        unitPrice,
+        lineTotal,
+      };
+    });
+  }
+
+  private async loadReceiptItems(
+    client: any,
+    orderId: string,
+  ): Promise<
+    {
+      name: string;
+      quantity: number;
+      unitPrice: number;
+      lineTotal: number;
+    }[]
+  > {
+    // Primary source: order_items (normal marketplace orders)
+    const { data: rawItems, error: itemsError } = await client
+      .from('order_items')
+      .select('product_name, unit_price, quantity, total_price, created_at')
+      .eq('order_id', orderId)
+      .order('created_at', { ascending: true });
+
+    const { data: rawItemsFallback } =
+      itemsError && !rawItems
+        ? await client
+            .from('order_items')
+            .select('product_name, unit_price, quantity, total_price')
+            .eq('order_id', orderId)
+        : { data: null };
+
+    const fromOrderItems = Array.isArray(rawItems)
+      ? rawItems
+      : Array.isArray(rawItemsFallback)
+        ? rawItemsFallback
+        : [];
+
+    const normalized = fromOrderItems.map((it: any) => {
+      const quantity = Number(it?.quantity ?? 0) || 0;
+      const unitPrice = Number(it?.unit_price ?? 0) || 0;
+      const lineTotal =
+        Number(it?.total_price ?? quantity * unitPrice) || quantity * unitPrice;
+      return {
+        name: String(it?.product_name ?? 'Item'),
+        quantity,
+        unitPrice,
+        lineTotal,
+      };
+    });
+
+    if (normalized.length > 0) return normalized;
+
+    // Fallback: offline/payment-link flows may store items in payment_links.meta
+    const { data: link } = await client
+      .from('payment_links')
+      .select('meta')
+      .eq('order_id', orderId)
+      .maybeSingle();
+
+    const meta = (link as any)?.meta as any;
+    return this.mapPaymentLinkMetaToReceiptItems(meta);
+  }
+
   async sendReceiptToEmail(input: {
     orderId: string;
     email: string;
@@ -25,7 +114,7 @@ export class OrderClearingService {
     const { data: order, error: orderError } = await client
       .from('orders')
       .select(
-        'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, payment_status, shipping_address',
+        'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, payment_status, shipping_address, created_at',
       )
       .eq('id', input.orderId)
       .single();
@@ -71,8 +160,41 @@ export class OrderClearingService {
 
     const email = input.email;
     const nowIso = new Date().toISOString();
+    const orderDateIso =
+      (order as { created_at?: string | null } | null)?.created_at ?? nowIso;
     const receiptNumber = order.order_number || order.id;
     const paymentStatus = (order.payment_status as string | null) ?? 'paid';
+
+    const items = await this.loadReceiptItems(client, order.id as string);
+
+    // Platform fee:
+    // - prefer a transaction platform_fee if present
+    // - otherwise derive from totals (matches buyers.service logic)
+    const subtotalAmount = Number(order.subtotal ?? 0);
+    const delivery = Number(order.shipping_amount ?? 0);
+    const discount = Number(order.discount_amount ?? 0);
+    const taxAmount = Number(order.tax_amount ?? 0);
+    const totalFromApi = Number(order.total_amount ?? 0);
+
+    const { data: lastTx } = await client
+      .from('transactions')
+      .select('platform_fee')
+      .eq('order_id', order.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const explicitPlatformFee = Number(
+      (lastTx as { platform_fee?: number | null } | null)?.platform_fee ?? 0,
+    );
+
+    const computedPlatformFee =
+      totalFromApi - subtotalAmount - delivery - taxAmount + discount;
+
+    const platformFee =
+      explicitPlatformFee > 0
+        ? explicitPlatformFee
+        : Math.max(0, computedPlatformFee);
 
     // Build a simple address line from shipping_address if present
     const shippingAddr = order.shipping_address as
@@ -99,18 +221,19 @@ export class OrderClearingService {
       buyerAddress,
       buyerContact: buyerContactName,
       receiptNumber,
-      paymentDate: nowIso,
+      paymentDate: orderDateIso,
       orderNumber:
         (order.order_number as string | null) || (order.id as string),
       paymentMethod: 'Offline payment',
       paymentReference: input.paymentReference || null,
       paymentStatus,
-      subtotal: Number(order.subtotal ?? 0),
-      delivery: Number(order.shipping_amount ?? 0),
-      platformFee: 0,
-      taxAmount: Number(order.tax_amount ?? 0),
-      discount: Number(order.discount_amount ?? 0),
-      totalPaid: Number(order.total_amount ?? 0),
+      items,
+      subtotal: subtotalAmount,
+      delivery,
+      platformFee,
+      taxAmount,
+      discount,
+      totalPaid: totalFromApi,
       currency: String(order.currency || 'XCD'),
     });
 
@@ -597,7 +720,7 @@ export class OrderClearingService {
         const { data: order, error: orderError } = await client
           .from('orders')
           .select(
-            'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency',
+            'id, order_number, buyer_org_id, buyer_user_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, created_at',
           )
           .eq('id', tx.order_id as string)
           .single();
@@ -678,6 +801,9 @@ export class OrderClearingService {
         }
 
         if (buyerEmail) {
+          const orderDateIso =
+            (order as { created_at?: string | null } | null)?.created_at ??
+            nowIso;
           const buyerName =
             buyerOrgName || buyerContactName || buyerEmail || 'Customer';
           const receiptNumber =
@@ -690,13 +816,15 @@ export class OrderClearingService {
           const platformFee =
             (tx as { platform_fee?: number | null }).platform_fee ?? 0;
 
+          const items = await this.loadReceiptItems(client, order.id as string);
+
           await this.email.sendBuyerCompletionReceipt({
             email: buyerEmail,
             buyerName,
             buyerEmail,
             buyerContact: buyerContactName,
             receiptNumber,
-            paymentDate: nowIso,
+            paymentDate: orderDateIso,
             orderNumber:
               (order.order_number as string | null) || (order.id as string),
             paymentMethod:
@@ -705,6 +833,7 @@ export class OrderClearingService {
             paymentReference:
               (updatedMeta.bank_reference as string | undefined | null) ?? null,
             paymentStatus: 'settled',
+            items,
             subtotal: Number(order.subtotal ?? 0),
             delivery: Number(order.shipping_amount ?? 0),
             platformFee: Number(platformFee ?? 0),
@@ -819,7 +948,7 @@ export class OrderClearingService {
         const { data: order, error: orderError2 } = await client
           .from('orders')
           .select(
-            'id, order_number, buyer_org_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency',
+            'id, order_number, buyer_org_id, seller_org_id, subtotal, tax_amount, shipping_amount, discount_amount, total_amount, currency, created_at',
           )
           .eq('id', tx.order_id as string)
           .single();
@@ -908,6 +1037,10 @@ export class OrderClearingService {
           input.transactionId;
         const orderNumber =
           (order.order_number as string | null) || (order.id as string);
+        const orderDateIso =
+          (order as { created_at?: string | null } | null)?.created_at ?? nowIso;
+
+        const items = await this.loadReceiptItems(client, order.id as string);
 
         if (sellerOrgId) {
           const { data: orgUsers } = await client
@@ -948,7 +1081,7 @@ export class OrderClearingService {
                 buyerEmail: buyerEmail ?? 'N/A',
                 buyerContact: buyerContactName,
                 receiptNumber,
-                paymentDate: nowIso,
+                paymentDate: orderDateIso,
                 orderNumber,
                 paymentMethod:
                   (tx as { payment_method?: string | null }).payment_method ||
@@ -957,6 +1090,7 @@ export class OrderClearingService {
                   (updatedMeta.payout_proof_url as string | undefined | null) ??
                   null,
                 paymentStatus: 'completed',
+                items,
                 subtotal: Number(order.subtotal ?? 0),
                 delivery: Number(order.shipping_amount ?? 0),
                 platformFee: Number(platformFee ?? 0),

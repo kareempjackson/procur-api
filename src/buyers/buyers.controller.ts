@@ -654,12 +654,14 @@ export class BuyersController {
     @Param('id', ParseUUIDPipe) orderId: string,
     @Res() res: Response,
   ): Promise<void> {
-    const buffer = await this.buyersService.generateOrderInvoicePdf(
+    const { buffer, invoiceNumber } =
+      await this.buyersService.generateOrderInvoicePdf(
       user.organizationId!,
       orderId,
     );
 
-    const filename = `procur-invoice-${orderId}.pdf`;
+    // Keep filename stable for users (prefer invoice number / order number)
+    const filename = `procur-invoice-${invoiceNumber}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length.toString());

@@ -310,6 +310,12 @@ export class EmailService {
     paymentMethod: string;
     paymentReference?: string | null;
     paymentStatus: string;
+    items?: {
+      name: string;
+      quantity: number;
+      unitPrice: number;
+      lineTotal: number;
+    }[];
     subtotal: number;
     delivery: number;
     platformFee: number;
@@ -323,20 +329,51 @@ export class EmailService {
       paymentDate,
       orderNumber,
       buyerName,
+      buyerEmail,
       buyerAddress,
       buyerContact,
+      paymentMethod,
       paymentReference,
       paymentStatus,
+      items,
       subtotal,
       delivery,
       platformFee,
+      taxAmount,
+      discount,
       totalPaid,
       currency,
     } = params;
 
+    const safeText = (value: unknown): string => {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    };
+
     const formatCurrency = (value: number): string => {
       const amount = Number.isFinite(value) ? Number(value) : 0;
-      return `${currency.toUpperCase()} ${amount.toFixed(2)}`;
+      return `${currency.toUpperCase()} ${amount.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+    };
+
+    const formatPaymentDate = (value: string): string => {
+      // Accept ISO strings and already formatted text.
+      const parsed = new Date(value);
+      if (!Number.isFinite(parsed.getTime())) return safeText(value);
+      return parsed.toLocaleString('en-US', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
     };
 
     const safeContact =
@@ -345,7 +382,13 @@ export class EmailService {
         : null;
 
     const contactLine = safeContact
-      ? `<p class="muted" style="margin:0 0 2px;">Contact: ${safeContact}</p>`
+      ? `
+          <tr>
+            <td style="padding:0 0 2px 0;color:#6b7280;font-size:12px;line-height:1.4;">
+              Contact: ${safeText(safeContact)}
+            </td>
+          </tr>
+        `
       : '';
 
     const safeAddress =
@@ -354,7 +397,13 @@ export class EmailService {
         : null;
 
     const addressLine = safeAddress
-      ? `<p class="muted" style="margin:0 0 2px;">${safeAddress}</p>`
+      ? `
+          <tr>
+            <td style="padding:0 0 2px 0;color:#6b7280;font-size:12px;line-height:1.4;">
+              ${safeText(safeAddress)}
+            </td>
+          </tr>
+        `
       : '';
 
     const safeReference =
@@ -363,85 +412,230 @@ export class EmailService {
         : null;
 
     const referenceLine = safeReference
-      ? `<p class="muted" style="margin:0 0 2px;">Ref: ${safeReference}</p>`
+      ? `
+          <tr>
+            <td style="padding:0 0 2px 0;color:#6b7280;font-size:12px;line-height:1.4;">
+              Ref: ${safeText(safeReference)}
+            </td>
+          </tr>
+        `
       : '';
 
+    const discountRow =
+      Number(discount || 0) > 0
+        ? `
+            <tr>
+              <td style="padding:0 0 0 0;color:#6b7280;font-size:12px;line-height:1.4;">Discount</td>
+              <td align="right" style="padding:0 0 0 0;color:#059669;font-size:12px;line-height:1.4;font-weight:700;">-${formatCurrency(
+                discount,
+              )}</td>
+            </tr>
+          `
+        : '';
+
+    const itemRows = Array.isArray(items)
+      ? items
+          .filter((it) => (it?.name ?? '').toString().trim().length > 0)
+          .slice(0, 50)
+          .map((it) => {
+            const name = safeText(it.name);
+            const qty = Number(it.quantity ?? 0) || 0;
+            const unitPrice = Number(it.unitPrice ?? 0) || 0;
+            const lineTotal = Number(it.lineTotal ?? qty * unitPrice) || 0;
+            return `
+              <tr>
+                <td style="padding:8px 0;border-top:1px solid #f1f1f1;color:#111827;font-size:12px;line-height:1.4;">
+                  ${name}
+                </td>
+                <td align="right" style="padding:8px 0;border-top:1px solid #f1f1f1;color:#6b7280;font-size:12px;line-height:1.4;">
+                  ${qty}
+                </td>
+                <td align="right" style="padding:8px 0;border-top:1px solid #f1f1f1;color:#6b7280;font-size:12px;line-height:1.4;">
+                  ${formatCurrency(unitPrice)}
+                </td>
+                <td align="right" style="padding:8px 0;border-top:1px solid #f1f1f1;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">
+                  ${formatCurrency(lineTotal)}
+                </td>
+              </tr>
+            `;
+          })
+          .join('')
+      : '';
+
+    const itemsBlock =
+      itemRows.trim().length > 0
+        ? `
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:0 0 12px 0;">
+              <tr>
+                <td style="padding:0 0 8px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:800;text-transform:uppercase;letter-spacing:0.16em;">
+                  Items purchased
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:0;">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                    <tr>
+                      <td style="padding:8px 0;border-top:1px solid #e5e7eb;color:#6b7280;font-size:11px;line-height:1.4;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;">
+                        Item
+                      </td>
+                      <td align="right" style="padding:8px 0;border-top:1px solid #e5e7eb;color:#6b7280;font-size:11px;line-height:1.4;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;">
+                        Qty
+                      </td>
+                      <td align="right" style="padding:8px 0;border-top:1px solid #e5e7eb;color:#6b7280;font-size:11px;line-height:1.4;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;">
+                        Unit
+                      </td>
+                      <td align="right" style="padding:8px 0;border-top:1px solid #e5e7eb;color:#6b7280;font-size:11px;line-height:1.4;font-weight:800;text-transform:uppercase;letter-spacing:0.12em;">
+                        Total
+                      </td>
+                    </tr>
+                    ${itemRows}
+                  </table>
+                </td>
+              </tr>
+            </table>
+          `
+        : '';
+
     return `
-        <div style="display:flex;justify-content:space-between;gap:16px;border-bottom:1px dashed #e5e7eb;padding-bottom:12px;margin-bottom:12px;">
-          <div>
-            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 4px;">
-              Procur
-            </p>
-            <p style="font-size:16px;font-weight:600;color:#111827;margin:0 0 2px;">
-              Payment receipt
-            </p>
-            <p class="muted" style="margin:0;font-size:12px;color:#6b7280;">
-              Thank you for paying your Procur order.
-            </p>
-          </div>
-          <div style="text-align:right;font-size:12px;color:#6b7280;">
-            <p style="margin:0 0 2px;">
-              Receipt:
-              <span style="font-weight:500;color:#111827;">${receiptNumber}</span>
-            </p>
-            <p style="margin:0 0 2px;">${paymentDate}</p>
-            <p style="margin:0;">Order: ${orderNumber}</p>
-          </div>
-        </div>
+        <!-- Receipt header (table-based for email client compatibility) -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+          <tr>
+            <td style="padding:0 0 12px 0;border-bottom:1px dashed #e5e7eb;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                  <td valign="top" style="padding:0;">
+                    <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 4px;">
+                      Procur
+                    </p>
+                    <p style="font-size:16px;font-weight:600;color:#111827;margin:0 0 2px;">
+                      Payment receipt
+                    </p>
+                    <p style="margin:0;font-size:12px;color:#6b7280;line-height:1.4;">
+                      Thank you for paying your Procur order.
+                    </p>
+                  </td>
+                  <td valign="top" align="right" style="padding:0;text-align:right;">
+                    <p style="margin:0 0 2px;font-size:12px;color:#6b7280;line-height:1.4;">
+                      Receipt:
+                      <span style="font-weight:600;color:#111827;">${safeText(
+                        receiptNumber,
+                      )}</span>
+                    </p>
+                    <p style="margin:0 0 2px;font-size:12px;color:#6b7280;line-height:1.4;">
+                      ${formatPaymentDate(paymentDate)}
+                    </p>
+                    <p style="margin:0;font-size:12px;color:#6b7280;line-height:1.4;">
+                      Order: ${safeText(orderNumber)}
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
 
-        <div style="display:flex;justify-content:space-between;gap:16px;font-size:12px;margin-bottom:12px;">
-          <div>
-            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
-              Paid by
-            </p>
-            <p style="margin:0 0 2px;color:#111827;font-weight:500;">
-              ${buyerName}
-            </p>
-            ${addressLine}
-            ${contactLine}
-          </div>
-          <div style="text-align:right;">
-            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
-              Payment
-            </p>
-            ${referenceLine}
-            <p class="muted" style="margin:0;">
-              Status:
-              <span style="text-transform:capitalize;">${paymentStatus}</span>
-            </p>
-          </div>
-        </div>
+        <!-- Buyer + payment meta -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:12px 0 12px 0;">
+          <tr>
+            <td valign="top" style="padding:0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                  <td valign="top" style="padding:0;">
+                    <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
+                      Paid by
+                    </p>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                      <tr>
+                        <td style="padding:0 0 2px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">
+                          ${safeText(buyerName)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="padding:0 0 2px 0;color:#6b7280;font-size:12px;line-height:1.4;">
+                          <a href="mailto:${safeText(
+                            buyerEmail,
+                          )}" style="color:#6b7280;text-decoration:underline;">${safeText(
+                            buyerEmail,
+                          )}</a>
+                        </td>
+                      </tr>
+                      ${addressLine}
+                      ${contactLine}
+                    </table>
+                  </td>
+                  <td valign="top" align="right" style="padding:0;text-align:right;">
+                    <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 2px;">
+                      Payment
+                    </p>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                      <tr>
+                        <td style="padding:0 0 2px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">
+                          ${safeText(paymentMethod)}
+                        </td>
+                      </tr>
+                      ${referenceLine}
+                      <tr>
+                        <td style="padding:0;color:#6b7280;font-size:12px;line-height:1.4;">
+                          Status:
+                          <span style="text-transform:capitalize;">${safeText(
+                            paymentStatus,
+                          )}</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
 
-        <div style="border:1px solid #e5e7eb;border-radius:12px;padding:12px;font-size:12px;margin-bottom:12px;">
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span class="muted">Subtotal</span>
-            <span style="font-weight:500;color:#111827;">${formatCurrency(
-              subtotal,
-            )}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span class="muted">Delivery</span>
-            <span style="font-weight:500;color:#111827;">${formatCurrency(
-              delivery,
-            )}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span class="muted">Platform fee</span>
-            <span style="font-weight:500;color:#111827;">${formatCurrency(
-              platformFee,
-            )}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;margin-top:8px;padding-top:6px;border-top:1px solid #1118271a;">
-            <span style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:600;color:#111827;">
-              Total paid
-            </span>
-            <span style="font-size:15px;font-weight:600;color:#111827;">
-              ${formatCurrency(totalPaid)}
-            </span>
-          </div>
-        </div>
+        ${itemsBlock}
 
-        <p class="muted" style="font-size:11px;color:#6b7280;line-height:1.5;margin:0;">
+        <!-- Totals -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #e5e7eb;border-radius:12px;margin:0 0 12px 0;">
+          <tr>
+            <td style="padding:12px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Subtotal</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
+                    subtotal,
+                  )}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Delivery</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
+                    delivery,
+                  )}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Platform fee</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(
+                    platformFee,
+                  )}</td>
+                </tr>
+                ${discountRow}
+                <tr>
+                  <td colspan="2" style="padding:10px 0 0 0;border-top:1px solid #1118271a;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                      <tr>
+                        <td style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:700;color:#111827;padding:0;">
+                          Total paid
+                        </td>
+                        <td align="right" style="font-size:15px;font-weight:800;color:#111827;padding:0;">
+                          ${formatCurrency(totalPaid)}
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+
+        <p style="font-size:11px;color:#6b7280;line-height:1.5;margin:0;">
           This receipt confirms payment received via Procur for the above order.
           Keep this for your internal reconciliation and audit records.
         </p>
@@ -460,6 +654,12 @@ export class EmailService {
     paymentMethod: string;
     paymentReference?: string | null;
     paymentStatus: string;
+    items?: {
+      name: string;
+      quantity: number;
+      unitPrice: number;
+      lineTotal: number;
+    }[];
     subtotal: number;
     delivery: number;
     platformFee: number;
@@ -479,6 +679,7 @@ export class EmailService {
       paymentMethod: params.paymentMethod,
       paymentReference: params.paymentReference,
       paymentStatus: params.paymentStatus,
+      items: params.items,
       subtotal: params.subtotal,
       delivery: params.delivery,
       platformFee: params.platformFee,
@@ -491,6 +692,20 @@ export class EmailService {
     const cur = (v: number) =>
       `${params.currency.toUpperCase()} ${Number(v || 0).toFixed(2)}`;
 
+    const itemsText = Array.isArray(params.items) && params.items.length > 0
+      ? [
+          '',
+          'Items purchased:',
+          ...params.items.slice(0, 50).map((it) => {
+            const qty = Number(it.quantity ?? 0) || 0;
+            const unit = cur(Number(it.unitPrice ?? 0));
+            const total = cur(Number(it.lineTotal ?? 0));
+            const name = String(it.name ?? 'Item');
+            return `- ${name} (${qty} × ${unit}) = ${total}`;
+          }),
+        ]
+      : [];
+
     const textBody = [
       'Payment receipt',
       '',
@@ -499,12 +714,14 @@ export class EmailService {
       `Paid by: ${params.buyerName} (${params.buyerEmail})`,
       `Payment method: ${params.paymentMethod}`,
       `Status: ${params.paymentStatus}`,
+      ...itemsText,
       '',
       `Subtotal: ${cur(params.subtotal)}`,
       `Delivery: ${cur(params.delivery)}`,
       `Platform fee: ${cur(params.platformFee)}`,
-      `Tax: ${cur(params.taxAmount)}`,
-      `Discount: -${cur(params.discount)}`,
+      ...(Number(params.discount || 0) > 0
+        ? [`Discount: -${cur(params.discount)}`]
+        : []),
       `Total paid: ${cur(params.totalPaid)}`,
       '',
       'This receipt confirms payment received via Procur for the above order.',
@@ -534,6 +751,12 @@ export class EmailService {
     paymentMethod: string;
     paymentReference?: string | null;
     paymentStatus: string;
+    items?: {
+      name: string;
+      quantity: number;
+      unitPrice: number;
+      lineTotal: number;
+    }[];
     subtotal: number;
     delivery: number;
     platformFee: number;
@@ -552,6 +775,7 @@ export class EmailService {
       paymentMethod: params.paymentMethod,
       paymentReference: params.paymentReference,
       paymentStatus: params.paymentStatus,
+      items: params.items,
       subtotal: params.subtotal,
       delivery: params.delivery,
       platformFee: params.platformFee,
@@ -564,6 +788,20 @@ export class EmailService {
     const cur = (v: number) =>
       `${params.currency.toUpperCase()} ${Number(v || 0).toFixed(2)}`;
 
+    const itemsText = Array.isArray(params.items) && params.items.length > 0
+      ? [
+          '',
+          'Items purchased:',
+          ...params.items.slice(0, 50).map((it) => {
+            const qty = Number(it.quantity ?? 0) || 0;
+            const unit = cur(Number(it.unitPrice ?? 0));
+            const total = cur(Number(it.lineTotal ?? 0));
+            const name = String(it.name ?? 'Item');
+            return `- ${name} (${qty} × ${unit}) = ${total}`;
+          }),
+        ]
+      : [];
+
     const textBody = [
       'Payment receipt (seller copy)',
       '',
@@ -572,12 +810,14 @@ export class EmailService {
       `Paid by: ${params.buyerName} (${params.buyerEmail})`,
       `Payment method: ${params.paymentMethod}`,
       `Status: ${params.paymentStatus}`,
+      ...itemsText,
       '',
       `Subtotal: ${cur(params.subtotal)}`,
       `Delivery: ${cur(params.delivery)}`,
       `Platform fee: ${cur(params.platformFee)}`,
-      `Tax: ${cur(params.taxAmount)}`,
-      `Discount: -${cur(params.discount)}`,
+      ...(Number(params.discount || 0) > 0
+        ? [`Discount: -${cur(params.discount)}`]
+        : []),
       `Total paid: ${cur(params.totalPaid)}`,
       '',
       'This receipt confirms payment received via Procur for the above order.',

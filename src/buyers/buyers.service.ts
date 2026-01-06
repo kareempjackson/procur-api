@@ -2157,8 +2157,9 @@ Manage this order: ${link}`;
     } = query;
     const offset = (page - 1) * limit;
 
-    let queryBuilder = this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+
+    let queryBuilder = client
       .from('orders')
       .select(
         `
@@ -2190,13 +2191,78 @@ Manage this order: ${link}`;
       throw new BadRequestException(`Failed to fetch orders: ${error.message}`);
     }
 
+    const orderList = orders || [];
+    const orderIds = orderList.map((o: any) => o?.id).filter(Boolean);
+    const sellerOrgIdByOrderId = new Map<string, string>();
+    for (const o of orderList) {
+      if (o?.id && o?.seller_org_id) {
+        sellerOrgIdByOrderId.set(o.id, o.seller_org_id);
+      }
+    }
+
+    // Load order items in a single query (more reliable than embedded relationships)
+    const itemsByOrderId = new Map<string, any[]>();
+
+    if (orderIds.length > 0) {
+      const { data: items, error: itemsError } = await client
+        .from('order_items')
+        .select('*')
+        .in('order_id', orderIds);
+
+      if (itemsError) {
+        throw new BadRequestException(
+          `Failed to load order items: ${itemsError.message}`,
+        );
+      }
+
+      for (const item of items || []) {
+        const oid = (item as any).order_id as string | undefined;
+        if (!oid) continue;
+        const arr = itemsByOrderId.get(oid) || [];
+        arr.push(item);
+        itemsByOrderId.set(oid, arr);
+      }
+
+      // Fallback for offline/payment-link orders that store line items in payment_links.meta
+      const { data: links, error: linksError } = await client
+        .from('payment_links')
+        .select('order_id, meta')
+        .in('order_id', orderIds);
+
+      if (linksError) {
+        throw new BadRequestException(
+          `Failed to load payment links for orders: ${linksError.message}`,
+        );
+      }
+
+      for (const link of links || []) {
+        const oid = (link as any).order_id as string | undefined;
+        if (!oid) continue;
+        const existing = itemsByOrderId.get(oid) || [];
+        if (existing.length > 0) continue;
+
+        const meta = (link as any)?.meta as any;
+        const fromMeta = this.mapPaymentLinkMetaToOrderItems(meta);
+        if (fromMeta.length > 0) {
+          itemsByOrderId.set(oid, fromMeta);
+        }
+      }
+    }
+
+    // Best-effort: hydrate images for items (works for both normal + offline orders)
+    await this.hydrateOrderItemsImagesForOrders(
+      client,
+      sellerOrgIdByOrderId,
+      itemsByOrderId,
+    );
+
     const transformedOrders: BuyerOrderResponseDto[] = await Promise.all(
-      orders?.map(async (order) => {
-        const orderItems = Array.isArray(order.order_items)
-          ? order.order_items
-          : [];
-        return this.transformOrderToResponse(order, orderItems);
-      }) || [],
+      orderList.map(async (order: any) => {
+        const explicit = itemsByOrderId.get(order.id) || [];
+        const embedded = Array.isArray(order.order_items) ? order.order_items : [];
+        const finalItems = explicit.length > 0 ? explicit : embedded;
+        return this.transformOrderToResponse(order, finalItems);
+      }),
     );
 
     return {
@@ -2276,272 +2342,858 @@ Manage this order: ${link}`;
         .maybeSingle();
 
       const meta = (link as any)?.meta as any;
-      const metaLineItems = Array.isArray(meta?.line_items)
-        ? (meta.line_items as any[])
-        : [];
-      const metaLineItem = meta?.line_item as any | undefined;
-
-      const itemsForDisplay =
-        metaLineItems.length > 0
-          ? metaLineItems
-          : metaLineItem
-            ? [metaLineItem]
-            : [];
-
-      if (itemsForDisplay.length > 0) {
-        orderItems = itemsForDisplay.map((li, idx) => ({
-          id: li.id || `offline-line-item-${idx}`,
-          product_id: li.product_id || null,
-          product_name: li.product_name || li.name || 'Item',
-          product_sku: li.product_sku || null,
-          quantity: Number(li.quantity || 0),
-          unit_price: Number(li.unit_price || li.price || 0),
-          total_price:
-            li.total_price != null
-              ? Number(li.total_price)
-              : Number(li.unit_price || li.price || 0) * Number(li.quantity || 0),
-          product_snapshot:
-            li.unit != null ? { unit_of_measurement: li.unit } : null,
-        }));
+      const fromMeta = this.mapPaymentLinkMetaToOrderItems(meta);
+      if (fromMeta.length > 0) {
+        orderItems = fromMeta;
       }
     }
+
+    // Best-effort: hydrate images for items on the detail page as well
+    orderItems = await this.hydrateOrderItemsImagesForSingleOrder(
+      client,
+      order?.seller_org_id,
+      orderItems,
+    );
     return this.transformOrderToResponse(order, orderItems);
+  }
+
+  /**
+   * Some offline flows store line items in payment_links.meta rather than in order_items.
+   * This helper normalizes that shape into an order_items-like array.
+   */
+  private mapPaymentLinkMetaToOrderItems(meta: any): any[] {
+    const metaLineItems = Array.isArray(meta?.line_items) ? meta.line_items : [];
+    const metaLineItem = meta?.line_item as any | undefined;
+
+    const itemsForDisplay =
+      metaLineItems.length > 0 ? metaLineItems : metaLineItem ? [metaLineItem] : [];
+
+    if (!itemsForDisplay.length) return [];
+
+    return itemsForDisplay.map((li: any, idx: number) => ({
+      id: li.id || `offline-line-item-${idx}`,
+      product_id: li.product_id || null,
+      product_name: li.product_name || li.name || 'Item',
+      product_sku: li.product_sku || null,
+      quantity: Number(li.quantity || 0),
+      unit_price: Number(li.unit_price || li.price || 0),
+      total_price:
+        li.total_price != null
+          ? Number(li.total_price)
+          : Number(li.unit_price || li.price || 0) * Number(li.quantity || 0),
+      product_snapshot:
+        li.unit != null
+          ? { unit_of_measurement: li.unit }
+          : (li.product_snapshot ?? null),
+    }));
+  }
+
+  private async hydrateOrderItemsImagesForSingleOrder(
+    client: any,
+    sellerOrgId: string | undefined,
+    orderItems: any[],
+  ): Promise<any[]> {
+    const items = Array.isArray(orderItems) ? orderItems : [];
+    if (items.length === 0) return items;
+
+    const map = new Map<string, any[]>();
+    // Use a synthetic order id bucket for reuse of the batch hydrator
+    map.set('__single__', items);
+    const sellerMap = new Map<string, string>();
+    if (sellerOrgId) sellerMap.set('__single__', sellerOrgId);
+    await this.hydrateOrderItemsImagesForOrders(client, sellerMap, map);
+    return map.get('__single__') || items;
+  }
+
+  /**
+   * Attach product thumbnail URLs to order items when:
+   * - the item references a real product_id, or
+   * - older offline/meta-only items can be matched by name to a seller product.
+   *
+   * This is best-effort; it never throws.
+   */
+  private async hydrateOrderItemsImagesForOrders(
+    client: any,
+    sellerOrgIdByOrderId: Map<string, string>,
+    itemsByOrderId: Map<string, any[]>,
+  ): Promise<void> {
+    try {
+      const allItems: { orderId: string; item: any }[] = [];
+      for (const [orderId, items] of itemsByOrderId.entries()) {
+        for (const item of items || []) {
+          allItems.push({ orderId, item });
+        }
+      }
+      if (allItems.length === 0) return;
+
+      // Helper to check if we already have an image
+      const hasImage = (it: any) =>
+        Boolean(
+          it?.product_image ||
+            it?.image_url ||
+            it?.product_snapshot?.image_url ||
+            (it?.product_snapshot?.product_images || []).find?.(
+              (img: any) => img?.is_primary && img?.image_url,
+            )?.image_url,
+        );
+
+      // 1) First: fill from product_snapshot if present (no DB calls)
+      for (const { item } of allItems) {
+        if (hasImage(item)) continue;
+        const snap = item?.product_snapshot;
+        const primaryFromSnapshot = (snap?.product_images || []).find?.(
+          (img: any) => img?.is_primary,
+        )?.image_url;
+        if (primaryFromSnapshot) {
+          item.product_snapshot = { ...(snap || {}), image_url: primaryFromSnapshot };
+        }
+      }
+
+      // 2) Next: fetch primary images for real product_id references
+      const productIds = Array.from(
+        new Set(
+          allItems
+            .map(({ item }) => item?.product_id)
+            .filter((id) => typeof id === 'string' && id.length > 0),
+        ),
+      );
+
+      const urlByProductId = new Map<string, string>();
+      if (productIds.length > 0) {
+        const { data: images, error } = await client
+          .from('product_images')
+          .select('product_id, image_url, is_primary')
+          .in('product_id', productIds)
+          .eq('is_primary', true);
+
+        if (!error) {
+          for (const row of images || []) {
+            const pid = (row as any).product_id as string | undefined;
+            const url = (row as any).image_url as string | undefined;
+            if (pid && url && !urlByProductId.has(pid)) urlByProductId.set(pid, url);
+          }
+        } else {
+          this.logger.warn(`Failed to hydrate product images: ${error.message}`);
+        }
+      }
+
+      for (const { item } of allItems) {
+        if (hasImage(item)) continue;
+        const pid = item?.product_id as string | undefined;
+        if (!pid) continue;
+        const url = urlByProductId.get(pid);
+        if (!url) continue;
+        const snap = item?.product_snapshot || {};
+        item.product_snapshot = { ...snap, image_url: url };
+      }
+
+      // 3) Finally: older offline/meta-only items with no product_id.
+      // Best-effort match by exact name within seller org, then fetch image.
+      const needNameMatch = allItems.filter(
+        ({ orderId, item }) =>
+          !hasImage(item) &&
+          !item?.product_id &&
+          typeof item?.product_name === 'string' &&
+          item.product_name.trim().length > 0 &&
+          sellerOrgIdByOrderId.has(orderId),
+      );
+
+      if (needNameMatch.length === 0) return;
+
+      const sellerIds = Array.from(
+        new Set(
+          needNameMatch
+            .map(({ orderId }) => sellerOrgIdByOrderId.get(orderId))
+            .filter(Boolean) as string[],
+        ),
+      );
+
+      // For each seller, fetch a bounded catalog slice and map by normalized name.
+      const matchedProductIds: string[] = [];
+      for (const sellerOrgId of sellerIds) {
+        const { data: products, error } = await client
+          .from('products')
+          .select('id, name')
+          .eq('seller_org_id', sellerOrgId)
+          .limit(500);
+        if (error) continue;
+
+        const byName = new Map<string, string>();
+        for (const p of products || []) {
+          const name = String((p as any).name || '').trim().toLowerCase();
+          const id = (p as any).id as string | undefined;
+          if (name && id && !byName.has(name)) byName.set(name, id);
+        }
+
+        for (const { orderId, item } of needNameMatch) {
+          if (sellerOrgIdByOrderId.get(orderId) !== sellerOrgId) continue;
+          const key = String(item.product_name || '').trim().toLowerCase();
+          const pid = byName.get(key);
+          if (pid) {
+            matchedProductIds.push(pid);
+            // don't set product_id (avoid mutating meaning), just keep for image hydration
+            item.__matched_product_id = pid;
+          }
+        }
+      }
+
+      const uniqueMatched = Array.from(new Set(matchedProductIds));
+      if (uniqueMatched.length > 0) {
+        const { data: images } = await client
+          .from('product_images')
+          .select('product_id, image_url, is_primary')
+          .in('product_id', uniqueMatched)
+          .eq('is_primary', true);
+
+        const urlByMatched = new Map<string, string>();
+        for (const row of images || []) {
+          const pid = (row as any).product_id as string | undefined;
+          const url = (row as any).image_url as string | undefined;
+          if (pid && url && !urlByMatched.has(pid)) urlByMatched.set(pid, url);
+        }
+
+        for (const { item } of needNameMatch) {
+          if (hasImage(item)) continue;
+          const pid = item.__matched_product_id as string | undefined;
+          if (!pid) continue;
+          const url = urlByMatched.get(pid);
+          if (!url) continue;
+          const snap = item?.product_snapshot || {};
+          item.product_snapshot = { ...snap, image_url: url };
+        }
+      }
+
+      // Clean up internal field
+      for (const { item } of allItems) {
+        if (item && '__matched_product_id' in item) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+          delete item.__matched_product_id;
+        }
+      }
+    } catch (e) {
+      this.logger.warn(
+        `hydrateOrderItemsImagesForOrders failed: ${String((e as any)?.message || e)}`,
+      );
+    }
   }
 
   async generateOrderInvoicePdf(
     buyerOrgId: string,
     orderId: string,
-  ): Promise<Buffer> {
+  ): Promise<{ buffer: Buffer; invoiceNumber: string }> {
     const order = await this.getOrderById(buyerOrgId, orderId);
 
     // Dynamically require pdfkit to avoid ESM/CJS interop issues
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const PDFDocument = require('pdfkit');
+    // The PDF is our single source of truth for invoice formatting.
+    // Keep this in sync with the "ClassicInvoice" concept in the UI.
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     const chunks: Buffer[] = [];
 
-    return await new Promise<Buffer>((resolve, reject) => {
+    const invoiceNumber =
+      (order as any).invoice_number || order.order_number || order.id;
+
+    return await new Promise<{ buffer: Buffer; invoiceNumber: string }>(
+      (resolve, reject) => {
       doc.on('data', (chunk) => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('end', () =>
+        resolve({ buffer: Buffer.concat(chunks), invoiceNumber }),
+      );
       doc.on('error', (err) => reject(err));
 
-      // Classic balance style invoice
-      doc
-        .fontSize(18)
-        .font('Helvetica-Bold')
-        .text('Tax invoice', { align: 'left' });
+      const pageLeft = doc.page.margins.left;
+      const pageRight = doc.page.width - doc.page.margins.right;
+      const pageWidth = pageRight - pageLeft;
 
-      doc.moveDown(0.5);
-      doc
-        .fontSize(10)
-        .font('Helvetica')
-        .text('Procur marketplace', { align: 'left' });
+      // Match procur-ui ClassicInvoice palette (see CSS vars in procur-ui/src/app/globals.css)
+      const colors = {
+        pageBg: '#F2EFE6', // --primary-background
+        text: '#000809', // --secondary-black
+        muted: '#6C715D', // --primary-base
+        accent: '#CB5927', // --primary-accent2
+        softHighlight: '#C0D1C7', // --secondary-soft-highlight
+        border: '#E5E7EB', // close to ClassicInvoice borders
+        bg: '#FFFFFF',
+        soft: '#F2EFE6', // use primary background for soft bands
+        footerBg: '#FAFAFA',
+      };
 
-      doc.moveDown(1);
+      // Paint page background like the UI (ClassicInvoice sits on --primary-background)
+      doc.save();
+      doc.rect(0, 0, doc.page.width, doc.page.height).fill(colors.pageBg);
+      doc.restore();
 
-      const issuedDate = new Date(order.created_at);
-      const dueDate = order.estimated_delivery_date
-        ? new Date(order.estimated_delivery_date)
-        : undefined;
-      const invoiceNumber =
-        (order as any).invoice_number || order.order_number || order.id;
-
-      const rightX = doc.page.width - doc.page.margins.right;
-
-      doc
-        .fontSize(10)
-        .font('Helvetica')
-        .text(`Invoice: ${invoiceNumber}`, rightX - 200, 70, {
-          width: 200,
-          align: 'right',
-        })
-        .text(
-          `Issued: ${issuedDate.toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'short',
-            day: '2-digit',
-          })}`,
-          {
-            align: 'right',
-          },
-        );
-
-      if (dueDate) {
-        doc.text(
-          `Due: ${dueDate.toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'short',
-            day: '2-digit',
-          })}`,
-          {
-            align: 'right',
-          },
-        );
-      }
-
-      doc.moveDown(2);
-
-      // Billed to
-      doc.fontSize(11).font('Helvetica-Bold').text('Billed to');
-      doc.moveDown(0.3);
-      doc.fontSize(10).font('Helvetica');
-
-      const shipping = order.shipping_address as any;
-      if (shipping) {
-        if (shipping.name || shipping.contact_name) {
-          doc.text(shipping.name || shipping.contact_name);
-        }
-        if (shipping.address_line1 || shipping.street_address) {
-          doc.text(shipping.address_line1 || shipping.street_address);
-        }
-        if (shipping.address_line2) {
-          doc.text(shipping.address_line2);
-        }
-        const cityLine = [shipping.city, shipping.state, shipping.postal_code]
-          .filter(Boolean)
-          .join(' ');
-        if (cityLine) {
-          doc.text(cityLine);
-        }
-        if (shipping.country) {
-          doc.text(shipping.country);
-        }
-      }
-
-      doc.moveDown(1.2);
-
-      // Order reference
-      doc.fontSize(11).font('Helvetica-Bold').text('Order reference');
-      doc.moveDown(0.3);
-      doc.fontSize(10).font('Helvetica');
-      doc.text(`Order number: ${order.order_number}`);
-      if (order.estimated_delivery_date) {
-        doc.text(
-          `Estimated delivery: ${new Date(
-            order.estimated_delivery_date,
-          ).toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'short',
-            day: '2-digit',
-          })}`,
-        );
-      }
-
-      doc.moveDown(1.5);
-
-      // Line items table header
-      const tableTop = doc.y;
-      const colItemX = doc.page.margins.left;
-      const colQtyX = colItemX + 260;
-      const colUnitPriceX = colQtyX + 70;
-      const colTotalX = colUnitPriceX + 90;
-
-      doc.fontSize(10).font('Helvetica-Bold');
-      doc.text('Item', colItemX, tableTop);
-      doc.text('Qty', colQtyX, tableTop, { width: 60, align: 'right' });
-      doc.text('Unit price', colUnitPriceX, tableTop, {
-        width: 80,
-        align: 'right',
-      });
-      doc.text('Line total', colTotalX, tableTop, {
-        width: 80,
-        align: 'right',
-      });
-
-      doc
-        .moveTo(colItemX, tableTop + 14)
-        .lineTo(doc.page.width - doc.page.margins.right, tableTop + 14)
-        .strokeColor('#dddddd')
-        .lineWidth(0.5)
-        .stroke();
-
-      const currency = order.currency || 'USD';
+      const currencyCode = order.currency || 'USD';
       const formatCurrency = (value: number) =>
-        `${currency} ${Number(value || 0).toLocaleString('en-US', {
+        `${currencyCode} ${Number(value || 0).toLocaleString('en-US', {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         })}`;
 
-      doc.moveDown(0.8);
-      doc.font('Helvetica').fontSize(10);
-
-      order.items.forEach((item) => {
-        const y = doc.y;
-        const qty = item.quantity || 0;
-        const unitPrice = item.unit_price || 0;
-        const lineTotal = item.total_price || qty * unitPrice;
-
-        doc.text(item.product_name, colItemX, y, {
-          width: colQtyX - colItemX - 10,
+      const formatDate = (raw?: string | null, locale: 'en-GB' | 'en-US' = 'en-GB') => {
+        if (!raw) return '';
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) return '';
+        // Match UI ClassicInvoice: en-GB "03 Dec 2025"
+        return d.toLocaleDateString(locale, {
+          day: '2-digit',
+          month: 'short',
+          year: 'numeric',
         });
-        doc.text(String(qty), colQtyX, y, { width: 60, align: 'right' });
-        doc.text(formatCurrency(unitPrice), colUnitPriceX, y, {
-          width: 80,
-          align: 'right',
-        });
-        doc.text(formatCurrency(lineTotal), colTotalX, y, {
-          width: 80,
-          align: 'right',
-        });
-
-        doc.moveDown(0.6);
-      });
-
-      doc.moveDown(1);
-
-      // Totals
-      const totalsX = colUnitPriceX;
-      const totalsWidth = doc.page.width - doc.page.margins.right - totalsX;
-
-      const addTotalRow = (label: string, value: number, bold = false) => {
-        const y = doc.y;
-        doc
-          .font(bold ? 'Helvetica-Bold' : 'Helvetica')
-          .fontSize(10)
-          .text(label, totalsX, y, {
-            width: totalsWidth / 2,
-            align: 'left',
-          })
-          .text(formatCurrency(value), totalsX, y, {
-            width: totalsWidth,
-            align: 'right',
-          });
-        doc.moveDown(0.4);
       };
 
-      addTotalRow('Subtotal', order.subtotal || 0);
-      addTotalRow('Shipping & handling', order.shipping_amount || 0);
-      addTotalRow('Tax', order.tax_amount || 0);
-      if (order.discount_amount && order.discount_amount > 0) {
-        addTotalRow('Discount', -order.discount_amount);
+      const issueDate = formatDate(order.created_at, 'en-GB');
+      const dueDate = order.estimated_delivery_date
+        ? formatDate(order.estimated_delivery_date as any, 'en-GB')
+        : '';
+
+      // --- Brand header (like ClassicInvoice BrandHeader) ---
+      const brandHeaderH = 52;
+      const brandHeaderY = doc.y;
+      doc
+        .roundedRect(pageLeft, doc.y, pageWidth, brandHeaderH, 12)
+        .lineWidth(1)
+        .strokeColor(colors.border)
+        .fillColor(colors.bg)
+        .fillAndStroke();
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const fs = require('fs');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const path = require('path');
+        const tryRenderSvgLogo = (svgSource: string) => {
+          // Very small, purpose-built SVG renderer for our logo:
+          // - Supports <svg viewBox> + <path d fill>
+          // - Renders paths using PDFKit's SVG path parser
+          const viewBoxMatch = svgSource.match(/viewBox="([^"]+)"/i);
+          const viewBox = viewBoxMatch?.[1]
+            ? viewBoxMatch[1].trim().split(/\s+/).map(Number)
+            : [0, 0, 368, 96];
+          const vbW = Number(viewBox[2] || 368);
+          const vbH = Number(viewBox[3] || 96);
+
+          const targetW = 170;
+          const targetH = 30;
+          const scale = Math.min(targetW / vbW, targetH / vbH);
+          const drawW = vbW * scale;
+          const drawH = vbH * scale;
+          const x = pageLeft + (pageWidth - drawW) / 2;
+          const y = brandHeaderY + (brandHeaderH - drawH) / 2;
+
+          // Extract path tags
+          const pathRegex = /<path\b[^>]*\sd="([^"]+)"[^>]*>/gi;
+          let match: RegExpExecArray | null;
+          doc.save();
+          doc.translate(x, y);
+          doc.scale(scale);
+          // normalize to viewBox origin if any
+          doc.translate(-Number(viewBox[0] || 0), -Number(viewBox[1] || 0));
+          while ((match = pathRegex.exec(svgSource))) {
+            const d = match[1];
+            doc.path(d).fill(colors.text);
+          }
+          doc.restore();
+        };
+        const candidates = [
+          // monorepo dev (prefer SVG so logo is black)
+          path.resolve(
+            process.cwd(),
+            '../procur-ui/public/images/logos/procur-logo.svg',
+          ),
+          path.resolve(
+            process.cwd(),
+            '../procur-ui/public/images/logos/procur_logo.png',
+          ),
+          path.resolve(
+            process.cwd(),
+            '../procur-ui/public/images/logos/procur-logo.png',
+          ),
+          // if assets are copied into api at runtime
+          path.resolve(process.cwd(), 'public/images/logos/procur-logo.svg'),
+          path.resolve(process.cwd(), 'public/images/logos/procur_logo.png'),
+          path.resolve(process.cwd(), 'public/images/logos/procur-logo.png'),
+        ];
+        const logoPath = candidates.find((p) => fs.existsSync(p));
+        if (logoPath) {
+          if (String(logoPath).toLowerCase().endsWith('.svg')) {
+            const svg = fs.readFileSync(logoPath, 'utf8');
+            tryRenderSvgLogo(svg);
+          } else {
+            const logoBoxW = 160;
+            const logoBoxH = 28;
+            const logoX = pageLeft + (pageWidth - logoBoxW) / 2;
+            const logoY = brandHeaderY + (brandHeaderH - logoBoxH) / 2;
+            doc.image(logoPath, logoX, logoY, {
+              fit: [logoBoxW, logoBoxH],
+              align: 'center',
+              valign: 'center',
+            });
+          }
+        } else {
+          // Fallback: text (should not happen in monorepo dev)
+          doc
+            .fillColor(colors.text)
+            .font('Helvetica-Bold')
+            .fontSize(18)
+            .text('Procur', pageLeft, brandHeaderY + 16, {
+              width: pageWidth,
+              align: 'center',
+            });
+        }
+      } catch {
+        // ignore; keep PDF generation resilient
+      }
+      // Move cursor below header with consistent spacing
+      doc.y = brandHeaderY + brandHeaderH + 24;
+
+      // --- Main card container (like ClassicInvoice main box) ---
+      const cardX = pageLeft;
+      const cardY = doc.y + 8;
+      const cardW = pageWidth;
+      // Target: keep invoices to ONE page for normal orders.
+      // We'll keep the card compact; if there are many items, we can paginate later.
+      const cardH = 570;
+      doc
+        .roundedRect(cardX, cardY, cardW, cardH, 24)
+        .lineWidth(1)
+        .strokeColor(colors.border)
+        .fillColor(colors.bg)
+        .fillAndStroke();
+
+      // Top meta row
+      const topPad = 26;
+      const leftColX = cardX + topPad;
+      const rightColW = 220;
+      const rightColX = cardX + cardW - topPad - rightColW;
+      const metaTopY = cardY + topPad;
+
+      // Top-left labels: keep clean (user requested removing "Procur marketplace" label)
+      doc
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(20)
+        .text('Invoice', leftColX, metaTopY + 6);
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(10)
+        .text('Official summary of your order on Procur.', leftColX, metaTopY + 30);
+
+      // Top-right label: remove "Payment ..." chip per request (invoice still includes totals)
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text(`Invoice`, rightColX, metaTopY + 18, { width: rightColW, align: 'right' })
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text(`${invoiceNumber}`, rightColX, metaTopY + 30, {
+          width: rightColW,
+          align: 'right',
+        });
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text(`Issued`, rightColX, metaTopY + 48, { width: rightColW, align: 'right' })
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text(issueDate || '', rightColX, metaTopY + 60, {
+          width: rightColW,
+          align: 'right',
+        });
+      if (dueDate) {
+        doc
+          .fillColor(colors.muted)
+          .font('Helvetica')
+          .fontSize(9)
+          .text(`Due`, rightColX, metaTopY + 78, {
+            width: rightColW,
+            align: 'right',
+          })
+          .fillColor(colors.text)
+          .font('Helvetica-Bold')
+          .fontSize(10)
+          .text(dueDate, rightColX, metaTopY + 90, {
+            width: rightColW,
+            align: 'right',
+          });
       }
 
-      doc.moveDown(0.4);
+      // Divider under meta
+      const dividerY = metaTopY + 112;
       doc
-        .moveTo(totalsX, doc.y)
-        .lineTo(doc.page.width - doc.page.margins.right, doc.y)
-        .strokeColor('#000000')
-        .lineWidth(0.8)
+        .moveTo(cardX + topPad, dividerY)
+        .lineTo(cardX + cardW - topPad, dividerY)
+        .strokeColor('#F1F5F9')
+        .lineWidth(1)
         .stroke();
-      doc.moveDown(0.4);
 
-      addTotalRow('Amount due', order.total_amount || 0, true);
+      // Parties section
+      const partiesTopY = dividerY + 18;
+      const colGap = 28;
+      const partiesColW = (cardW - topPad * 2 - colGap) / 2;
+      const billedX = cardX + topPad;
+      const refX = billedX + partiesColW + colGap;
 
-      doc.moveDown(1.5);
       doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text('BILLED TO', billedX, partiesTopY, { width: partiesColW });
+
+      const shipping = order.shipping_address as any;
+      const buyerName =
+        shipping?.name || shipping?.contact_name || (order as any)?.buyer_name || '';
+      const buyerContact =
+        shipping?.contact_name && shipping?.name ? shipping?.contact_name : '';
+      const buyerAddr1 =
+        shipping?.address_line1 ||
+        shipping?.street_address ||
+        shipping?.line1 ||
+        '';
+      const buyerAddr2 = shipping?.address_line2 || shipping?.line2 || '';
+      const buyerCityLine = [shipping?.city, shipping?.state, shipping?.postal_code]
+        .filter(Boolean)
+        .join(' ');
+      const buyerCountry = shipping?.country || '';
+
+      let billedY = partiesTopY + 14;
+      doc.fillColor(colors.text).font('Helvetica-Bold').fontSize(11).text(buyerName, billedX, billedY, {
+        width: partiesColW,
+      });
+      billedY += 14;
+      if (buyerContact) {
+        doc.fillColor(colors.muted).font('Helvetica').fontSize(10).text(`Attn: ${buyerContact}`, billedX, billedY, {
+          width: partiesColW,
+        });
+        billedY += 13;
+      }
+      [buyerAddr1, buyerAddr2, buyerCityLine, buyerCountry]
+        .filter((v) => typeof v === 'string' && v.trim().length > 0)
+        .forEach((line) => {
+          doc.fillColor(colors.muted).font('Helvetica').fontSize(10).text(line, billedX, billedY, {
+            width: partiesColW,
+          });
+          billedY += 13;
+        });
+
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text('ORDER REFERENCE', refX, partiesTopY, { width: partiesColW });
+      const refLines: string[] = [`Order: ${order.order_number}`];
+      if (order.estimated_delivery_date) {
+        const eta = formatDate(order.estimated_delivery_date as any, 'en-GB');
+        if (eta) refLines.push(`Estimated delivery: ${eta}`);
+      }
+      let refY = partiesTopY + 14;
+      refLines.forEach((line) => {
+        doc.fillColor(colors.muted).font('Helvetica').fontSize(10).text(line, refX, refY, {
+          width: partiesColW,
+        });
+        refY += 13;
+      });
+
+      // Line items "table" (classic style)
+      const tableBoxY = partiesTopY + 96;
+      const tableX = cardX + topPad;
+      const tableW = cardW - topPad * 2;
+      const tableH = 210;
+      doc
+        .roundedRect(tableX, tableBoxY, tableW, tableH, 16)
+        .lineWidth(1)
+        .strokeColor('#F3F4F6')
+        .fillColor(colors.bg)
+        .fillAndStroke();
+
+      // Table header band
+      doc
+        .rect(tableX, tableBoxY, tableW, 26)
+        .fillColor(colors.soft)
+        .fill();
+
+      // Compute columns relative to available width so we never overflow A4.
+      const tablePadX = 12;
+      const contentX = tableX + tablePadX;
+      const contentW = tableW - tablePadX * 2;
+
+      // Classic invoice columns: Item | Details | Qty | Unit price | Line total
+      const itemW = Math.floor(contentW * 0.36);
+      const detailsW = Math.floor(contentW * 0.30);
+      const qtyW = Math.floor(contentW * 0.10);
+      const unitPriceW = Math.floor(contentW * 0.12);
+      const lineTotalW = contentW - itemW - detailsW - qtyW - unitPriceW;
+
+      const colItemX = contentX;
+      const colDetailsX = colItemX + itemW;
+      const colQtyX = colDetailsX + detailsW;
+      const colUnitPriceX = colQtyX + qtyW;
+      const colTotalX = colUnitPriceX + unitPriceW;
+
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica-Bold')
+        .fontSize(9)
+        .text('Item', colItemX, tableBoxY + 8, { width: itemW - 6 })
+        .text('Details', colDetailsX, tableBoxY + 8, { width: detailsW - 6 })
+        .text('Qty', colQtyX, tableBoxY + 8, { width: qtyW, align: 'right' })
+        .text('Unit price', colUnitPriceX, tableBoxY + 8, {
+          width: unitPriceW,
+          align: 'right',
+        })
+        .text('Line total', colTotalX, tableBoxY + 8, {
+          width: lineTotalW,
+          align: 'right',
+        });
+
+      // Rows
+      const maxRows = 7;
+      const rowStartY = tableBoxY + 34;
+      const rowH = 24;
+      const items = Array.isArray(order.items) ? order.items : [];
+      const rows = items.slice(0, maxRows);
+
+      let lineSubtotal = 0;
+      rows.forEach((item, idx) => {
+        const y = rowStartY + idx * rowH;
+        const qty = Number((item as any).quantity || 0);
+        const unitPrice = Number((item as any).unit_price || 0);
+        const lineTotal = Number((item as any).total_price || qty * unitPrice);
+        lineSubtotal += lineTotal;
+
+        // zebra background like UI
+        if (idx % 2 === 1) {
+          doc
+            .rect(tableX, y - 4, tableW, rowH)
+            .fillColor('#F9FAFB')
+            .fill();
+        }
+
+        const name = String((item as any).product_name || 'Item');
+        const unit =
+          String(
+            (item as any).unit ||
+              (item as any).unit_of_measurement ||
+              (item as any)?.product_snapshot?.unit_of_measurement ||
+              '',
+          ) || '';
+        const details = unit ? `Unit: ${unit}` : '';
+
+        doc
+          .fillColor(colors.text)
+          .font('Helvetica-Bold')
+          .fontSize(9)
+          .text(name, colItemX, y, {
+            width: itemW - 10,
+            ellipsis: true,
+          });
+        doc
+          .fillColor(colors.muted)
+          .font('Helvetica')
+          .fontSize(8)
+          .text(details, colDetailsX, y, {
+            width: detailsW - 10,
+            ellipsis: true,
+          });
+        doc
+          .fillColor(colors.text)
+          .font('Helvetica')
+          .fontSize(9)
+          .text(qty.toLocaleString('en-US'), colQtyX, y, {
+            width: qtyW,
+            align: 'right',
+          });
+        doc
+          .fillColor(colors.text)
+          .font('Helvetica')
+          .fontSize(9)
+          .text(formatCurrency(unitPrice), colUnitPriceX, y, {
+            width: unitPriceW,
+            align: 'right',
+          });
+        doc
+          .fillColor(colors.text)
+          .font('Helvetica-Bold')
+          .fontSize(9)
+          .text(formatCurrency(lineTotal), colTotalX, y, {
+            width: lineTotalW,
+            align: 'right',
+          });
+      });
+
+      // If there are more items than we rendered, add a subtle hint row.
+      if (items.length > rows.length) {
+        const remaining = items.length - rows.length;
+        const y = rowStartY + rows.length * rowH;
+        doc
+          .fillColor(colors.muted)
+          .font('Helvetica')
+          .fontSize(9)
+          .text(`+ ${remaining} more item${remaining === 1 ? '' : 's'}`, colItemX, y, {
+            width: itemW + detailsW,
+          });
+      }
+
+      // Totals & instructions (like ClassicInvoice)
+      const totalsTopY = tableBoxY + tableH + 14;
+      const instrX = cardX + topPad;
+      const instrW = 280;
+      const totalsX = cardX + cardW - topPad - 220;
+      const totalsW = 220;
+
+      doc
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text('Payment instructions', instrX, totalsTopY);
+      const instructions = [
+        'Payment is processed via Procur secure settlement.',
+      ];
+      let instrY = totalsTopY + 14;
+      instructions.forEach((line) => {
+        doc.fillColor(colors.muted).font('Helvetica').fontSize(9).text(`• ${line}`, instrX, instrY, {
+          width: instrW,
+        });
+        instrY += 12;
+      });
+
+      const subtotalAmount = Number((order as any)?.subtotal ?? order.subtotal ?? 0);
+      const delivery = Number((order as any)?.shipping_amount ?? 0);
+      const discount = Number((order as any)?.discount_amount ?? 0);
+      const taxAmount = Number((order as any)?.tax_amount ?? 0);
+      const totalFromApi = Number((order as any)?.total_amount ?? 0);
+      const explicitPlatformFee = Number(
+        (order as any)?.platform_fee_amount ?? (order as any)?.platform_fee ?? 0,
+      );
+      // Correct platform fee:
+      // - Use explicit platform fee if provided
+      // - Otherwise derive from totals to avoid showing 0 when it was included
+      const computedPlatformFee =
+        totalFromApi - subtotalAmount - delivery - taxAmount + discount;
+      const platformFee =
+        explicitPlatformFee > 0
+          ? explicitPlatformFee
+          : Math.max(0, computedPlatformFee);
+      const totalAmount =
+        totalFromApi || subtotalAmount + delivery + platformFee + taxAmount - discount;
+
+      const totalRow = (label: string, value: string, y: number, bold = false) => {
+        doc
+          .fillColor(colors.muted)
+          .font('Helvetica')
+          .fontSize(9)
+          .text(label, totalsX, y, { width: totalsW / 2, align: 'left' });
+        doc
+          .fillColor(colors.text)
+          .font(bold ? 'Helvetica-Bold' : 'Helvetica')
+          .fontSize(bold ? 12 : 9)
+          .text(value, totalsX, y, { width: totalsW, align: 'right' });
+      };
+
+      let ty = totalsTopY + 2;
+      totalRow('Subtotal', formatCurrency(subtotalAmount), ty);
+      ty += 12;
+      totalRow('Delivery & handling', formatCurrency(delivery), ty);
+      ty += 12;
+      totalRow('Platform fee', formatCurrency(platformFee), ty);
+      ty += 12;
+      if (taxAmount > 0) {
+        totalRow('Tax', formatCurrency(taxAmount), ty);
+        ty += 12;
+      }
+      if (discount > 0) {
+        doc
+          .fillColor('#059669')
+          .font('Helvetica')
+          .fontSize(9)
+          .text('Discount', totalsX, ty, { width: totalsW / 2, align: 'left' });
+        doc
+          .fillColor('#059669')
+          .font('Helvetica')
+          .fontSize(9)
+          .text(`-${formatCurrency(discount)}`, totalsX, ty, {
+            width: totalsW,
+            align: 'right',
+          });
+        ty += 12;
+      }
+
+      // divider
+      doc
+        .moveTo(totalsX, ty + 6)
+        .lineTo(totalsX + totalsW, ty + 6)
+        .strokeColor('#CBD5E1')
+        .lineWidth(1)
+        .stroke();
+      ty += 14;
+      totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+
+      // Footer note (match UI ClassicInvoice: note sits BELOW the main card)
+      const footerNote =
+        'Thank you for sourcing fresh produce through Procur. Payments help us keep farmers on the land and buyers fully supplied.';
+      // Bottom spacing: keep invoice on ONE page for normal orders.
+      // Only allow page-break if there are more items than fit in the table.
+      const contentBottomY = Math.max(instrY, ty + 16);
+      let footerNoteY = Math.max(cardY + cardH + 12, contentBottomY + 18);
+
+      // If footer would overflow the page, only push to a new page for long item lists.
+      const pageBottom = doc.page.height - doc.page.margins.bottom;
+      const footerNoteHeightEstimate = doc.heightOfString(footerNote, {
+        width: pageWidth,
+      });
+      const footerYEstimate = footerNoteY + footerNoteHeightEstimate + 12;
+      if (items.length > maxRows && footerYEstimate + 40 > pageBottom) {
+        doc.addPage();
+        // repaint background on the new page
+        doc.save();
+        doc.rect(0, 0, doc.page.width, doc.page.height).fill(colors.pageBg);
+        doc.restore();
+        footerNoteY = doc.page.margins.top;
+      }
+
+      doc
+        .fillColor(colors.muted)
         .font('Helvetica')
         .fontSize(8)
-        .fillColor('#666666')
+        .text(footerNote, pageLeft, footerNoteY, {
+          width: pageWidth,
+          align: 'left',
+        });
+
+      const footerNoteHeight = doc.heightOfString(footerNote, { width: pageWidth });
+
+      // Brand footer (like ClassicInvoice BrandFooter) BELOW the note
+      const footerY = footerNoteY + footerNoteHeight + 12;
+      const footerH = 40;
+      doc
+        .roundedRect(pageLeft, footerY, pageWidth, footerH, 12)
+        .lineWidth(1)
+        .strokeColor(colors.border)
+        .fillColor(colors.footerBg)
+        .fillAndStroke();
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(8)
+        .text(`© ${new Date().getFullYear()} Procur Grenada Ltd. All rights reserved.`, pageLeft, footerY + 10, {
+          width: pageWidth,
+          align: 'center',
+        })
         .text(
-          'Thank you for sourcing fresh produce through Procur. Payments help us keep farmers on the land and buyers fully supplied.',
-          {
-            width:
-              doc.page.width - doc.page.margins.left - doc.page.margins.right,
-          },
+          'Procur Grenada Ltd. Annandale, St. Georges, Grenada W.I., 473-538-4365',
+          pageLeft,
+          footerY + 22,
+          { width: pageWidth, align: 'center' },
         );
 
       doc.end();
-    });
+    },
+    );
   }
 
   async cancelOrder(buyerOrgId: string, orderId: string): Promise<void> {
