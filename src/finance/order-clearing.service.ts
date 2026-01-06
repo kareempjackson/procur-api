@@ -102,7 +102,7 @@ export class OrderClearingService {
       paymentDate: nowIso,
       orderNumber:
         (order.order_number as string | null) || (order.id as string),
-      paymentMethod: 'Card/transfer',
+      paymentMethod: 'Offline payment',
       paymentReference: input.paymentReference || null,
       paymentStatus,
       subtotal: Number(order.subtotal ?? 0),

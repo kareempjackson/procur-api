@@ -1882,7 +1882,7 @@ export class SellersService {
   async executeSellerInsight(sellerOrgId: string, insightId: string) {
     // For MVP, we do not perform complex actions. We can expand later to
     // auto-flag featured products, generate tasks, etc.
-    // Returning success allows the UI to optimistically remove the card.
+    // Returning success allows the UI to optimistically remove the insight.
     return { success: true };
   }
 

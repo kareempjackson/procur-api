@@ -3,7 +3,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
-import { json, raw } from 'express';
+import { json } from 'express';
 import * as Sentry from '@sentry/node';
 
 Sentry.init({
@@ -24,8 +24,6 @@ Sentry.init({
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  // Stripe webhook must receive raw body; attach before json parser for that route
-  app.use('/payments/stripe/webhook', raw({ type: '*/*' }));
   // Default JSON parser for all other routes, while capturing raw body for signature verification (e.g., WhatsApp)
   app.use(
     json({
@@ -65,9 +63,6 @@ async function bootstrap() {
   const apiPrefix = configService.get<string>('app.apiPrefix');
   const apiVersion = configService.get<string>('app.apiVersion');
   app.setGlobalPrefix(`${apiPrefix}/${apiVersion}`);
-  // Also attach raw parser to the prefixed webhook path to satisfy Stripe signature verification
-  const prefixedWebhook = `/${apiPrefix}/${apiVersion}/payments/stripe/webhook`;
-  app.use(prefixedWebhook, raw({ type: '*/*' }));
 
   // Swagger documentation
   const config = new DocumentBuilder()

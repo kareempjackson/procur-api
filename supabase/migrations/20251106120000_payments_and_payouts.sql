@@ -1,14 +1,11 @@
 -- Payments and manual payouts schema additions
 
--- Orders: stripe/payment audit fields
+-- Orders: payment audit fields
 ALTER TABLE orders
-  ADD COLUMN IF NOT EXISTS stripe_payment_intent_id TEXT,
-  ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT,
   ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ;
 
 -- Organizations: optional payout info snapshots (for CSV exports)
 ALTER TABLE organizations
-  ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT,
   ADD COLUMN IF NOT EXISTS bank_name TEXT,
   ADD COLUMN IF NOT EXISTS bank_account_last4 TEXT,
   ADD COLUMN IF NOT EXISTS bank_account_holder TEXT,
