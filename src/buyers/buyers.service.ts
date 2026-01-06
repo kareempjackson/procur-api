@@ -2211,14 +2211,14 @@ Manage this order: ${link}`;
     buyerOrgId: string,
     orderId: string,
   ): Promise<BuyerOrderResponseDto> {
-    const { data: order, error } = await this.supabase
-      .getClient()
+    const client = this.supabase.getClient();
+
+    const { data: order, error } = await client
       .from('orders')
       .select(
         `
         *,
         seller_organization:organizations!seller_org_id(name),
-        order_items(*),
         order_timeline(*)
       `,
       )
@@ -2250,9 +2250,61 @@ Manage this order: ${link}`;
       }
     }
 
-    const orderItems = Array.isArray(order.order_items)
-      ? order.order_items
-      : [];
+    // Load order items explicitly rather than relying on embedded relationships.
+    // In some environments, embedded `order_items(*)` may return [] due to missing
+    // relationship metadata or RLS behavior on the embedded resource.
+    const { data: orderItemsData, error: itemsError } = await client
+      .from('order_items')
+      .select('*')
+      .eq('order_id', orderId);
+
+    if (itemsError) {
+      throw new BadRequestException(
+        `Failed to load order items: ${itemsError.message}`,
+      );
+    }
+
+    let orderItems = Array.isArray(orderItemsData) ? orderItemsData : [];
+
+    // Fallback: some offline/payment-link flows store line items in payment_links.meta
+    // and may not have `order_items` rows (or they may fail to insert).
+    if (orderItems.length === 0) {
+      const { data: link } = await client
+        .from('payment_links')
+        .select('meta')
+        .eq('order_id', orderId)
+        .maybeSingle();
+
+      const meta = (link as any)?.meta as any;
+      const metaLineItems = Array.isArray(meta?.line_items)
+        ? (meta.line_items as any[])
+        : [];
+      const metaLineItem = meta?.line_item as any | undefined;
+
+      const itemsForDisplay =
+        metaLineItems.length > 0
+          ? metaLineItems
+          : metaLineItem
+            ? [metaLineItem]
+            : [];
+
+      if (itemsForDisplay.length > 0) {
+        orderItems = itemsForDisplay.map((li, idx) => ({
+          id: li.id || `offline-line-item-${idx}`,
+          product_id: li.product_id || null,
+          product_name: li.product_name || li.name || 'Item',
+          product_sku: li.product_sku || null,
+          quantity: Number(li.quantity || 0),
+          unit_price: Number(li.unit_price || li.price || 0),
+          total_price:
+            li.total_price != null
+              ? Number(li.total_price)
+              : Number(li.unit_price || li.price || 0) * Number(li.quantity || 0),
+          product_snapshot:
+            li.unit != null ? { unit_of_measurement: li.unit } : null,
+        }));
+      }
+    }
     return this.transformOrderToResponse(order, orderItems);
   }
 
@@ -2635,24 +2687,44 @@ Manage this order: ${link}`;
       rejected_at: order.rejected_at,
       shipped_at: order.shipped_at,
       delivered_at: order.delivered_at,
-      items: orderItems.map((item) => ({
-        id: item.id,
-        product_id: item.product_id,
-        product_name: item.product_name,
-        product_sku: item.product_sku,
-        unit_price: item.unit_price,
-        quantity: item.quantity,
-        total_price: item.total_price,
-        // Helpful extras for UI rendering
-        product_image:
+      items: orderItems.map((item) => {
+        const productImage =
           (item.product_snapshot?.product_images || []).find?.(
             (img: any) => img?.is_primary,
           )?.image_url ||
           item.product_snapshot?.image_url ||
-          null,
-        unit_of_measurement: item.product_snapshot?.unit_of_measurement,
-        product_snapshot: item.product_snapshot,
-      })),
+          null;
+
+        const unit =
+          item.product_snapshot?.unit_of_measurement ||
+          item.unit_of_measurement ||
+          null;
+
+        const subtotal =
+          typeof item.total_price === 'number'
+            ? item.total_price
+            : Number(item.total_price ?? 0);
+
+        return {
+          id: item.id,
+          product_id: item.product_id,
+          product_name: item.product_name,
+          product_sku: item.product_sku,
+          unit_price: item.unit_price,
+          quantity: item.quantity,
+          total_price: item.total_price,
+
+          // UI-friendly aliases (procur-ui expects these names)
+          product_image: productImage,
+          image_url: productImage,
+          subtotal,
+          unit,
+
+          // Helpful extras
+          unit_of_measurement: unit,
+          product_snapshot: item.product_snapshot,
+        };
+      }),
       // timeline, // Remove timeline as it's not in the DTO
       created_at: order.created_at,
       updated_at: order.updated_at,

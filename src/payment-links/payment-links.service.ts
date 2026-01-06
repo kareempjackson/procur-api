@@ -297,6 +297,7 @@ export class PaymentLinksService {
       country?: string;
     };
     lineItems: {
+      product_id?: string;
       product_name: string;
       unit?: string;
       quantity: number;
@@ -465,6 +466,47 @@ export class PaymentLinksService {
     if (orderError || !order) {
       throw new BadRequestException(
         `Failed to create order for payment link: ${orderError?.message ?? 'unknown error'}`,
+      );
+    }
+
+    // Persist order items for offline/payment-link orders so downstream order
+    // views can rely on `order_items` having real UUIDs.
+    // (Line items may be freeform and not map to a product record.)
+    try {
+      const itemsToInsert = (input.lineItems || []).map((item: any) => ({
+        order_id: order.id as string,
+        product_id: item.product_id ?? null,
+        product_name: item.product_name,
+        product_sku: item.product_sku ?? null,
+        unit_price: Number(item.unit_price),
+        quantity: Number(item.quantity),
+        total_price: Number(item.unit_price) * Number(item.quantity || 0),
+        product_snapshot: item.unit
+          ? { unit_of_measurement: item.unit }
+          : (item.product_snapshot ?? null),
+      }));
+
+      if (itemsToInsert.length > 0) {
+        const { error: itemsError } = await client
+          .from('order_items')
+          .insert(itemsToInsert);
+
+        if (itemsError) {
+          this.logger.error(
+            `Failed to insert order_items for offline payment link order ${String(
+              order.id,
+            )}: ${itemsError.message}`,
+          );
+          throw new BadRequestException(
+            `Failed to persist order items: ${itemsError.message}`,
+          );
+        }
+      }
+    } catch (e) {
+      // Keep the error message useful to API callers
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException(
+        `Failed to persist order items: ${String((e as any)?.message || e)}`,
       );
     }
 
@@ -719,6 +761,43 @@ export class PaymentLinksService {
         throw new BadRequestException(
           `Failed to update order for payment link: ${orderUpdateError.message}`,
         );
+      }
+
+      // Sync order_items to match the updated line items. We replace rows to keep
+      // it simple and consistent with the payment link meta snapshot.
+      const itemsToInsert = (lineItems || []).map((item: any) => ({
+        order_id: link.order_id as string,
+        product_id: item.product_id ?? null,
+        product_name: item.product_name,
+        product_sku: item.product_sku ?? null,
+        unit_price: Number(item.unit_price),
+        quantity: Number(item.quantity),
+        total_price: Number(item.unit_price) * Number(item.quantity || 0),
+        product_snapshot: item.unit
+          ? { unit_of_measurement: item.unit }
+          : (item.product_snapshot ?? null),
+      }));
+
+      // Replace existing rows
+      const { error: delErr } = await client
+        .from('order_items')
+        .delete()
+        .eq('order_id', link.order_id);
+      if (delErr) {
+        throw new BadRequestException(
+          `Failed to sync order items (delete): ${delErr.message}`,
+        );
+      }
+
+      if (itemsToInsert.length > 0) {
+        const { error: insErr } = await client
+          .from('order_items')
+          .insert(itemsToInsert);
+        if (insErr) {
+          throw new BadRequestException(
+            `Failed to sync order items (insert): ${insErr.message}`,
+          );
+        }
       }
     }
 

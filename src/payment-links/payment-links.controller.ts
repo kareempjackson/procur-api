@@ -36,7 +36,91 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { IsArray, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+
+class BuyerContactDto {
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  company?: string;
+
+  @IsOptional()
+  @IsString()
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  phone?: string;
+
+  @IsOptional()
+  @IsString()
+  taxId?: string;
+}
+
+class ShippingAddressDto {
+  @IsString()
+  line1: string;
+
+  @IsOptional()
+  @IsString()
+  line2?: string;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  postal_code?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsString()
+  phone?: string;
+
+  @IsOptional()
+  @IsString()
+  contact_name?: string;
+}
+
+class OfflineLineItemDto {
+  @IsOptional()
+  @IsString()
+  product_id?: string;
+
+  @IsString()
+  product_name: string;
+
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @IsNumber()
+  @Min(0.01)
+  unit_price: number;
+
+  @IsNumber()
+  @Min(0.01)
+  quantity: number;
+}
 
 class CreatePaymentLinkForOrderDto {
   @IsString()
@@ -50,9 +134,10 @@ class CreatePaymentLinkForOrderDto {
   @IsString()
   expires_at?: string;
 
-  // Allow any buyer_contact shape; service will treat as snapshot
   @IsOptional()
-  buyer_contact?: any;
+  @ValidateNested()
+  @Type(() => BuyerContactDto)
+  buyer_contact?: BuyerContactDto;
 
   @IsOptional()
   platform_fee_amount?: number;
@@ -96,11 +181,16 @@ class CreateOfflineOrderAndLinkDto {
 
   // Simple shipping address snapshot
   @IsOptional()
-  shipping_address?: any;
+  @ValidateNested()
+  @Type(() => ShippingAddressDto)
+  shipping_address?: ShippingAddressDto;
 
   // Line items (we’ll compute total_amount from quantity * unit_price per item)
   @IsOptional()
-  line_items: any[];
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OfflineLineItemDto)
+  line_items: OfflineLineItemDto[];
 
   @IsOptional()
   currency?: string;
@@ -149,10 +239,15 @@ class UpdateOfflineOrderAndLinkDto {
   buyer_phone?: string;
 
   @IsOptional()
-  shipping_address?: any;
+  @ValidateNested()
+  @Type(() => ShippingAddressDto)
+  shipping_address?: ShippingAddressDto;
 
   @IsOptional()
-  line_items?: any[];
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OfflineLineItemDto)
+  line_items?: OfflineLineItemDto[];
 
   @IsOptional()
   currency?: string;
@@ -188,7 +283,9 @@ class PublicOfflinePaymentDto {
   proof_url?: string;
 
   @IsOptional()
-  buyer_contact?: any;
+  @ValidateNested()
+  @Type(() => BuyerContactDto)
+  buyer_contact?: BuyerContactDto;
 }
 
 class ConfirmOfflinePaymentDto {
@@ -255,12 +352,10 @@ class AdminCreateSimplePaymentLinkDto {
   delivery_date?: string;
 
   @IsOptional()
-  line_items?: {
-    product_name: string;
-    unit?: string;
-    quantity: number;
-    unit_price: number;
-  }[];
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OfflineLineItemDto)
+  line_items?: OfflineLineItemDto[];
 
   @IsOptional()
   shipping_address?: {
@@ -441,7 +536,7 @@ export class PaymentLinksController {
       'Return the mini-site payload for a payment link, including order summary, fee breakdown, and allowed offline payment methods.',
   })
   @ApiParam({ name: 'code', description: 'Public payment link code' })
-  async getPublicByCode(@Param('code') code: string) {
+  async getPublicByCode(@Param('code') code: string): Promise<any> {
     return this.paymentLinks.getPublicByCode(code);
   }
 
@@ -522,6 +617,7 @@ export class PaymentLinksController {
     }
 
     const lineItems: {
+      product_id?: string;
       product_name: string;
       unit?: string;
       quantity: number;
