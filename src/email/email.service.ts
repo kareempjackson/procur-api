@@ -126,8 +126,20 @@ export class EmailService {
   }
 
   private getLogoUrl(): string {
+    const nodeEnv =
+      this.configService.get<string>('nodeEnv') ||
+      process.env.NODE_ENV ||
+      'development';
     const explicitLogoUrl = this.configService.get<string>('email.logoUrl');
     if (explicitLogoUrl) {
+      // If someone configured a relative URL, make it absolute using assets/front-end base.
+      if (explicitLogoUrl.startsWith('/')) {
+        const base =
+          this.configService.get<string>('app.assetsUrl') ||
+          this.configService.get<string>('app.frontendUrl') ||
+          '';
+        return `${base.replace(/\/+$/, '')}${explicitLogoUrl}`;
+      }
       return explicitLogoUrl;
     }
     const assetsBaseUrl =
@@ -135,7 +147,23 @@ export class EmailService {
       this.configService.get<string>('app.frontendUrl') ||
       '';
     // Default to PNG under assets if not explicitly set
-    return `${assetsBaseUrl}/images/logos/procur_logo.png`;
+    const base = assetsBaseUrl.replace(/\/+$/, '');
+
+    // If prod is still pointing at localhost/empty, fall back to the public site.
+    const isBadProdBase =
+      !base ||
+      base.includes('localhost') ||
+      base.includes('127.0.0.1') ||
+      base.startsWith('http://');
+
+    if (nodeEnv === 'production' && isBadProdBase) {
+      this.logger.warn(
+        `Email assets URL misconfigured for production (assetsBaseUrl="${assetsBaseUrl}"). Falling back to https://www.procurapp.co`,
+      );
+      return `https://www.procurapp.co/images/logos/procur_logo.png`;
+    }
+
+    return `${base}/images/logos/procur_logo.png`;
   }
 
   private getBrandHead(title: string): string {
@@ -170,7 +198,7 @@ export class EmailService {
           <div class="card">
             <div class="header">
               <span class="brand">
-                <img src="${logoUrl}" alt="Procur" />
+                <img src="${logoUrl}" alt="Procur" width="120" style="display:block;height:28px;max-height:28px;width:auto;border:0;outline:none;text-decoration:none;" />
               </span>
             </div>
             <div class="content">`;
@@ -295,17 +323,13 @@ export class EmailService {
       paymentDate,
       orderNumber,
       buyerName,
-      buyerEmail,
       buyerAddress,
       buyerContact,
-      paymentMethod,
       paymentReference,
       paymentStatus,
       subtotal,
       delivery,
       platformFee,
-      taxAmount,
-      discount,
       totalPaid,
       currency,
     } = params;

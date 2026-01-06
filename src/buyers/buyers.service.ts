@@ -124,11 +124,12 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country, is_marketplace_hidden),
         product_images(image_url, is_primary, display_order)
       `,
       )
       .eq('status', 'active')
+      .eq('seller_organization.is_marketplace_hidden', false)
       .gte('stock_quantity', in_stock ? 1 : 0);
 
     // Apply filters
@@ -159,13 +160,37 @@ export class BuyersService {
       ascending: sort_order === 'asc',
     });
 
-    // Get total count
-    const { count } = await this.supabase
+    // Get total count (match the same filters as the page query)
+    let countBuilder = this.supabase
       .getClient()
       .from('products')
-      .select('*', { count: 'exact', head: true })
+      .select(
+        `
+        id,
+        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
+      `,
+        { count: 'exact', head: true },
+      )
       .eq('status', 'active')
+      .eq('seller_organization.is_marketplace_hidden', false)
       .gte('stock_quantity', in_stock ? 1 : 0);
+
+    if (search) {
+      countBuilder = countBuilder.or(
+        `name.ilike.%${search}%, description.ilike.%${search}%, tags.cs.{${search}}`,
+      );
+    }
+    if (category) countBuilder = countBuilder.eq('category', category);
+    if (subcategory) countBuilder = countBuilder.eq('subcategory', subcategory);
+    if (seller_id) countBuilder = countBuilder.eq('seller_org_id', seller_id);
+    if (min_price !== undefined) countBuilder = countBuilder.gte('base_price', min_price);
+    if (max_price !== undefined) countBuilder = countBuilder.lte('base_price', max_price);
+    if (is_organic !== undefined) countBuilder = countBuilder.eq('is_organic', is_organic);
+    if (is_local !== undefined) countBuilder = countBuilder.eq('is_local', is_local);
+    if (is_featured !== undefined) countBuilder = countBuilder.eq('is_featured', is_featured);
+    if (tags && tags.length > 0) countBuilder = countBuilder.overlaps('tags', tags);
+
+    const { count } = await countBuilder;
 
     // Get paginated results
     const { data: products, error } = await queryBuilder.range(
@@ -288,7 +313,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country, is_marketplace_hidden),
         product_images(image_url, alt_text, is_primary, display_order)
       `,
       )
@@ -300,6 +325,11 @@ export class BuyersService {
       throw new NotFoundException('Product not found');
     }
 
+    // Hidden sellers should not be discoverable via public/buyer marketplace flows.
+    if (Boolean((product as any)?.seller_organization?.is_marketplace_hidden)) {
+      throw new NotFoundException('Product not found');
+    }
+
     // Get related products (same category, different seller or same seller)
     const { data: relatedProducts } = await client
       .from('products')
@@ -307,7 +337,7 @@ export class BuyersService {
         `
         id, name, short_description, category, base_price, sale_price, currency,
         stock_quantity, unit_of_measurement, condition, brand,
-        seller_organization:organizations!seller_org_id(id, name),
+        seller_organization:organizations!seller_org_id(id, name, is_marketplace_hidden),
         product_images(image_url, is_primary, display_order)
       `,
       )
@@ -455,7 +485,8 @@ export class BuyersService {
         { count: 'exact' },
       )
       .eq('account_type', 'seller')
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .eq('is_marketplace_hidden', false);
 
     // Apply filters
     if (search) {
@@ -569,19 +600,33 @@ export class BuyersService {
         this.supabase
           .getClient()
           .from('products')
-          .select('*', { count: 'exact', head: true })
-          .eq('status', 'active'),
+          .select(
+            `
+            id,
+            seller_organization:organizations!seller_org_id(is_marketplace_hidden)
+          `,
+            { count: 'exact', head: true },
+          )
+          .eq('status', 'active')
+          .eq('seller_organization.is_marketplace_hidden', false),
         this.supabase
           .getClient()
           .from('organizations')
           .select('*', { count: 'exact', head: true })
           .eq('account_type', 'seller')
-          .eq('status', 'active'),
+          .eq('status', 'active')
+          .eq('is_marketplace_hidden', false),
         this.supabase
           .getClient()
           .from('products')
-          .select('category')
-          .eq('status', 'active'),
+          .select(
+            `
+            category,
+            seller_organization:organizations!seller_org_id(is_marketplace_hidden)
+          `,
+          )
+          .eq('status', 'active')
+          .eq('seller_organization.is_marketplace_hidden', false),
       ],
     );
 
@@ -589,8 +634,15 @@ export class BuyersService {
     const { count: featuredCount } = await this.supabase
       .getClient()
       .from('products')
-      .select('*', { count: 'exact', head: true })
+      .select(
+        `
+        id,
+        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
+      `,
+        { count: 'exact', head: true },
+      )
       .eq('status', 'active')
+      .eq('seller_organization.is_marketplace_hidden', false)
       .eq('is_featured', true);
 
     // Get new products this week
@@ -599,8 +651,15 @@ export class BuyersService {
     const { count: newProductsCount } = await this.supabase
       .getClient()
       .from('products')
-      .select('*', { count: 'exact', head: true })
+      .select(
+        `
+        id,
+        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
+      `,
+        { count: 'exact', head: true },
+      )
       .eq('status', 'active')
+      .eq('seller_organization.is_marketplace_hidden', false)
       .gte('created_at', oneWeekAgo.toISOString());
 
     // Calculate popular categories

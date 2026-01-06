@@ -62,6 +62,7 @@ import {
   UpdateFarmVerificationDto,
   UpdateFarmersIdVerificationDto,
 } from './dto/admin-org-verification.dto';
+import { UpdateSellerMarketplaceVisibilityDto } from './dto/admin-seller-marketplace-visibility.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserContext } from '../common/interfaces/jwt-payload.interface';
 import {
@@ -924,6 +925,23 @@ export class AdminController {
     @Body() dto: UpdateAdminOrganizationStatusDto,
   ): Promise<{ success: boolean }> {
     return this.adminService.updateOrganizationStatus(id, 'seller', dto.status);
+  }
+
+  @Patch('sellers/:id/marketplace-visibility')
+  @ApiOperation({
+    summary: 'Hide/show seller in marketplace',
+    description:
+      'Hide a seller from the public marketplace and buyer marketplace browsing without suspending the seller account.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller marketplace visibility updated successfully',
+  })
+  async updateSellerMarketplaceVisibility(
+    @Param('id') id: string,
+    @Body() dto: UpdateSellerMarketplaceVisibilityDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.updateSellerMarketplaceVisibility(id, dto.hidden);
   }
 
   @Patch('sellers/:id/farmers-id-verification')

@@ -42,6 +42,7 @@ export interface DatabaseOrganization {
   farmers_id?: string;
   farmers_id_verified?: boolean;
   farm_verified?: boolean;
+  is_marketplace_hidden?: boolean;
   payment_details?: any;
   logo_url?: string;
   government_level?: string;

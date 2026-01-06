@@ -59,6 +59,7 @@ export interface AdminOrganizationSummary {
   businessType: string | null;
   country: string | null;
   status: string;
+  isMarketplaceHidden: boolean;
   createdAt: string;
   updatedAt: string;
   adminEmail: string | null;
@@ -502,6 +503,9 @@ export class AdminService {
               businessType: org.business_type ?? null,
               country: org.country ?? null,
               status: org.status,
+              isMarketplaceHidden: Boolean(
+                (org as any).is_marketplace_hidden ?? false,
+              ),
               createdAt: org.created_at,
               updatedAt: org.updated_at,
               adminEmail,
@@ -1154,6 +1158,9 @@ export class AdminService {
       businessType: data.business_type ?? null,
       country: data.country ?? null,
       status: data.status,
+      isMarketplaceHidden: Boolean(
+        (data as any).is_marketplace_hidden ?? false,
+      ),
       createdAt: data.created_at,
       updatedAt: data.updated_at,
       adminEmail,
@@ -1166,6 +1173,31 @@ export class AdminService {
       farmersIdVerified: Boolean((data as any).farmers_id_verified ?? false),
       farmVerified: Boolean((data as any).farm_verified ?? false),
     };
+  }
+
+  async updateSellerMarketplaceVisibility(
+    id: string,
+    hidden: boolean,
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('organizations')
+      .update({ is_marketplace_hidden: hidden })
+      .eq('id', id)
+      .eq('account_type', 'seller')
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      throw new BadRequestException(
+        `Failed to update seller marketplace visibility: ${
+          error?.message ?? 'Unknown error'
+        }`,
+      );
+    }
+
+    return { success: true };
   }
 
   async getBuyerDetail(orgId: string): Promise<{

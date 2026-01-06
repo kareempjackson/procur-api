@@ -21,6 +21,9 @@ export default () => ({
     postmarkApiKey: process.env.POSTMARK_API_KEY,
     fromEmail: process.env.POSTMARK_FROM_EMAIL || 'noreply@procur.com',
     logoUrl: process.env.LOGO_URL,
+    testEmailsKey: process.env.TEST_EMAILS_KEY,
+    testEmailsRecipient:
+      process.env.TEST_EMAILS_RECIPIENT || 'kareem@procurapp.co',
   },
 
   app: {
