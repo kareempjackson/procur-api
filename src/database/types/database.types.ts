@@ -42,7 +42,11 @@ export interface DatabaseOrganization {
   farmers_id?: string;
   farmers_id_verified?: boolean;
   farm_verified?: boolean;
-  is_marketplace_hidden?: boolean;
+  /**
+   * When true, this seller (and their products) should be hidden from
+   * public marketplace and buyer-facing marketplace UIs.
+   */
+  is_hidden_from_marketplace?: boolean;
   payment_details?: any;
   logo_url?: string;
   government_level?: string;

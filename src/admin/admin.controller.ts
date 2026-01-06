@@ -62,7 +62,7 @@ import {
   UpdateFarmVerificationDto,
   UpdateFarmersIdVerificationDto,
 } from './dto/admin-org-verification.dto';
-import { UpdateSellerMarketplaceVisibilityDto } from './dto/admin-seller-marketplace-visibility.dto';
+import { UpdateSellerMarketplaceHiddenDto } from './dto/admin-seller-marketplace-hidden.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserContext } from '../common/interfaces/jwt-payload.interface';
 import {
@@ -927,21 +927,21 @@ export class AdminController {
     return this.adminService.updateOrganizationStatus(id, 'seller', dto.status);
   }
 
-  @Patch('sellers/:id/marketplace-visibility')
+  @Patch('sellers/:id/marketplace-hidden')
   @ApiOperation({
-    summary: 'Hide/show seller in marketplace',
+    summary: 'Hide or show seller on marketplace (admin)',
     description:
-      'Hide a seller from the public marketplace and buyer marketplace browsing without suspending the seller account.',
+      'Toggles whether this seller (and their products) appears on the public marketplace and buyer marketplace UIs. Seller remains active and visible in admin.',
   })
   @ApiResponse({
     status: 200,
     description: 'Seller marketplace visibility updated successfully',
   })
-  async updateSellerMarketplaceVisibility(
+  async updateSellerMarketplaceHidden(
     @Param('id') id: string,
-    @Body() dto: UpdateSellerMarketplaceVisibilityDto,
-  ): Promise<{ success: boolean }> {
-    return this.adminService.updateSellerMarketplaceVisibility(id, dto.hidden);
+    @Body() dto: UpdateSellerMarketplaceHiddenDto,
+  ): Promise<{ success: boolean; isHiddenFromMarketplace: boolean }> {
+    return this.adminService.updateSellerMarketplaceHidden(id, dto.hidden);
   }
 
   @Patch('sellers/:id/farmers-id-verification')

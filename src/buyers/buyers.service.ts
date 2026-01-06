@@ -87,6 +87,47 @@ export class BuyersService {
     private readonly notifications: NotificationsService,
   ) {}
 
+  private async getVisibleMarketplaceSellerOrgIds(): Promise<string[]> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('organizations')
+      .select('id')
+      .eq('account_type', 'seller')
+      .eq('status', 'active')
+      .eq('is_hidden_from_marketplace', false);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to load marketplace sellers: ${error.message}`,
+      );
+    }
+
+    return (data || []).map((r: any) => r.id as string).filter(Boolean);
+  }
+
+  private async isSellerHiddenFromMarketplace(sellerOrgId: string): Promise<{
+    hidden: boolean;
+    status: string | null;
+  }> {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('organizations')
+      .select('id, status, is_hidden_from_marketplace')
+      .eq('id', sellerOrgId)
+      .eq('account_type', 'seller')
+      .maybeSingle();
+
+    if (error || !data) {
+      return { hidden: true, status: null };
+    }
+
+    const status = (data as any).status as string | null;
+    const hidden = Boolean((data as any).is_hidden_from_marketplace ?? false);
+    return { hidden, status };
+  }
+
   // ==================== MARKETPLACE METHODS ====================
 
   async browseProducts(
@@ -118,18 +159,29 @@ export class BuyersService {
 
     const offset = (page - 1) * limit;
 
+    const visibleSellerIds = await this.getVisibleMarketplaceSellerOrgIds();
+    if (visibleSellerIds.length === 0) {
+      return { products: [], total: 0, page, limit };
+    }
+
+    if (seller_id && !visibleSellerIds.includes(seller_id)) {
+      // Seller exists but is hidden (or not an active seller org) => show nothing in marketplace
+      return { products: [], total: 0, page, limit };
+    }
+
     let queryBuilder = this.supabase
       .getClient()
       .from('products')
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country, is_marketplace_hidden),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
         product_images(image_url, is_primary, display_order)
       `,
+        { count: 'exact' },
       )
       .eq('status', 'active')
-      .eq('seller_organization.is_marketplace_hidden', false)
+      .in('seller_org_id', visibleSellerIds)
       .gte('stock_quantity', in_stock ? 1 : 0);
 
     // Apply filters
@@ -160,40 +212,8 @@ export class BuyersService {
       ascending: sort_order === 'asc',
     });
 
-    // Get total count (match the same filters as the page query)
-    let countBuilder = this.supabase
-      .getClient()
-      .from('products')
-      .select(
-        `
-        id,
-        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
-      `,
-        { count: 'exact', head: true },
-      )
-      .eq('status', 'active')
-      .eq('seller_organization.is_marketplace_hidden', false)
-      .gte('stock_quantity', in_stock ? 1 : 0);
-
-    if (search) {
-      countBuilder = countBuilder.or(
-        `name.ilike.%${search}%, description.ilike.%${search}%, tags.cs.{${search}}`,
-      );
-    }
-    if (category) countBuilder = countBuilder.eq('category', category);
-    if (subcategory) countBuilder = countBuilder.eq('subcategory', subcategory);
-    if (seller_id) countBuilder = countBuilder.eq('seller_org_id', seller_id);
-    if (min_price !== undefined) countBuilder = countBuilder.gte('base_price', min_price);
-    if (max_price !== undefined) countBuilder = countBuilder.lte('base_price', max_price);
-    if (is_organic !== undefined) countBuilder = countBuilder.eq('is_organic', is_organic);
-    if (is_local !== undefined) countBuilder = countBuilder.eq('is_local', is_local);
-    if (is_featured !== undefined) countBuilder = countBuilder.eq('is_featured', is_featured);
-    if (tags && tags.length > 0) countBuilder = countBuilder.overlaps('tags', tags);
-
-    const { count } = await countBuilder;
-
     // Get paginated results
-    const { data: products, error } = await queryBuilder.range(
+    const { data: products, error, count } = await queryBuilder.range(
       offset,
       offset + limit - 1,
     );
@@ -313,7 +333,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country, is_marketplace_hidden),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
         product_images(image_url, alt_text, is_primary, display_order)
       `,
       )
@@ -325,10 +345,17 @@ export class BuyersService {
       throw new NotFoundException('Product not found');
     }
 
-    // Hidden sellers should not be discoverable via public/buyer marketplace flows.
-    if (Boolean((product as any)?.seller_organization?.is_marketplace_hidden)) {
-      throw new NotFoundException('Product not found');
+    // If the seller is hidden from marketplace (or not active), treat as not found.
+    {
+      const sellerOrgId = product.seller_org_id as string;
+      const { hidden, status } =
+        await this.isSellerHiddenFromMarketplace(sellerOrgId);
+      if (hidden || status !== 'active') {
+        throw new NotFoundException('Product not found');
+      }
     }
+
+    const visibleSellerIds = await this.getVisibleMarketplaceSellerOrgIds();
 
     // Get related products (same category, different seller or same seller)
     const { data: relatedProducts } = await client
@@ -337,13 +364,14 @@ export class BuyersService {
         `
         id, name, short_description, category, base_price, sale_price, currency,
         stock_quantity, unit_of_measurement, condition, brand,
-        seller_organization:organizations!seller_org_id(id, name, is_marketplace_hidden),
+        seller_organization:organizations!seller_org_id(id, name),
         product_images(image_url, is_primary, display_order)
       `,
       )
       .eq('category', product.category)
       .neq('id', productId)
       .eq('status', 'active')
+      .in('seller_org_id', visibleSellerIds)
       .limit(6);
 
     // Compute seller rating aggregate
@@ -486,7 +514,7 @@ export class BuyersService {
       )
       .eq('account_type', 'seller')
       .eq('status', 'active')
-      .eq('is_marketplace_hidden', false);
+      .eq('is_hidden_from_marketplace', false);
 
     // Apply filters
     if (search) {
@@ -594,39 +622,40 @@ export class BuyersService {
   }
 
   async getMarketplaceStats(): Promise<MarketplaceStatsDto> {
+    const visibleSellerIds = await this.getVisibleMarketplaceSellerOrgIds();
+    if (visibleSellerIds.length === 0) {
+      return {
+        total_products: 0,
+        total_sellers: 0,
+        total_categories: 0,
+        featured_products: 0,
+        new_products_this_week: 0,
+        popular_categories: [],
+      };
+    }
+
     // Get total counts
     const [productsResult, sellersResult, categoriesResult] = await Promise.all(
       [
         this.supabase
           .getClient()
           .from('products')
-          .select(
-            `
-            id,
-            seller_organization:organizations!seller_org_id(is_marketplace_hidden)
-          `,
-            { count: 'exact', head: true },
-          )
+          .select('*', { count: 'exact', head: true })
           .eq('status', 'active')
-          .eq('seller_organization.is_marketplace_hidden', false),
+          .in('seller_org_id', visibleSellerIds),
         this.supabase
           .getClient()
           .from('organizations')
           .select('*', { count: 'exact', head: true })
           .eq('account_type', 'seller')
           .eq('status', 'active')
-          .eq('is_marketplace_hidden', false),
+          .eq('is_hidden_from_marketplace', false),
         this.supabase
           .getClient()
           .from('products')
-          .select(
-            `
-            category,
-            seller_organization:organizations!seller_org_id(is_marketplace_hidden)
-          `,
-          )
+          .select('category')
           .eq('status', 'active')
-          .eq('seller_organization.is_marketplace_hidden', false),
+          .in('seller_org_id', visibleSellerIds),
       ],
     );
 
@@ -634,16 +663,10 @@ export class BuyersService {
     const { count: featuredCount } = await this.supabase
       .getClient()
       .from('products')
-      .select(
-        `
-        id,
-        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
-      `,
-        { count: 'exact', head: true },
-      )
+      .select('*', { count: 'exact', head: true })
       .eq('status', 'active')
-      .eq('seller_organization.is_marketplace_hidden', false)
-      .eq('is_featured', true);
+      .eq('is_featured', true)
+      .in('seller_org_id', visibleSellerIds);
 
     // Get new products this week
     const oneWeekAgo = new Date();
@@ -651,15 +674,9 @@ export class BuyersService {
     const { count: newProductsCount } = await this.supabase
       .getClient()
       .from('products')
-      .select(
-        `
-        id,
-        seller_organization:organizations!seller_org_id(is_marketplace_hidden)
-      `,
-        { count: 'exact', head: true },
-      )
+      .select('*', { count: 'exact', head: true })
       .eq('status', 'active')
-      .eq('seller_organization.is_marketplace_hidden', false)
+      .in('seller_org_id', visibleSellerIds)
       .gte('created_at', oneWeekAgo.toISOString());
 
     // Calculate popular categories
@@ -712,7 +729,7 @@ export class BuyersService {
         product:products(
           id, name, sku, base_price, sale_price, currency, stock_quantity, 
           unit_of_measurement, seller_org_id,
-          seller_organization:organizations!seller_org_id(id, name),
+          seller_organization:organizations!seller_org_id(id, name, is_hidden_from_marketplace),
           product_images(image_url, is_primary)
         )
       `,
@@ -737,12 +754,35 @@ export class BuyersService {
       };
     }
 
+    const visibleSellerIds = await this.getVisibleMarketplaceSellerOrgIds();
+
+    const visibleCartItems = (cartItems || []).filter((item: any) => {
+      const product = Array.isArray(item.product) ? item.product[0] : item.product;
+      const sellerId = product?.seller_org_id as string | undefined;
+      return sellerId ? visibleSellerIds.includes(sellerId) : false;
+    });
+
+    if (visibleCartItems.length === 0) {
+      return {
+        id: cartId,
+        seller_groups: [],
+        total_items: 0,
+        unique_products: 0,
+        subtotal: 0,
+        estimated_shipping: 0,
+        estimated_tax: 0,
+        total: 0,
+        currency: 'USD',
+        updated_at: new Date().toISOString(),
+      };
+    }
+
     // Group items by seller
     const sellerGroups = new Map<string, CartSellerGroupDto>();
     let totalItems = 0;
     let subtotal = 0;
 
-    cartItems.forEach((item) => {
+    visibleCartItems.forEach((item: any) => {
       const product = Array.isArray(item.product)
         ? item.product[0]
         : item.product;
@@ -799,7 +839,7 @@ export class BuyersService {
       id: cartId,
       seller_groups: Array.from(sellerGroups.values()),
       total_items: totalItems,
-      unique_products: cartItems.length,
+      unique_products: visibleCartItems.length,
       subtotal,
       estimated_shipping: estimatedShipping,
       estimated_tax: estimatedTax,
@@ -820,7 +860,7 @@ export class BuyersService {
     const { data: product, error: productError } = await this.supabase
       .getClient()
       .from('products')
-      .select('id, stock_quantity, status')
+      .select('id, stock_quantity, status, seller_org_id')
       .eq('id', product_id)
       .single();
 
@@ -830,6 +870,18 @@ export class BuyersService {
 
     if (product.status !== 'active') {
       throw new BadRequestException('Product is not available');
+    }
+
+    // Block adding products from hidden (or inactive) sellers
+    {
+      const sellerOrgId = (product as any).seller_org_id as string | undefined;
+      if (sellerOrgId) {
+        const { hidden, status } =
+          await this.isSellerHiddenFromMarketplace(sellerOrgId);
+        if (hidden || status !== 'active') {
+          throw new NotFoundException('Product not found');
+        }
+      }
     }
 
     if (product.stock_quantity < quantity) {
@@ -1678,6 +1730,16 @@ export class BuyersService {
 
       if (!product) {
         throw new NotFoundException(`Product ${item.product_id} not found`);
+      }
+
+      // Prevent checkout against hidden (or inactive) sellers
+      {
+        const sellerOrgId = product.seller_org_id as string;
+        const { hidden, status } =
+          await this.isSellerHiddenFromMarketplace(sellerOrgId);
+        if (hidden || status !== 'active') {
+          throw new NotFoundException(`Product ${item.product_id} not found`);
+        }
       }
 
       if (product.stock_quantity < item.quantity) {
@@ -2828,7 +2890,7 @@ Manage this order: ${link}`;
         product_id, created_at,
         product:products(
           id, name, base_price, sale_price, currency, stock_quantity,
-          seller_organization:organizations!seller_org_id(name),
+          seller_organization:organizations!seller_org_id(id, name, status, is_hidden_from_marketplace),
           product_images(image_url, is_primary)
         )
       `,
@@ -2841,8 +2903,20 @@ Manage this order: ${link}`;
         `Failed to fetch favorite products: ${error.message}`,
       );
 
+    const rows = favorites || [];
+
+    const visibleRows = rows.filter((fav: any) => {
+      const product = Array.isArray(fav.product) ? fav.product[0] : fav.product;
+      const sellerOrg = Array.isArray(product?.seller_organization)
+        ? product.seller_organization[0]
+        : product?.seller_organization;
+      const hidden = Boolean((sellerOrg as any)?.is_hidden_from_marketplace);
+      const status = ((sellerOrg as any)?.status as string | undefined) ?? undefined;
+      return !hidden && status === 'active';
+    });
+
     return (
-      favorites?.map((fav) => {
+      visibleRows.map((fav: any) => {
         const product = Array.isArray(fav.product)
           ? fav.product[0]
           : fav.product;
@@ -2907,7 +2981,7 @@ Manage this order: ${link}`;
         `
         seller_org_id, created_at,
         seller:organizations!seller_org_id(
-          id, name, logo_url, business_type, country,
+          id, name, logo_url, business_type, country, status, is_hidden_from_marketplace,
           products:products!seller_org_id(count)
         )
       `,
@@ -2920,7 +2994,12 @@ Manage this order: ${link}`;
         `Failed to fetch favorite sellers: ${error.message}`,
       );
 
-    const rows = favorites || [];
+    const rows = (favorites || []).filter((fav: any) => {
+      const seller = Array.isArray(fav.seller) ? fav.seller[0] : fav.seller;
+      const hidden = Boolean((seller as any)?.is_hidden_from_marketplace);
+      const status = ((seller as any)?.status as string | undefined) ?? undefined;
+      return !hidden && status === 'active';
+    });
     const sellerIds = Array.from(
       new Set(
         rows
