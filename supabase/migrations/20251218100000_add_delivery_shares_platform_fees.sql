@@ -9,3 +9,6 @@ ADD COLUMN IF NOT EXISTS seller_delivery_share NUMERIC(10,2);
 UPDATE platform_fees_config
 SET buyer_delivery_share = COALESCE(buyer_delivery_share, 0),
     seller_delivery_share = COALESCE(seller_delivery_share, 0);
+
+
+

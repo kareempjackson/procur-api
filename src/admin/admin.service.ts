@@ -34,6 +34,11 @@ import {
   ProductCategory,
   ProductUnit,
 } from './dto/admin-product.dto';
+import {
+  AdminUploadedProductQueryDto,
+  AdminUploadedProductResponseDto,
+  AdminUploadedProductAggregateResponseDto,
+} from './dto/admin-uploaded-product.dto';
 import { OrganizationStatus } from '../common/enums/organization-status.enum';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
@@ -2901,6 +2906,165 @@ export class AdminService {
     }
 
     return { success: true };
+  }
+
+  // ===== Uploaded products (seller inventory view) =====
+
+  async listUploadedProducts(
+    query: AdminUploadedProductQueryDto,
+  ): Promise<{
+    items:
+      | AdminUploadedProductResponseDto[]
+      | AdminUploadedProductAggregateResponseDto[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const {
+      search,
+      sellerOrgId,
+      status,
+      category,
+      view = 'by_seller',
+      page = 1,
+      limit = 20,
+    } = query;
+    const from = (page - 1) * limit;
+    const to = from + limit - 1;
+
+    const client = this.supabase.getClient();
+
+    if (view === 'aggregate') {
+      if (sellerOrgId) {
+        throw new BadRequestException(
+          'sellerOrgId filter is not supported when view=aggregate',
+        );
+      }
+
+      let aggBuilder = client
+        .from('admin_uploaded_products_aggregate')
+        .select('*', { count: 'exact' });
+
+      if (category) aggBuilder = aggBuilder.eq('category', category);
+      if (search) aggBuilder = aggBuilder.ilike('name', `%${search}%`);
+
+      aggBuilder = aggBuilder
+        .order('total_stock_quantity', { ascending: false })
+        .range(from, to);
+
+      const { data: aggData, error: aggError, count: aggCount } =
+        await aggBuilder;
+
+      if (aggError) {
+        throw new BadRequestException(
+          `Failed to list uploaded products (aggregate): ${aggError.message}`,
+        );
+      }
+
+      const items: AdminUploadedProductAggregateResponseDto[] = (
+        (aggData || []) as any[]
+      ).map((r) => ({
+        id: String(r.id),
+        name: String(r.name),
+        category: (r.category as string | null) ?? null,
+        unitOfMeasurement: (r.unit_of_measurement as string | null) ?? null,
+        currency: String(r.currency ?? 'MIXED'),
+        totalQuantity: Number(r.total_stock_quantity ?? 0),
+        sellerCount: Number(r.seller_count ?? 0),
+        minPrice: Number(r.min_price ?? 0),
+        maxPrice: Number(r.max_price ?? 0),
+        avgPrice: Number(r.avg_price ?? 0),
+      }));
+
+      return {
+        items,
+        total: aggCount || 0,
+        page,
+        limit,
+      };
+    }
+
+    let builder = client
+      .from('products')
+      .select(
+        'id, seller_org_id, name, category, unit_of_measurement, base_price, sale_price, currency, stock_quantity, status, created_at, updated_at',
+        { count: 'exact' },
+      );
+
+    if (sellerOrgId) builder = builder.eq('seller_org_id', sellerOrgId);
+    if (status) builder = builder.eq('status', status);
+    if (category) builder = builder.eq('category', category);
+    if (search) builder = builder.ilike('name', `%${search}%`);
+
+    builder = builder.order('updated_at', { ascending: false }).range(from, to);
+
+    const { data, error, count } = await builder;
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to list uploaded products: ${error.message}`,
+      );
+    }
+
+    const rows = (data || []) as Array<{
+      id: string;
+      seller_org_id: string;
+      name: string;
+      category: string | null;
+      unit_of_measurement: string | null;
+      base_price: number | null;
+      sale_price: number | null;
+      currency: string | null;
+      stock_quantity: number | null;
+      status: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    const orgIds = Array.from(
+      new Set(rows.map((r) => r.seller_org_id).filter(Boolean)),
+    );
+
+    const orgNameById = new Map<string, string>();
+    if (orgIds.length > 0) {
+      const { data: orgs, error: orgErr } = await client
+        .from('organizations')
+        .select('id, name')
+        .in('id', orgIds);
+
+      if (orgErr) {
+        throw new BadRequestException(
+          `Failed to load seller organizations for uploaded products: ${orgErr.message}`,
+        );
+      }
+
+      (orgs || []).forEach((o: any) => {
+        if (o?.id && o?.name) orgNameById.set(String(o.id), String(o.name));
+      });
+    }
+
+    const items: AdminUploadedProductResponseDto[] = rows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      category: p.category ?? null,
+      unitOfMeasurement: p.unit_of_measurement ?? null,
+      basePrice: Number(p.base_price ?? 0),
+      salePrice: p.sale_price != null ? Number(p.sale_price) : null,
+      currency: (p.currency as string | null) ?? 'USD',
+      stockQuantity: Number(p.stock_quantity ?? 0),
+      status: p.status ?? 'unknown',
+      sellerOrgId: p.seller_org_id,
+      sellerOrgName: orgNameById.get(p.seller_org_id) ?? null,
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+    }));
+
+    return {
+      items,
+      total: count || 0,
+      page,
+      limit,
+    };
   }
 
   // ===== Drivers (individual accounts) =====

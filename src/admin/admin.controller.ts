@@ -52,6 +52,9 @@ import {
   UpdateAdminProductDto,
 } from './dto/admin-product.dto';
 import {
+  AdminUploadedProductQueryDto,
+} from './dto/admin-uploaded-product.dto';
+import {
   AdminUserResponseDto,
   CreateAdminUserDto,
   UpdateAdminUserDto,
@@ -766,6 +769,23 @@ export class AdminController {
     @Param('id') id: string,
   ): Promise<{ success: boolean }> {
     return this.adminService.deleteAdminProduct(id);
+  }
+
+  // ===== Uploaded products (seller inventory view) =====
+
+  @Get('uploaded-products')
+  @ApiOperation({
+    summary: 'List uploaded products (seller inventory)',
+    description:
+      'Platform-level view of all seller-uploaded products, including owner (seller org) and stock quantity.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Uploaded products listed successfully',
+    type: Object,
+  })
+  async listUploadedProducts(@Query() query: AdminUploadedProductQueryDto) {
+    return this.adminService.listUploadedProducts(query);
   }
 
   // ===== Drivers =====
