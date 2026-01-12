@@ -3388,23 +3388,174 @@ export class AdminService {
   async deleteAdminUser(id: string): Promise<{ success: boolean }> {
     const client = this.supabase.getClient();
 
-    const { data, error } = await client
+    // Fetch the target admin to ensure it exists and is a platform admin.
+    const { data: target, error: targetErr } = await client
       .from('users')
-      .update({ is_active: false })
+      .select('id, role, is_active')
+      .eq('id', id)
+      .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
+      .single();
+
+    if (targetErr || !target) {
+      throw new BadRequestException(
+        `Failed to delete admin user: ${
+          (targetErr as any)?.message ?? 'Admin user not found'
+        }`,
+      );
+    }
+
+    // Safety: do not allow deleting the last active SUPER_ADMIN account.
+    if (target.role === UserRole.SUPER_ADMIN && Boolean(target.is_active)) {
+      const { count, error: countErr } = await client
+        .from('users')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', UserRole.SUPER_ADMIN)
+        .eq('is_active', true)
+        .neq('id', id);
+
+      if (countErr) {
+        throw new BadRequestException(
+          `Failed to delete admin user: ${countErr.message}`,
+        );
+      }
+
+      if ((count ?? 0) === 0) {
+        throw new BadRequestException(
+          'Cannot delete the last active super admin. Create another super admin first.',
+        );
+      }
+    }
+
+    // Hard-delete blockers: tables that use NOT NULL + RESTRICT/NO ACTION FKs.
+    // We refuse to delete if the admin is referenced here to avoid data loss.
+    const blockerChecks: Array<{
+      table: string;
+      column: string;
+      label: string;
+    }> = [
+      {
+        table: 'conversations',
+        column: 'created_by_user_id',
+        label: 'Messaging conversations created',
+      },
+      {
+        table: 'messages',
+        column: 'sender_user_id',
+        label: 'Messaging messages sent',
+      },
+      {
+        table: 'government_seller_audit_log',
+        column: 'government_user_id',
+        label: 'Government seller audit log entries',
+      },
+    ];
+
+    const blockers: string[] = [];
+    for (const check of blockerChecks) {
+      const { count, error } = await client
+        .from(check.table)
+        .select('id', { count: 'exact', head: true })
+        .eq(check.column, id);
+
+      if (error) {
+        // If the table doesn't exist in this environment, ignore the check.
+        const code = (error as any)?.code as string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
+        if (code !== '42P01') {
+          throw new BadRequestException(
+            `Failed to delete admin user: ${error.message}`,
+          );
+        }
+      } else if ((count ?? 0) > 0) {
+        blockers.push(`${check.label} (${count})`);
+      }
+    }
+
+    if (blockers.length > 0) {
+      throw new BadRequestException(
+        `Cannot permanently delete this admin because they are referenced by: ${blockers.join(
+          ', ',
+        )}. Deactivate the admin instead.`,
+      );
+    }
+
+    // Clean up nullable foreign keys that may reference this admin.
+    // These are best-effort; we only block on the explicit blockers above.
+    await client
+      .from('organization_users')
+      .update({ invited_by: null })
+      .eq('invited_by', id);
+
+    await client
+      .from('organization_roles')
+      .update({ created_by: null })
+      .eq('created_by', id);
+
+    await client
+      .from('custom_permissions')
+      .update({ created_by: null })
+      .eq('created_by', id);
+
+    await client
+      .from('role_system_permissions')
+      .update({ granted_by: null })
+      .eq('granted_by', id);
+
+    await client
+      .from('role_custom_permissions')
+      .update({ granted_by: null })
+      .eq('granted_by', id);
+
+    await client
+      .from('government_seller_permissions')
+      .update({ granted_by: null, approved_by: null })
+      .or(`granted_by.eq.${id},approved_by.eq.${id}`);
+
+    // Invitations have a NOT NULL invited_by FK; safest is to delete outstanding invites.
+    await client.from('organization_invitations').delete().eq('invited_by', id);
+
+    // Finance / operations nullable references
+    await client
+      .from('payment_links')
+      .update({ created_by: null })
+      .eq('created_by', id);
+
+    await client
+      .from('payout_batches')
+      .update({ created_by: null })
+      .eq('created_by', id);
+
+    await client
+      .from('farmer_bank_info')
+      .update({ created_by: null })
+      .eq('created_by', id);
+
+    await client
+      .from('farmer_bank_info')
+      .update({ updated_by: null })
+      .eq('updated_by', id);
+
+    await client
+      .from('orders')
+      .update({ approved_by_admin_id: null })
+      .eq('approved_by_admin_id', id);
+
+    // Finally delete the admin user row itself.
+    const { data: deleted, error: deleteErr } = await client
+      .from('users')
+      .delete()
       .eq('id', id)
       .in('role', [UserRole.ADMIN, UserRole.SUPER_ADMIN])
       .select('id')
       .single();
 
-    if (error || !data) {
+    if (deleteErr || !deleted) {
       throw new BadRequestException(
-        `Failed to delete admin user: ${error?.message ?? 'Unknown error'}`,
+        `Failed to delete admin user: ${deleteErr?.message ?? 'Unknown error'}`,
       );
     }
 
     // Best-effort removal from Supabase Auth so the admin no longer appears
-    // in the Supabase Authentication user list. Failures here should not
-    // block the primary soft-delete behaviour.
+    // in the Supabase Authentication user list.
     await this.supabase.deleteAuthUser(id);
 
     return { success: true };

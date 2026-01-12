@@ -1126,9 +1126,9 @@ export class AdminController {
 
   @Delete('admins/:id')
   @ApiOperation({
-    summary: 'Delete (deactivate) platform admin user',
+    summary: 'Delete platform admin user',
     description:
-      'Soft-delete a platform-level admin or super admin account by marking it inactive. Only SUPER_ADMIN can call this endpoint.',
+      'Permanently delete a platform-level admin or super admin account (removes the row and deletes the Supabase Auth user when possible). Only SUPER_ADMIN can call this endpoint.',
   })
   @ApiResponse({
     status: 200,

@@ -31,3 +31,4 @@ GROUP BY
   COALESCE(ap.unit, p.unit_of_measurement::text);
 
 
+
