@@ -3513,6 +3513,22 @@ export class AdminService {
     // Invitations have a NOT NULL invited_by FK; safest is to delete outstanding invites.
     await client.from('organization_invitations').delete().eq('invited_by', id);
 
+    // Farm visit requests have a NOT NULL requested_by_user_id but an ON DELETE SET NULL FK,
+    // which makes hard-deleting the referenced user impossible unless we clean up first.
+    // We delete farm visit requests created by this admin.
+    const { error: farmVisitDeleteErr } = await client
+      .from('farm_visit_requests')
+      .delete()
+      .eq('requested_by_user_id', id);
+    if (farmVisitDeleteErr) {
+      const code = (farmVisitDeleteErr as any)?.code as string | undefined; // eslint-disable-line @typescript-eslint/no-explicit-any
+      if (code !== '42P01') {
+        throw new BadRequestException(
+          `Failed to delete admin user: ${farmVisitDeleteErr.message}`,
+        );
+      }
+    }
+
     // Finance / operations nullable references
     await client
       .from('payment_links')
