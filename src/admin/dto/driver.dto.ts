@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsEmail,
+  IsIn,
   IsOptional,
   IsString,
   MaxLength,
@@ -91,4 +92,39 @@ export class UpdateDriverDto {
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
+}
+
+export class CreateDriverImageUploadUrlDto {
+  @ApiProperty({ enum: ['profile', 'license'] })
+  @IsString()
+  @IsIn(['profile', 'license'])
+  kind!: 'profile' | 'license';
+
+  @ApiProperty({
+    description: 'Original filename (used to infer extension for the storage key)',
+    example: 'driver_license.jpg',
+  })
+  @IsString()
+  @MaxLength(255)
+  filename!: string;
+}
+
+export class DriverImageUploadUrlResponseDto {
+  @ApiProperty()
+  bucket!: string;
+
+  @ApiProperty()
+  path!: string;
+
+  @ApiProperty()
+  signedUrl!: string;
+
+  @ApiProperty()
+  token!: string;
+
+  @ApiProperty({
+    description:
+      'Public URL for the uploaded object (suitable to store on the driver record)',
+  })
+  publicUrl!: string;
 }

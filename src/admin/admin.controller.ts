@@ -32,6 +32,8 @@ import { AdminOrderQueryDto } from './dto/admin-order-query.dto';
 import {
   AdminDriverResponseDto,
   CreateDriverDto,
+  CreateDriverImageUploadUrlDto,
+  DriverImageUploadUrlResponseDto,
   UpdateDriverDto,
 } from './dto/driver.dto';
 import {
@@ -75,6 +77,7 @@ import {
   ProductQueryDto,
   ProductResponseDto,
   ProductStatus,
+  ProductImageDto,
 } from '../sellers/dto';
 import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
@@ -306,6 +309,23 @@ export class AdminController {
     return this.adminService.listSellerProducts(orgId, query);
   }
 
+  @Get('sellers/:orgId/products/:productId')
+  @ApiOperation({
+    summary: 'Get seller product (admin)',
+    description: 'Fetch a single seller product (including images).',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product retrieved successfully',
+    type: ProductResponseDto,
+  })
+  async getSellerProduct(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+  ): Promise<ProductResponseDto> {
+    return this.adminService.getSellerProduct(orgId, productId);
+  }
+
   @Post('sellers/:id/products')
   @ApiOperation({
     summary: 'Create product for seller (admin)',
@@ -323,6 +343,43 @@ export class AdminController {
     @Body() dto: CreateProductDto,
   ): Promise<ProductResponseDto> {
     return this.adminService.createSellerProduct(orgId, dto, user.id);
+  }
+
+  @Post('sellers/:orgId/products/:productId/images')
+  @ApiOperation({
+    summary: 'Add seller product image (admin)',
+    description:
+      'Attach an image URL to a seller product (creates a product_images row).',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Product image added successfully',
+  })
+  async addSellerProductImage(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+    @Body() dto: ProductImageDto,
+  ): Promise<{ success: boolean }> {
+    await this.adminService.addSellerProductImage(orgId, productId, dto);
+    return { success: true };
+  }
+
+  @Delete('sellers/:orgId/products/:productId/images/:imageId')
+  @ApiOperation({
+    summary: 'Delete seller product image (admin)',
+    description: 'Delete a product_images row for a seller product.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product image deleted successfully',
+  })
+  async deleteSellerProductImage(
+    @Param('orgId') orgId: string,
+    @Param('productId') productId: string,
+    @Param('imageId') imageId: string,
+  ): Promise<{ success: boolean }> {
+    await this.adminService.deleteSellerProductImage(orgId, productId, imageId);
+    return { success: true };
   }
 
   @Patch('sellers/:orgId/products/:productId')
@@ -816,6 +873,24 @@ export class AdminController {
   })
   async getDriver(@Param('id') id: string): Promise<AdminDriverResponseDto> {
     return this.adminService.getDriverById(id);
+  }
+
+  @Patch('drivers/images/signed-upload')
+  @ApiOperation({
+    summary: 'Create signed upload URL for driver images (admin)',
+    description:
+      'Return a signed upload URL for a driver profile/license image stored in the procur-img bucket.',
+  })
+  @ApiBody({ type: CreateDriverImageUploadUrlDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Signed upload URL created successfully',
+    type: DriverImageUploadUrlResponseDto,
+  })
+  async createDriverImageSignedUpload(
+    @Body() dto: CreateDriverImageUploadUrlDto,
+  ): Promise<DriverImageUploadUrlResponseDto> {
+    return this.adminService.createDriverImageSignedUpload(dto);
   }
 
   @Post('drivers')

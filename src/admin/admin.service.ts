@@ -18,6 +18,8 @@ import { EmailService } from '../email/email.service';
 import {
   AdminDriverResponseDto,
   CreateDriverDto,
+  CreateDriverImageUploadUrlDto,
+  DriverImageUploadUrlResponseDto,
   UpdateDriverDto,
 } from './dto/driver.dto';
 import {
@@ -47,6 +49,7 @@ import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 import {
   CreateFarmVisitRequestDto,
   CreateProductDto,
+  ProductImageDto,
   ProductQueryDto,
   ProductResponseDto,
   ProductStatus,
@@ -186,6 +189,7 @@ export class AdminService {
       .select(
         'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
       )
+      .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -1354,8 +1358,31 @@ export class AdminService {
     return this.sellersService.getProducts(orgId, query);
   }
 
+  async getSellerProduct(
+    orgId: string,
+    productId: string,
+  ): Promise<ProductResponseDto> {
+    return this.sellersService.getProductById(orgId, productId);
+  }
+
   async deleteSellerProduct(orgId: string, productId: string): Promise<void> {
     await this.sellersService.deleteProduct(orgId, productId);
+  }
+
+  async addSellerProductImage(
+    orgId: string,
+    productId: string,
+    dto: ProductImageDto,
+  ): Promise<void> {
+    await this.sellersService.addProductImage(orgId, productId, dto);
+  }
+
+  async deleteSellerProductImage(
+    orgId: string,
+    productId: string,
+    imageId: string,
+  ): Promise<void> {
+    await this.sellersService.deleteProductImage(orgId, productId, imageId);
   }
 
   async updateSellerProductStatus(
@@ -3068,6 +3095,31 @@ export class AdminService {
   }
 
   // ===== Drivers (individual accounts) =====
+
+  async createDriverImageSignedUpload(
+    dto: CreateDriverImageUploadUrlDto,
+  ): Promise<DriverImageUploadUrlResponseDto> {
+    const ext = dto.filename.includes('.')
+      ? dto.filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+
+    const bucket = 'procur-img';
+    const objectPath = `drivers/${dto.kind}/${crypto.randomUUID()}.${ext}`;
+
+    // Ensure bucket exists and is public (no-op if already exists)
+    await this.supabase.ensureBucketExists(bucket, true);
+
+    const signed = await this.supabase.createSignedUploadUrl(bucket, objectPath);
+    const publicUrl = this.supabase.getPublicUrl(bucket, objectPath);
+
+    return {
+      bucket,
+      path: objectPath,
+      signedUrl: signed.signedUrl,
+      token: signed.token,
+      publicUrl,
+    };
+  }
 
   async listDrivers(): Promise<AdminDriverResponseDto[]> {
     const client = this.supabase.getClient();

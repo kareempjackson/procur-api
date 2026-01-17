@@ -722,6 +722,7 @@ export class BuyersService {
       .select(
         'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
       )
+      .order('updated_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
@@ -794,6 +795,8 @@ export class BuyersService {
         total_items: 0,
         unique_products: 0,
         subtotal: 0,
+        platform_fee_percent: 0,
+        platform_fee_amount: 0,
         estimated_shipping: 0,
         estimated_tax: 0,
         total: 0,
@@ -817,6 +820,8 @@ export class BuyersService {
         total_items: 0,
         unique_products: 0,
         subtotal: 0,
+        platform_fee_percent: 0,
+        platform_fee_amount: 0,
         estimated_shipping: 0,
         estimated_tax: 0,
         total: 0,
@@ -826,16 +831,15 @@ export class BuyersService {
     }
 
     const feesConfig = await this.getPlatformFeesConfig();
+    const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
     const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
     const totalDeliveryFee =
       configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
     // Cart is an estimate (no route/address-based shipping yet). Use buyer share
-    // from config; if not configured, fall back to an even split.
-    const estimatedBuyerShipping = configuredBuyerShare
-      ? Number(configuredBuyerShare.toFixed(2))
-      : Number((totalDeliveryFee / 2).toFixed(2));
+    // from config. Buyer delivery should always match the admin-configured buyer_delivery_share.
+    const estimatedBuyerShipping = Number(configuredBuyerShare.toFixed(2));
 
     // Group items by seller
     const sellerGroups = new Map<string, CartSellerGroupDto>();
@@ -860,7 +864,9 @@ export class BuyersService {
             (product.seller_organization as any)?.name || 'Unknown Seller',
           items: [],
           subtotal: 0,
-          estimated_shipping: estimatedBuyerShipping,
+          // Buyer pays delivery ONCE per cart/order, not per seller.
+          // Keep seller group shipping at 0 to avoid multiplying fees by number of sellers.
+          estimated_shipping: 0,
           total: 0,
         });
       }
@@ -886,14 +892,15 @@ export class BuyersService {
         added_at: item.added_at,
       });
       group.subtotal += itemTotal;
-      group.total = group.subtotal + group.estimated_shipping;
+      group.total = group.subtotal;
     });
 
-    const estimatedShipping = Array.from(sellerGroups.values()).reduce(
-      (sum, group) => sum + group.estimated_shipping,
-      0,
+    // Buyer delivery fee is a single fee across the cart (not multiplied per seller).
+    const estimatedShipping = Number((estimatedBuyerShipping || 0).toFixed(2));
+    const estimatedTax = 0; // Tax disabled for buyer cart
+    const platformFeeAmount = Number(
+      ((subtotal * platformFeePercent) / 100).toFixed(2),
     );
-    const estimatedTax = subtotal * 0.08; // TODO: Calculate actual tax
 
     return {
       id: cartId,
@@ -901,9 +908,11 @@ export class BuyersService {
       total_items: totalItems,
       unique_products: visibleCartItems.length,
       subtotal,
+      platform_fee_percent: platformFeePercent,
+      platform_fee_amount: platformFeeAmount,
       estimated_shipping: estimatedShipping,
       estimated_tax: estimatedTax,
-      total: subtotal + estimatedShipping + estimatedTax,
+      total: subtotal + estimatedShipping + platformFeeAmount,
       currency: 'USD',
       updated_at: new Date().toISOString(),
     };
@@ -1590,18 +1599,20 @@ export class BuyersService {
     // Calculate pricing
     const unitPrice = quote.unit_price;
     const subtotal = unitPrice * acceptedQuantity;
-    const taxAmount = subtotal * 0.08; // TODO: Calculate actual tax
+    const taxAmount = 0; // Tax disabled
     // Buyer-facing delivery fee should come from platform fees config (buyer_delivery_share).
     const feesConfig = await this.getPlatformFeesConfig();
+    const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
     const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
     const totalDeliveryFee =
       configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
-    const shippingAmount = configuredBuyerShare
-      ? Number(configuredBuyerShare.toFixed(2))
-      : Number((totalDeliveryFee / 2).toFixed(2));
-    const totalAmount = subtotal + taxAmount + shippingAmount;
+    const shippingAmount = Number(configuredBuyerShare.toFixed(2));
+    const platformFeeAmount = Number(
+      ((subtotal * platformFeePercent) / 100).toFixed(2),
+    );
+    const totalAmount = subtotal + taxAmount + shippingAmount + platformFeeAmount;
 
     // Get shipping address
     let shippingAddress;
@@ -1845,16 +1856,19 @@ export class BuyersService {
     const createdOrders: any[] = [];
 
     const feesConfig = await this.getPlatformFeesConfig();
+    const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
     const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
     const totalDeliveryFee =
       configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
-    const buyerDeliveryForOrder = configuredBuyerShare
-      ? Number(configuredBuyerShare.toFixed(2))
-      : Number((totalDeliveryFee / 2).toFixed(2));
+    const buyerDeliveryForOrder = Number(configuredBuyerShare.toFixed(2));
 
-    for (const [sellerOrgId, items] of sellerGroups) {
+    const sellerEntries = Array.from(sellerGroups.entries()).sort(([a], [b]) =>
+      String(a).localeCompare(String(b)),
+    );
+
+    for (const [idx, [sellerOrgId, items]] of sellerEntries.entries()) {
       this.logger.log(
         `Creating order for seller ${sellerOrgId} with ${items.length} item(s)`,
       );
@@ -1862,11 +1876,15 @@ export class BuyersService {
         (sum, item) => sum + item.total_price,
         0,
       );
-      // Buyer-facing delivery fee should come from platform fees config (buyer_delivery_share).
-      // Note: This is per-seller order (the cart is split into multiple orders by seller).
-      const shippingAmount = buyerDeliveryForOrder;
-      const taxAmount = orderSubtotal * 0.08; // TODO: Calculate actual tax
-      const totalAmount = orderSubtotal + shippingAmount + taxAmount;
+      // Buyer pays delivery ONCE across the cart, even when split into multiple seller orders.
+      // Allocate buyer delivery fee to the first seller order only.
+      const shippingAmount = idx === 0 ? buyerDeliveryForOrder : 0;
+      const taxAmount = 0; // Tax disabled
+      const platformFeeAmount = Number(
+        ((orderSubtotal * platformFeePercent) / 100).toFixed(2),
+      );
+      const totalAmount =
+        orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
 
       // Generate order number
       const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
@@ -1881,7 +1899,6 @@ export class BuyersService {
           buyer_user_id: buyerUserId,
           status: 'pending',
           payment_status: 'pending',
-          payment_method: 'offline',
           subtotal: orderSubtotal,
           tax_amount: taxAmount,
           shipping_amount: shippingAmount,

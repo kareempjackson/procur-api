@@ -116,6 +116,18 @@ export class CartResponseDto {
   @ApiProperty({ description: 'Cart subtotal' })
   subtotal: number;
 
+  @ApiProperty({
+    description: 'Platform fee percent applied to subtotal',
+    example: 5,
+  })
+  platform_fee_percent: number;
+
+  @ApiProperty({
+    description: 'Platform fee amount applied to subtotal',
+    example: 12.5,
+  })
+  platform_fee_amount: number;
+
   @ApiProperty({ description: 'Total estimated shipping' })
   estimated_shipping: number;
 
