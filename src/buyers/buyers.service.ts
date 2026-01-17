@@ -308,6 +308,7 @@ export class BuyersService {
               average_rating: sellerRating?.avg,
               review_count: sellerRating?.count ?? 0,
               product_count: 0, // TODO: Count seller products
+              completed_orders: 0,
               is_verified: true, // TODO: Add verification logic
             },
             is_favorited: buyerOrgId
@@ -440,6 +441,7 @@ export class BuyersService {
         average_rating: sellerAverageRating,
         review_count: sellerReviewCount,
         product_count: 0, // TODO: Count seller products
+        completed_orders: 0,
         is_verified: true, // TODO: Add verification logic
       },
       is_favorited: buyerOrgId
@@ -479,6 +481,7 @@ export class BuyersService {
             average_rating: undefined,
             review_count: 0,
             product_count: 0,
+            completed_orders: 0,
             is_verified: true,
           },
         })) || [],
@@ -565,6 +568,7 @@ export class BuyersService {
         product_count:
           (seller.products || []).filter((p: any) => p.status === 'active')
             .length || 0,
+        completed_orders: 0, // Will be computed below from orders
         years_in_business:
           new Date().getFullYear() - new Date(seller.created_at).getFullYear(),
         is_verified: true, // TODO: Add verification logic
@@ -596,6 +600,25 @@ export class BuyersService {
           s.average_rating = Number((a.sum / a.count).toFixed(2));
           s.review_count = a.count;
         }
+      });
+
+      // Compute completed orders (all time) from orders table.
+      // Note: orders.status is an enum that uses 'delivered' as the terminal "completed" state.
+      const { data: completedOrders } = await this.supabase
+        .getClient()
+        .from('orders')
+        .select('seller_org_id')
+        .in('seller_org_id', sellerIds)
+        .in('status', ['delivered']);
+
+      const completedAgg = new Map<string, number>();
+      (completedOrders || []).forEach((o: any) => {
+        const id = o.seller_org_id as string;
+        completedAgg.set(id, (completedAgg.get(id) || 0) + 1);
+      });
+
+      mappedSellers.forEach((s) => {
+        s.completed_orders = completedAgg.get(s.id) || 0;
       });
     }
 

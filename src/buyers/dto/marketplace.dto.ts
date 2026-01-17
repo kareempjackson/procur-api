@@ -233,6 +233,11 @@ export class MarketplaceSellerDto {
   @ApiProperty({ description: 'Number of products' })
   product_count: number;
 
+  @ApiProperty({
+    description: 'Number of completed orders fulfilled by this seller (all time)',
+  })
+  completed_orders: number;
+
   @ApiProperty({ description: 'Years in business' })
   years_in_business?: number;
 
