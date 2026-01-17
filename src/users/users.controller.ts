@@ -40,6 +40,10 @@ import {
   CreateLogoUploadUrlDto,
   LogoUploadUrlResponseDto,
 } from './dto/logo-upload.dto';
+import {
+  CreateHeaderImageUploadUrlDto,
+  HeaderImageUploadUrlResponseDto,
+} from './dto/header-image-upload.dto';
 
 @ApiTags('Users')
 @ApiBearerAuth('JWT-auth')
@@ -267,6 +271,31 @@ export class UsersController {
       ) => Promise<LogoUploadUrlResponseDto>;
     };
     const upload = await service.createLogoSignedUpload(user, dto);
+    return upload;
+  }
+
+  @Patch('header-image/signed-upload')
+  @ApiOperation({
+    summary:
+      'Create signed upload URL for organization header image (public bucket)',
+  })
+  @ApiResponse({ status: 200, description: 'Signed URL created' })
+  async createHeaderImageSignedUpload(
+    @CurrentUser() user: UserContext,
+    @Body() dto: CreateHeaderImageUploadUrlDto,
+  ): Promise<HeaderImageUploadUrlResponseDto> {
+    const service: {
+      createHeaderImageSignedUpload: (
+        user: UserContext,
+        dto: CreateHeaderImageUploadUrlDto,
+      ) => Promise<HeaderImageUploadUrlResponseDto>;
+    } = this.usersService as unknown as {
+      createHeaderImageSignedUpload: (
+        user: UserContext,
+        dto: CreateHeaderImageUploadUrlDto,
+      ) => Promise<HeaderImageUploadUrlResponseDto>;
+    };
+    const upload = await service.createHeaderImageSignedUpload(user, dto);
     return upload;
   }
 }

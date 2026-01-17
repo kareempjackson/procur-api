@@ -609,6 +609,38 @@ export class BuyersController {
     return this.buyersService.getOrders(user.organizationId!, query);
   }
 
+  @Get('orders/group/:groupId')
+  @RequirePermissions('view_buyer_orders')
+  @ApiOperation({
+    summary: 'Get Checkout Orders (Grouped)',
+    description:
+      'Get all seller-split orders that were created from a single checkout (checkout_group_id)',
+  })
+  @ApiParam({ name: 'groupId', description: 'Checkout group ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Grouped checkout orders retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        checkout_group_id: { type: 'string', format: 'uuid' },
+        orders: {
+          type: 'array',
+          items: { $ref: '#/components/schemas/BuyerOrderResponseDto' },
+        },
+      },
+    },
+  })
+  async getOrdersByCheckoutGroup(
+    @CurrentUser() user: UserContext,
+    @Param('groupId', ParseUUIDPipe) groupId: string,
+  ) {
+    return this.buyersService.getOrdersByCheckoutGroupId(
+      user.organizationId!,
+      groupId,
+    );
+  }
+
   @Get('orders/:id')
   @RequirePermissions('view_buyer_orders')
   @ApiOperation({
@@ -661,6 +693,44 @@ export class BuyersController {
     );
 
     // Keep filename stable for users (prefer invoice number / order number)
+    const filename = `procur-invoice-${invoiceNumber}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.end(buffer);
+  }
+
+  @Get('orders/group/:groupId/invoice')
+  @RequirePermissions('view_buyer_orders')
+  @ApiOperation({
+    summary: 'Download Checkout Invoice (PDF)',
+    description:
+      'Generate and download a single aggregated PDF invoice for a multi-supplier checkout (checkout_group_id)',
+  })
+  @ApiParam({ name: 'groupId', description: 'Checkout group ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'PDF invoice generated successfully',
+    content: {
+      'application/pdf': {
+        schema: {
+          type: 'string',
+          format: 'binary',
+        },
+      },
+    },
+  })
+  async downloadCheckoutGroupInvoice(
+    @CurrentUser() user: UserContext,
+    @Param('groupId', ParseUUIDPipe) groupId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { buffer, invoiceNumber } =
+      await this.buyersService.generateCheckoutGroupInvoicePdf(
+        user.organizationId!,
+        groupId,
+      );
+
     const filename = `procur-invoice-${invoiceNumber}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

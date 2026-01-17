@@ -7,11 +7,16 @@ export class EmailService {
   private readonly logger = new Logger(EmailService.name);
   private postmarkClient: postmark.ServerClient;
   private fromEmail: string;
+  private readonly sendTimeoutMs: number;
 
   constructor(private configService: ConfigService) {
     const apiKey = this.configService.get<string>('email.postmarkApiKey');
     this.fromEmail =
       this.configService.get<string>('email.fromEmail') || 'noreply@procur.com';
+    this.sendTimeoutMs =
+      Number(this.configService.get<string>('email.timeoutMs')) ||
+      Number(process.env.EMAIL_TIMEOUT_MS) ||
+      10_000;
 
     if (!apiKey) {
       throw new Error('Postmark API key is required');
@@ -20,6 +25,35 @@ export class EmailService {
     this.postmarkClient = new postmark.ServerClient(apiKey);
     this.logger.log('Postmark client initialized');
   }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+  ): Promise<T> {
+    let t: NodeJS.Timeout | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          t = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (t) clearTimeout(t);
+    }
+  }
+
+  private async sendPostmarkEmail(payload: postmark.Models.Message) {
+    return this.withTimeout(
+      this.postmarkClient.sendEmail(payload),
+      this.sendTimeoutMs,
+      'Postmark sendEmail',
+    );
+  }
+
   async sendBasicEmail(
     to: string,
     subject: string,
@@ -27,7 +61,7 @@ export class EmailService {
     textBody?: string,
   ) {
     try {
-      const result = await this.postmarkClient.sendEmail({
+      const result = await this.sendPostmarkEmail({
         From: this.fromEmail,
         To: to,
         Subject: subject,
@@ -52,7 +86,7 @@ export class EmailService {
     htmlBody: string,
     textBody?: string,
   ) {
-    const result = await this.postmarkClient.sendEmail({
+    const result = await this.sendPostmarkEmail({
       From: this.fromEmail,
       To: to,
       Subject: subject,
@@ -73,7 +107,7 @@ export class EmailService {
     const verificationUrl = `${frontendUrl}/verify?token=${verificationToken}`;
 
     try {
-      const result = await this.postmarkClient.sendEmail({
+      const result = await this.sendPostmarkEmail({
         From: this.fromEmail,
         To: email,
         Subject: 'Verify Your Procur Account',
@@ -94,7 +128,7 @@ export class EmailService {
 
   async sendWelcomeEmail(email: string, fullname: string) {
     try {
-      const result = await this.postmarkClient.sendEmail({
+      const result = await this.sendPostmarkEmail({
         From: this.fromEmail,
         To: email,
         Subject: 'Welcome to Procur!',
@@ -123,7 +157,7 @@ export class EmailService {
     const invitationUrl = `${frontendUrl}/auth/accept-invitation?token=${invitationToken}`;
 
     try {
-      const result = await this.postmarkClient.sendEmail({
+      const result = await this.sendPostmarkEmail({
         From: this.fromEmail,
         To: email,
         Subject: `Invitation to join ${organizationName} on Procur`,

@@ -6,6 +6,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'crypto';
 import { TemplateService } from '../whatsapp/templates/template.service';
 import { EmailService } from '../email/email.service';
 import { SupabaseService } from '../database/supabase.service';
@@ -175,7 +176,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, header_image_url, business_type, country),
         product_images(image_url, is_primary, display_order)
       `,
         { count: 'exact' },
@@ -301,6 +302,8 @@ export class BuyersService {
               name: product.seller_organization.name,
               description: undefined,
               logo_url: product.seller_organization.logo_url,
+              header_image_url: (product.seller_organization as any)
+                .header_image_url,
               location: product.seller_organization.country,
               average_rating: sellerRating?.avg,
               review_count: sellerRating?.count ?? 0,
@@ -333,7 +336,7 @@ export class BuyersService {
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(id, name, logo_url, business_type, country),
+        seller_organization:organizations!seller_org_id(id, name, logo_url, header_image_url, business_type, country),
         product_images(image_url, alt_text, is_primary, display_order)
       `,
       )
@@ -432,6 +435,7 @@ export class BuyersService {
         name: product.seller_organization.name,
         description: undefined,
         logo_url: product.seller_organization.logo_url,
+        header_image_url: (product.seller_organization as any).header_image_url,
         location: product.seller_organization.country,
         average_rating: sellerAverageRating,
         review_count: sellerReviewCount,
@@ -1756,6 +1760,45 @@ export class BuyersService {
     this.logger.log(
       `createOrder start buyer_org=${buyerOrgId} buyer_user=${buyerUserId} items=${createDto.items?.length || 0}`,
     );
+
+    // Important: do not let non-critical side-effects (email, WhatsApp, notifications, conversations)
+    // block checkout. We timebox them and run them in the background.
+    const withTimeout = async <T>(
+      promise: Promise<T>,
+      timeoutMs: number,
+      label: string,
+    ): Promise<T> => {
+      let t: NodeJS.Timeout | null = null;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<T>((_, reject) => {
+            t = setTimeout(() => {
+              reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+            }, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (t) clearTimeout(t);
+      }
+    };
+
+    const runSideEffect = (
+      label: string,
+      fn: () => Promise<unknown>,
+      timeoutMs = 2000,
+    ) => {
+      void (async () => {
+        try {
+          await withTimeout(Promise.resolve().then(fn), timeoutMs, label);
+        } catch (e: any) {
+          this.logger.warn(
+            `Side-effect failed (${label}): ${String(e?.message || e)}`,
+          );
+        }
+      })();
+    };
+
     // Validate shipping address
     const { data: shippingAddress } = await this.supabase
       .getClient()
@@ -1854,6 +1897,7 @@ export class BuyersService {
 
     // Create separate orders for each seller
     const createdOrders: any[] = [];
+    const checkoutGroupId = randomUUID();
 
     const feesConfig = await this.getPlatformFeesConfig();
     const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
@@ -1897,6 +1941,7 @@ export class BuyersService {
           buyer_org_id: buyerOrgId,
           seller_org_id: sellerOrgId,
           buyer_user_id: buyerUserId,
+          checkout_group_id: checkoutGroupId,
           status: 'pending',
           payment_status: 'pending',
           subtotal: orderSubtotal,
@@ -1970,31 +2015,34 @@ export class BuyersService {
         });
 
       // Auto-create conversation for this order
-      try {
-        this.logger.debug(`Auto-creating conversation for order ${order.id}`);
-        await this.conversationsService.createOrGetConversation({
-          type: 'contextual',
-          contextType: 'order',
-          contextId: order.id,
-          currentUserId: buyerUserId,
-          currentOrgId: buyerOrgId,
-          otherUserId: undefined, // We don't have seller user ID, just org
-          title: `Order ${orderNumber}`,
-        });
-      } catch (convError) {
-        // Log but don't fail the order creation
-        console.error('Failed to create conversation for order:', convError);
-      }
+      runSideEffect(
+        `conversation:createOrGetConversation order=${order.id}`,
+        async () => {
+          this.logger.debug(`Auto-creating conversation for order ${order.id}`);
+          await this.conversationsService.createOrGetConversation({
+            type: 'contextual',
+            contextType: 'order',
+            contextId: order.id,
+            currentUserId: buyerUserId,
+            currentOrgId: buyerOrgId,
+            otherUserId: undefined, // We don't have seller user ID, just org
+            title: `Order ${orderNumber}`,
+          });
+        },
+        2000,
+      );
 
       // Emit in-app notification asking seller to accept the order
-      try {
-        const client = this.supabase.getClient();
-        const { data: sellerUsers } = await client
-          .from('organization_users')
-          .select('user_id')
-          .eq('organization_id', sellerOrgId);
-        const recipients = (sellerUsers || []).map((r: any) => r.user_id);
-        if (recipients.length) {
+      runSideEffect(
+        `notify:order_created seller_org=${sellerOrgId} order=${order.id}`,
+        async () => {
+          const client = this.supabase.getClient();
+          const { data: sellerUsers } = await client
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', sellerOrgId);
+          const recipients = (sellerUsers || []).map((r: any) => r.user_id);
+          if (!recipients.length) return;
           this.logger.log(
             `Emitting order_created notification to ${recipients.length} user(s) for seller_org=${sellerOrgId}`,
           );
@@ -2015,120 +2063,120 @@ export class BuyersService {
                   'http://localhost:3001') + `/seller/orders/${order.id}`,
             },
           });
-        }
-      } catch (notifyErr) {
-        this.logger.error(
-          `Failed to emit order_created notification: ${String(
-            (notifyErr as any)?.message || notifyErr,
-          )}`,
-        );
-      }
+        },
+        2500,
+      );
 
       // Notify the specific seller via WhatsApp if they are paired (signed up using WhatsApp)
-      try {
-        const client = this.supabase.getClient();
-        // Deep link to manage this order
-        const frontend =
-          this.config.get<string>('frontend.url') ||
-          process.env.FRONTEND_URL ||
-          'http://localhost:3001';
-        const manageUrl = `${frontend}/seller/orders/${order.id}`;
+      runSideEffect(
+        `wa:new_order seller_org=${sellerOrgId} order=${order.id}`,
+        async () => {
+          const client = this.supabase.getClient();
+          // Deep link to manage this order
+          const frontend =
+            this.config.get<string>('frontend.url') ||
+            process.env.FRONTEND_URL ||
+            'http://localhost:3001';
+          const manageUrl = `${frontend}/seller/orders/${order.id}`;
 
-        // Prefer product creator as the target seller user
-        const creatorId =
-          (items.find((it: any) => it?.product_snapshot?.created_by)
-            ?.product_snapshot?.created_by as string | undefined) || undefined;
+          // Prefer product creator as the target seller user
+          const creatorId =
+            (items.find((it: any) => it?.product_snapshot?.created_by)
+              ?.product_snapshot?.created_by as string | undefined) || undefined;
 
-        let targetSellerUserId: string | null = creatorId ?? null;
+          let targetSellerUserId: string | null = creatorId ?? null;
 
-        // Fallback to an org member (e.g., earliest joined) if creator not available
-        if (!targetSellerUserId) {
-          const { data: owner } = await client
-            .from('organization_users')
-            .select('user_id, joined_at')
-            .eq('organization_id', sellerOrgId)
-            .order('joined_at', { ascending: true })
-            .limit(1)
-            .single();
-          targetSellerUserId = owner?.user_id ?? null;
-        }
-
-        if (targetSellerUserId) {
-          const { data: sellerUser } = await client
-            .from('users')
-            .select('id, fullname, phone_number')
-            .eq('id', targetSellerUserId)
-            .not('phone_number', 'is', null)
-            .single();
-
-          if (sellerUser?.phone_number) {
-            const orderNum = String(order.order_number || order.id);
-            const buyerName =
-              (shippingAddress as any)?.name ||
-              (billingAddress as any)?.name ||
-              'Buyer';
-            const currency = String(order.currency || 'USD');
-            const totalAmt = Number(order.total_amount || 0);
-
-            const to = String(sellerUser.phone_number).replace(/^\+/, '');
-            const firstItem = items[0];
-            const unit =
-              (firstItem?.product_snapshot as any)?.unit_of_measurement || '';
-            const qty = firstItem?.quantity ?? 0;
-            const productName = firstItem?.product_name || 'items';
-            const summary =
-              qty && unit
-                ? `${qty} ${unit} of ${productName} for ${currency} ${totalAmt.toFixed(
-                    2,
-                  )}`
-                : `${items.length} item(s) for ${currency} ${totalAmt.toFixed(2)}`;
-            await this.waTemplates.sendNewOrderToSeller(
-              to,
-              orderNum,
-              buyerName,
-              totalAmt,
-              currency,
-              manageUrl,
-              'en',
-            );
-            // Send interactive Accept/Reject buttons
-            await this.waTemplates.sendOrderAcceptButtons(
-              String(sellerUser.phone_number),
-              String(order.id),
-              summary,
-            );
+          // Fallback to an org member (e.g., earliest joined) if creator not available
+          if (!targetSellerUserId) {
+            const { data: owner } = await client
+              .from('organization_users')
+              .select('user_id, joined_at')
+              .eq('organization_id', sellerOrgId)
+              .order('joined_at', { ascending: true })
+              .limit(1)
+              .single();
+            targetSellerUserId = owner?.user_id ?? null;
           }
-        }
-      } catch (waErr) {
-        // Do not block order creation on WhatsApp issues
-        console.warn('WA notify seller (new order) failed:', waErr);
-      }
+
+          if (targetSellerUserId) {
+            const { data: sellerUser } = await client
+              .from('users')
+              .select('id, fullname, phone_number')
+              .eq('id', targetSellerUserId)
+              .not('phone_number', 'is', null)
+              .single();
+
+            if (sellerUser?.phone_number) {
+              const orderNum = String(order.order_number || order.id);
+              const buyerName =
+                (shippingAddress as any)?.name ||
+                (billingAddress as any)?.name ||
+                'Buyer';
+              const currency = String(order.currency || 'USD');
+              const totalAmt = Number(order.total_amount || 0);
+
+              const to = String(sellerUser.phone_number).replace(/^\+/, '');
+              const firstItem = items[0];
+              const unit =
+                (firstItem?.product_snapshot as any)?.unit_of_measurement || '';
+              const qty = firstItem?.quantity ?? 0;
+              const productName = firstItem?.product_name || 'items';
+              const summary =
+                qty && unit
+                  ? `${qty} ${unit} of ${productName} for ${currency} ${totalAmt.toFixed(
+                      2,
+                    )}`
+                  : `${items.length} item(s) for ${currency} ${totalAmt.toFixed(2)}`;
+
+              await this.waTemplates.sendNewOrderToSeller(
+                to,
+                orderNum,
+                buyerName,
+                totalAmt,
+                currency,
+                manageUrl,
+                'en',
+              );
+              // Send interactive Accept/Reject buttons
+              await this.waTemplates.sendOrderAcceptButtons(
+                String(sellerUser.phone_number),
+                String(order.id),
+                summary,
+              );
+            }
+          }
+        },
+        3000,
+      );
 
       // Notify seller users via Email (all available emails in the seller organization)
-      try {
-        const client = this.supabase.getClient();
-        const frontend =
-          this.config.get<string>('frontend.url') ||
-          process.env.FRONTEND_URL ||
-          'http://localhost:3001';
-        const manageUrl = `${frontend}/seller/orders/${order.id}`;
-        const orderNum = String(order.order_number || order.id);
-        const currency = String(order.currency || 'USD');
-        const totalAmt = Number(order.total_amount || 0);
-        const buyerName =
-          (shippingAddress as any)?.contact_name ||
-          (shippingAddress as any)?.name ||
-          (billingAddress as any)?.contact_name ||
-          (billingAddress as any)?.name ||
-          'Buyer';
+      runSideEffect(
+        `email:seller_new_order seller_org=${sellerOrgId} order=${order.id}`,
+        async () => {
+          const client = this.supabase.getClient();
+          const frontend =
+            this.config.get<string>('frontend.url') ||
+            process.env.FRONTEND_URL ||
+            'http://localhost:3001';
+          const manageUrl = `${frontend}/seller/orders/${order.id}`;
+          const orderNum = String(order.order_number || order.id);
+          const currency = String(order.currency || 'USD');
+          const totalAmt = Number(order.total_amount || 0);
+          const buyerName =
+            (shippingAddress as any)?.contact_name ||
+            (shippingAddress as any)?.name ||
+            (billingAddress as any)?.contact_name ||
+            (billingAddress as any)?.name ||
+            'Buyer';
 
-        // Fetch all members of the seller organization
-        const { data: orgUsers } = await client
-          .from('organization_users')
-          .select('user_id')
-          .eq('organization_id', sellerOrgId);
-        const userIds = (orgUsers || []).map((ou: any) => ou.user_id);
-        if (userIds.length > 0) {
+          // Fetch all members of the seller organization
+          const { data: orgUsers } = await client
+            .from('organization_users')
+            .select('user_id')
+            .eq('organization_id', sellerOrgId);
+          const userIds = (orgUsers || []).map((ou: any) => ou.user_id);
+          if (userIds.length === 0) return;
+
           const { data: users } = await client
             .from('users')
             .select('id, email, fullname')
@@ -2141,10 +2189,11 @@ export class BuyersService {
                 name: u.fullname as string,
               })) || [];
 
-          if (recipients.length > 0) {
-            const subject = `New order ${orderNum} received`;
-            const link = manageUrl;
-            const html = `
+          if (recipients.length === 0) return;
+
+          const subject = `New order ${orderNum} received`;
+          const link = manageUrl;
+          const html = `
                 <h2>New order received</h2>
                 <p>You have a new order <strong>${orderNum}</strong> from <strong>${buyerName}</strong>.</p>
                 <p>Total: <strong>${currency} ${totalAmt.toFixed(2)}</strong></p>
@@ -2152,28 +2201,24 @@ export class BuyersService {
                   <a href="${link}" class="button">Review and manage this order</a>
                 </p>
             `;
-            const text = `You have a new order ${orderNum} from ${buyerName}.
+          const text = `You have a new order ${orderNum} from ${buyerName}.
 Total: ${currency} ${totalAmt.toFixed(2)}
 Manage this order: ${link}`;
 
-            // Send to each recipient (non-blocking failures)
-            await Promise.all(
-              recipients.map((r) =>
-                this.emailService.sendBrandedEmail(
-                  r.email,
-                  subject,
-                  `New order ${orderNum} received`,
-                  html,
-                  text,
-                ),
+          await Promise.all(
+            recipients.map((r) =>
+              this.emailService.sendBrandedEmail(
+                r.email,
+                subject,
+                `New order ${orderNum} received`,
+                html,
+                text,
               ),
-            );
-          }
-        }
-      } catch (emailErr) {
-        // Do not block order creation on email issues
-        console.warn('Email notify seller (new order) failed:', emailErr);
-      }
+            ),
+          );
+        },
+        15000,
+      );
 
       createdOrders.push(order);
     }
@@ -2189,43 +2234,41 @@ Manage this order: ${link}`;
     const firstOrderItems = sellerGroups.get(firstOrder.seller_org_id) || [];
 
     // Email receipt to buyer (non-card path)
-    try {
-      const { data: buyer } = await this.supabase
-        .getClient()
-        .from('users')
-        .select('email, fullname')
-        .eq('id', buyerUserId)
-        .single();
+    runSideEffect(
+      `email:buyer_receipt order=${firstOrder?.id}`,
+      async () => {
+        const { data: buyer } = await this.supabase
+          .getClient()
+          .from('users')
+          .select('email, fullname')
+          .eq('id', buyerUserId)
+          .single();
 
-      if (buyer?.email) {
-        const frontendUrl =
-          this.config.get<string>('frontend.url') ||
-          process.env.FRONTEND_URL ||
-          'http://localhost:3001';
-        const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
-        const html = `
-            <h2>Thanks for your order</h2>
-            <p>Thanks for your order on Procur.</p>
-            <p>You can view your full order receipt and track updates here:</p>
-            <p style="margin-top: 16px;">
-              <a href="${link}" class="button">View order receipt</a>
-            </p>
-        `;
-        await this.emailService.sendBrandedEmail(
-          buyer.email,
-          'Your order receipt',
-          'Your order receipt',
-          html,
-          `Thanks for your order! View your receipt: ${link}`,
-        );
-      }
-    } catch (emailErr) {
-      this.logger.warn(
-        `Buyer receipt email failed for order ${firstOrder?.id}: ${String(
-          (emailErr as any)?.message || emailErr,
-        )}`,
-      );
-    }
+        if (buyer?.email) {
+          const frontendUrl =
+            this.config.get<string>('frontend.url') ||
+            process.env.FRONTEND_URL ||
+            'http://localhost:3001';
+          const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
+          const html = `
+              <h2>Thanks for your order</h2>
+              <p>Thanks for your order on Procur.</p>
+              <p>You can view your full order receipt and track updates here:</p>
+              <p style="margin-top: 16px;">
+                <a href="${link}" class="button">View order receipt</a>
+              </p>
+          `;
+          await this.emailService.sendBrandedEmail(
+            buyer.email,
+            'Your order receipt',
+            'Your order receipt',
+            html,
+            `Thanks for your order! View your receipt: ${link}`,
+          );
+        }
+      },
+      12000,
+    );
 
     this.logger.log(
       `createOrder complete. first_order=${firstOrder?.id} items=${firstOrderItems?.length || 0}`,
@@ -2453,6 +2496,104 @@ Manage this order: ${link}`;
       orderItems,
     );
     return this.transformOrderToResponse(order, orderItems);
+  }
+
+  async getOrdersByCheckoutGroupId(
+    buyerOrgId: string,
+    checkoutGroupId: string,
+  ): Promise<{ checkout_group_id: string; orders: BuyerOrderResponseDto[] }> {
+    const client = this.supabase.getClient();
+
+    const { data: orders, error } = await client
+      .from('orders')
+      .select(
+        `
+        *,
+        seller_organization:organizations!seller_org_id(name)
+      `,
+      )
+      .eq('buyer_org_id', buyerOrgId)
+      .eq('checkout_group_id', checkoutGroupId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch checkout orders: ${error.message}`,
+      );
+    }
+
+    const orderList = orders || [];
+    const orderIds = orderList.map((o: any) => o?.id).filter(Boolean);
+
+    const sellerOrgIdByOrderId = new Map<string, string>();
+    for (const o of orderList) {
+      if (o?.id && o?.seller_org_id) {
+        sellerOrgIdByOrderId.set(o.id, o.seller_org_id);
+      }
+    }
+
+    const itemsByOrderId = new Map<string, any[]>();
+    if (orderIds.length > 0) {
+      const { data: items, error: itemsError } = await client
+        .from('order_items')
+        .select('*')
+        .in('order_id', orderIds);
+
+      if (itemsError) {
+        throw new BadRequestException(
+          `Failed to load order items: ${itemsError.message}`,
+        );
+      }
+
+      for (const item of items || []) {
+        const oid = (item as any).order_id as string | undefined;
+        if (!oid) continue;
+        const arr = itemsByOrderId.get(oid) || [];
+        arr.push(item);
+        itemsByOrderId.set(oid, arr);
+      }
+
+      // Fallback for offline/payment-link orders that store line items in payment_links.meta
+      const { data: links, error: linksError } = await client
+        .from('payment_links')
+        .select('order_id, meta')
+        .in('order_id', orderIds);
+
+      if (linksError) {
+        throw new BadRequestException(
+          `Failed to load payment links for orders: ${linksError.message}`,
+        );
+      }
+
+      for (const link of links || []) {
+        const oid = (link as any).order_id as string | undefined;
+        if (!oid) continue;
+        const existing = itemsByOrderId.get(oid) || [];
+        if (existing.length > 0) continue;
+
+        const meta = (link as any)?.meta as any;
+        const fromMeta = this.mapPaymentLinkMetaToOrderItems(meta);
+        if (fromMeta.length > 0) {
+          itemsByOrderId.set(oid, fromMeta);
+        }
+      }
+    }
+
+    await this.hydrateOrderItemsImagesForOrders(
+      client,
+      sellerOrgIdByOrderId,
+      itemsByOrderId,
+    );
+
+    const transformedOrders: BuyerOrderResponseDto[] = orderList.map(
+      (order: any) => {
+        const explicit = itemsByOrderId.get(order.id) || [];
+        const finalItems = explicit.length > 0 ? explicit : [];
+        return this.transformOrderToResponse(order, finalItems);
+      },
+    );
+
+    return { checkout_group_id: checkoutGroupId, orders: transformedOrders };
   }
 
   /**
@@ -3398,6 +3539,449 @@ Manage this order: ${link}`;
     );
   }
 
+  async generateCheckoutGroupInvoicePdf(
+    buyerOrgId: string,
+    checkoutGroupId: string,
+  ): Promise<{ buffer: Buffer; invoiceNumber: string }> {
+    const client = this.supabase.getClient();
+
+    const { data: orders, error } = await client
+      .from('orders')
+      .select(
+        `
+        *,
+        seller_organization:organizations!seller_org_id(name)
+      `,
+      )
+      .eq('buyer_org_id', buyerOrgId)
+      .eq('checkout_group_id', checkoutGroupId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch checkout orders: ${error.message}`,
+      );
+    }
+
+    const orderList = (orders || []) as any[];
+    if (orderList.length === 0) {
+      throw new NotFoundException('Checkout group not found');
+    }
+
+    const currencyCode = String(orderList[0]?.currency || 'USD');
+    const invoiceNumber = `CHK-${String(checkoutGroupId).slice(0, 8)}`;
+
+    // Buyer company name (for BILLED TO). Best effort.
+    let resolvedBuyerCompanyName = '';
+    try {
+      const { data: buyerOrg } = await client
+        .from('organizations')
+        .select('name, business_name')
+        .eq('id', buyerOrgId)
+        .single();
+      resolvedBuyerCompanyName =
+        (buyerOrg as any)?.business_name || (buyerOrg as any)?.name || '';
+    } catch {
+      // ignore
+    }
+
+    // Load all line items
+    const orderIds = orderList.map((o) => o.id).filter(Boolean);
+    const { data: items, error: itemsError } = await client
+      .from('order_items')
+      .select('*')
+      .in('order_id', orderIds);
+
+    if (itemsError) {
+      throw new BadRequestException(
+        `Failed to load order items: ${itemsError.message}`,
+      );
+    }
+
+    const orderById = new Map<string, any>();
+    for (const o of orderList) orderById.set(o.id, o);
+
+    const aggregatedItems = (items || []).map((it: any) => {
+      const order = orderById.get(it.order_id) || {};
+      const sellerName = order.seller_organization?.name || order.seller_name;
+      const unit =
+        it.product_snapshot?.unit_of_measurement ||
+        it.unit_of_measurement ||
+        it.unit ||
+        '';
+      return {
+        id: it.id,
+        product_name: it.product_name,
+        unit_price: Number(it.unit_price || 0),
+        quantity: Number(it.quantity || 0),
+        total_price: Number(it.total_price || 0),
+        details: `${sellerName ? `Seller: ${sellerName}` : ''}${
+          unit ? `${sellerName ? ' • ' : ''}Unit: ${unit}` : ''
+        }`,
+      };
+    });
+
+    const subtotal = orderList.reduce(
+      (sum, o) => sum + Number(o.subtotal || 0),
+      0,
+    );
+    const delivery = orderList.reduce(
+      (sum, o) => sum + Number(o.shipping_amount || 0),
+      0,
+    );
+    const discount = orderList.reduce(
+      (sum, o) => sum + Number(o.discount_amount || 0),
+      0,
+    );
+    const taxAmount = orderList.reduce(
+      (sum, o) => sum + Number(o.tax_amount || 0),
+      0,
+    );
+    const platformFee = orderList.reduce((sum, o) => {
+      const subtotalAmount = Number(o.subtotal || 0);
+      const deliveryAmount = Number(o.shipping_amount || 0);
+      const discountAmount = Number(o.discount_amount || 0);
+      const tax = Number(o.tax_amount || 0);
+      const totalFromApi = Number(o.total_amount || 0);
+      const explicitPlatformFee = Number(
+        o.platform_fee_amount ?? o.platform_fee ?? 0,
+      );
+      const computedPlatformFee =
+        totalFromApi - subtotalAmount - deliveryAmount - tax + discountAmount;
+      const fee =
+        explicitPlatformFee > 0 ? explicitPlatformFee : Math.max(0, computedPlatformFee);
+      return sum + fee;
+    }, 0);
+    const totalAmount = orderList.reduce(
+      (sum, o) => sum + Number(o.total_amount || 0),
+      0,
+    );
+
+    const formatCurrency = (value: number) =>
+      `${currencyCode} ${Number(value || 0).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    const formatDate = (raw?: string | null) => {
+      if (!raw) return '';
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      });
+    };
+
+    const issuedAt = formatDate(orderList[0]?.created_at);
+    const shippingAddress = orderList[0]?.shipping_address as any;
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    const chunks: Buffer[] = [];
+
+    const colors = {
+      pageBg: '#F2EFE6',
+      text: '#000809',
+      muted: '#6C715D',
+      accent: '#CB5927',
+      border: '#E5E7EB',
+      bg: '#FFFFFF',
+      soft: '#F2EFE6',
+      footerBg: '#FAFAFA',
+    };
+
+    const pageLeft = doc.page.margins.left;
+    const pageRight = doc.page.width - doc.page.margins.right;
+    const pageWidth = pageRight - pageLeft;
+
+    const paintBg = () => {
+      doc.save();
+      doc.rect(0, 0, doc.page.width, doc.page.height).fill(colors.pageBg);
+      doc.restore();
+    };
+
+    const renderHeader = () => {
+      // Brand header box
+      const h = 52;
+      const headerY = doc.y;
+      doc
+        .roundedRect(pageLeft, headerY, pageWidth, h, 12)
+        .lineWidth(1)
+        .strokeColor(colors.border)
+        .fillColor(colors.bg)
+        .fillAndStroke();
+      doc
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(18)
+        .text('Procur', pageLeft, headerY + 16, { width: pageWidth, align: 'center' });
+      doc.y = headerY + h + 20;
+
+      // Title + meta
+      doc
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(20)
+        .text('Invoice', pageLeft, doc.y);
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(10)
+        .text('Official summary of your order on Procur.', pageLeft, doc.y + 20);
+
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text('Invoice', pageLeft, doc.y - 34, { width: pageWidth, align: 'right' })
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text(invoiceNumber, pageLeft, doc.y - 22, { width: pageWidth, align: 'right' })
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text('Issued', pageLeft, doc.y - 6, { width: pageWidth, align: 'right' })
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text(issuedAt, pageLeft, doc.y + 6, { width: pageWidth, align: 'right' });
+
+      doc.y += 32;
+
+      // Parties (Billed To)
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica')
+        .fontSize(9)
+        .text('BILLED TO', pageLeft, doc.y);
+      doc
+        .fillColor(colors.text)
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .text(resolvedBuyerCompanyName || shippingAddress?.company || '', pageLeft, doc.y + 14, {
+          width: pageWidth,
+        });
+
+      const line1 =
+        shippingAddress?.address_line1 ||
+        shippingAddress?.street ||
+        shippingAddress?.street_address ||
+        shippingAddress?.line1 ||
+        '';
+      const line2 =
+        shippingAddress?.address_line2 ||
+        shippingAddress?.apartment ||
+        shippingAddress?.line2 ||
+        '';
+      const city = shippingAddress?.city || '';
+      const state = shippingAddress?.state || '';
+      const postal =
+        shippingAddress?.postal_code ||
+        shippingAddress?.zip ||
+        shippingAddress?.zipCode ||
+        '';
+      const country = shippingAddress?.country || '';
+
+      const addressLines = [line1, line2, [city, state, postal].filter(Boolean).join(' '), country]
+        .filter(Boolean)
+        .slice(0, 4);
+
+      let addressY = doc.y + 30;
+      doc.fillColor(colors.muted).font('Helvetica').fontSize(9);
+      for (const l of addressLines) {
+        doc.text(String(l), pageLeft, addressY, { width: pageWidth });
+        addressY += 12;
+      }
+      doc.y = addressY + 10;
+    };
+
+    const renderTableHeader = (tableX: number, tableY: number, tableW: number) => {
+      doc.rect(tableX, tableY, tableW, 26).fillColor(colors.soft).fill();
+      const padX = 12;
+      const contentX = tableX + padX;
+      const contentW = tableW - padX * 2;
+      const itemW = Math.floor(contentW * 0.34);
+      const detailsW = Math.floor(contentW * 0.34);
+      const qtyW = Math.floor(contentW * 0.08);
+      const unitPriceW = Math.floor(contentW * 0.12);
+      const lineTotalW = contentW - itemW - detailsW - qtyW - unitPriceW;
+
+      const colItemX = contentX;
+      const colDetailsX = colItemX + itemW;
+      const colQtyX = colDetailsX + detailsW;
+      const colUnitPriceX = colQtyX + qtyW;
+      const colTotalX = colUnitPriceX + unitPriceW;
+
+      doc
+        .fillColor(colors.muted)
+        .font('Helvetica-Bold')
+        .fontSize(9)
+        .text('Item', colItemX, tableY + 8, { width: itemW - 6 })
+        .text('Details', colDetailsX, tableY + 8, { width: detailsW - 6 })
+        .text('Qty', colQtyX, tableY + 8, { width: qtyW, align: 'right' })
+        .text('Unit price', colUnitPriceX, tableY + 8, { width: unitPriceW, align: 'right' })
+        .text('Line total', colTotalX, tableY + 8, { width: lineTotalW, align: 'right' });
+
+      return { contentX, itemW, detailsW, qtyW, unitPriceW, lineTotalW, colItemX, colDetailsX, colQtyX, colUnitPriceX, colTotalX };
+    };
+
+    return await new Promise<{ buffer: Buffer; invoiceNumber: string }>(
+      (resolve, reject) => {
+        doc.on('data', (chunk) => chunks.push(chunk));
+        doc.on('end', () => resolve({ buffer: Buffer.concat(chunks), invoiceNumber }));
+        doc.on('error', (err) => reject(err));
+
+        paintBg();
+        renderHeader();
+
+        // Table with pagination
+        const tableX = pageLeft;
+        const tableW = pageWidth;
+        const startY = doc.y;
+        const rowH = 22;
+        const headerH = 26;
+        const bottomReserve = 220; // space for totals + footer on last page
+        const pageBottom = doc.page.height - doc.page.margins.bottom;
+
+        const calcRowsPerPage = (availableBottom: number) =>
+          Math.max(6, Math.floor((availableBottom - startY - headerH - 12) / rowH));
+
+        let index = 0;
+        while (index < aggregatedItems.length) {
+          const isLastPage = false; // we determine later per loop
+          const remaining = aggregatedItems.length - index;
+          const remainingPagesNeededEstimate = 1; // not used; keep simple
+
+          const availableBottom = pageBottom - 12;
+          const rowsPerPage = calcRowsPerPage(availableBottom);
+          const pageRows = aggregatedItems.slice(index, index + rowsPerPage);
+
+          // Draw table container height based on rows
+          const tableH = headerH + 8 + rowH * Math.max(pageRows.length, 1) + 10;
+          doc
+            .roundedRect(tableX, startY, tableW, tableH, 16)
+            .lineWidth(1)
+            .strokeColor('#F3F4F6')
+            .fillColor(colors.bg)
+            .fillAndStroke();
+
+          const cols = renderTableHeader(tableX, startY, tableW);
+          const rowStartY = startY + 34;
+
+          pageRows.forEach((it: any, rowIdx: number) => {
+            const y = rowStartY + rowIdx * rowH;
+            if (rowIdx % 2 === 1) {
+              doc.rect(tableX, y - 4, tableW, rowH).fillColor('#F9FAFB').fill();
+            }
+            doc
+              .fillColor(colors.text)
+              .font('Helvetica-Bold')
+              .fontSize(9)
+              .text(String(it.product_name || 'Item'), cols.colItemX, y, { width: cols.itemW - 10, ellipsis: true });
+            doc
+              .fillColor(colors.muted)
+              .font('Helvetica')
+              .fontSize(8)
+              .text(String(it.details || ''), cols.colDetailsX, y, { width: cols.detailsW - 10, ellipsis: true });
+            doc
+              .fillColor(colors.text)
+              .font('Helvetica')
+              .fontSize(9)
+              .text(Number(it.quantity || 0).toLocaleString('en-US'), cols.colQtyX, y, { width: cols.qtyW, align: 'right' });
+            doc
+              .fillColor(colors.text)
+              .font('Helvetica')
+              .fontSize(9)
+              .text(formatCurrency(Number(it.unit_price || 0)), cols.colUnitPriceX, y, { width: cols.unitPriceW, align: 'right' });
+            doc
+              .fillColor(colors.text)
+              .font('Helvetica-Bold')
+              .fontSize(9)
+              .text(formatCurrency(Number(it.total_price || 0)), cols.colTotalX, y, { width: cols.lineTotalW, align: 'right' });
+          });
+
+          index += pageRows.length;
+
+          if (index >= aggregatedItems.length) {
+            // Totals on last page
+            const totalsTopY = startY + tableH + 16;
+            const totalsX = pageLeft + pageWidth - 240;
+            const totalsW = 240;
+
+            const totalRow = (label: string, value: string, y: number, bold = false) => {
+              doc
+                .fillColor(colors.muted)
+                .font('Helvetica')
+                .fontSize(9)
+                .text(label, totalsX, y, { width: totalsW / 2, align: 'left' });
+              doc
+                .fillColor(colors.text)
+                .font(bold ? 'Helvetica-Bold' : 'Helvetica')
+                .fontSize(bold ? 12 : 9)
+                .text(value, totalsX, y, { width: totalsW, align: 'right' });
+            };
+
+            let ty = totalsTopY;
+            totalRow('Subtotal', formatCurrency(subtotal), ty);
+            ty += 12;
+            totalRow('Delivery & handling', formatCurrency(delivery), ty);
+            ty += 12;
+            totalRow('Platform fee', formatCurrency(platformFee), ty);
+            ty += 12;
+            if (taxAmount > 0) {
+              totalRow('Tax', formatCurrency(taxAmount), ty);
+              ty += 12;
+            }
+            if (discount > 0) {
+              doc
+                .fillColor('#059669')
+                .font('Helvetica')
+                .fontSize(9)
+                .text('Discount', totalsX, ty, { width: totalsW / 2, align: 'left' });
+              doc
+                .fillColor('#059669')
+                .font('Helvetica')
+                .fontSize(9)
+                .text(`-${formatCurrency(discount)}`, totalsX, ty, { width: totalsW, align: 'right' });
+              ty += 12;
+            }
+
+            doc
+              .moveTo(totalsX, ty + 6)
+              .lineTo(totalsX + totalsW, ty + 6)
+              .strokeColor('#CBD5E1')
+              .lineWidth(1)
+              .stroke();
+            ty += 14;
+            totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+
+            // Footer
+            const footerNote =
+              'Thank you for sourcing fresh produce through Procur. Payments help us keep farmers on the land and buyers fully supplied.';
+            const footerY = Math.min(pageBottom - 70, ty + 40);
+            doc
+              .fillColor(colors.muted)
+              .font('Helvetica')
+              .fontSize(8)
+              .text(footerNote, pageLeft, footerY, { width: pageWidth, align: 'left' });
+          } else {
+            // More pages
+            doc.addPage();
+            paintBg();
+            doc.y = doc.page.margins.top;
+            renderHeader();
+          }
+        }
+
+        doc.end();
+      },
+    );
+  }
+
   async cancelOrder(buyerOrgId: string, orderId: string): Promise<void> {
     const { data: order } = await this.supabase
       .getClient()
@@ -3518,6 +4102,7 @@ Manage this order: ${link}`;
 
     return {
       id: order.id,
+      checkout_group_id: order.checkout_group_id || null,
       order_number: order.order_number,
       status: order.status,
       payment_status: order.payment_status,

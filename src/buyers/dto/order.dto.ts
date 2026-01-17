@@ -178,6 +178,12 @@ export class BuyerOrderResponseDto {
   @ApiProperty({ description: 'Order ID' })
   id: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Checkout group ID (links split seller orders created from a single checkout)',
+  })
+  checkout_group_id?: string;
+
   @ApiProperty({ description: 'Order number' })
   order_number: string;
 

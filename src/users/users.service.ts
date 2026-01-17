@@ -12,6 +12,10 @@ import {
   CreateLogoUploadUrlDto,
   LogoUploadUrlResponseDto,
 } from './dto/logo-upload.dto';
+import {
+  CreateHeaderImageUploadUrlDto,
+  HeaderImageUploadUrlResponseDto,
+} from './dto/header-image-upload.dto';
 import { EmailService } from '../email/email.service';
 
 @Injectable()
@@ -69,6 +73,7 @@ export class UsersService {
           website: (org as any).website ?? null,
           description: (org as any).description ?? null,
           logoUrl: (org as any).logo_url ?? null,
+          headerImageUrl: (org as any).header_image_url ?? null,
           farmersIdUrl,
           farmersIdPath: farmersIdPath,
           farmersIdVerified: Boolean((org as any).farmers_id_verified ?? false),
@@ -156,6 +161,13 @@ export class UsersService {
       const path = (updateData as any).logoPath as string;
       const publicUrl = this.supabase.getPublicUrl(bucket, path);
       orgUpdates.logo_url = publicUrl;
+    }
+
+    if (typeof (updateData as any)?.headerImagePath === 'string') {
+      const bucket = 'public';
+      const path = (updateData as any).headerImagePath as string;
+      const publicUrl = this.supabase.getPublicUrl(bucket, path);
+      orgUpdates.header_image_url = publicUrl;
     }
 
     // Support avatar path update (stored in users.profile_img)
@@ -638,6 +650,40 @@ export class UsersService {
       : 'jpg';
     const bucket = 'public';
     const objectPath = `logos/organizations/${dto.organizationId}/${crypto.randomUUID()}.${ext}`;
+
+    // Ensure bucket exists and is public
+    await this.supabase.ensureBucketExists(bucket, true);
+
+    try {
+      const signed = await this.supabase.createSignedUploadUrl(
+        bucket,
+        objectPath,
+      );
+      return {
+        bucket,
+        path: objectPath,
+        signedUrl: signed.signedUrl,
+        token: signed.token,
+      };
+    } catch (e: any) {
+      const status = typeof e?.status === 'number' ? e.status : 400;
+      throw new HttpException('Failed to create signed upload URL', status);
+    }
+  }
+
+  async createHeaderImageSignedUpload(
+    user: UserContext,
+    dto: CreateHeaderImageUploadUrlDto,
+  ): Promise<HeaderImageUploadUrlResponseDto> {
+    if (!user.organizationId || user.organizationId !== dto.organizationId) {
+      throw new BadRequestException('Invalid organization context');
+    }
+
+    const ext = dto.filename.includes('.')
+      ? dto.filename.split('.').pop()?.toLowerCase() || 'jpg'
+      : 'jpg';
+    const bucket = 'public';
+    const objectPath = `headers/organizations/${dto.organizationId}/${randomUUID()}.${ext}`;
 
     // Ensure bucket exists and is public
     await this.supabase.ensureBucketExists(bucket, true);

@@ -289,6 +289,23 @@ export class UpdateUserProfileDto {
   logoPath?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Private storage path for organization header image (in public bucket)',
+    example: 'headers/organizations/<orgId>/<uuid>.jpg',
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @Length(1, 2048)
+  headerImagePath?: string;
+
+  @ApiPropertyOptional({
     description: "Private storage path for user's avatar (preferred)",
     example: 'avatars/users/<userId>/<uuid>.jpg',
   })
