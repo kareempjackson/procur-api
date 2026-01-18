@@ -331,6 +331,76 @@ export class MarketplaceProductDto {
   is_favorited?: boolean;
 }
 
+export class MarketplaceProductUpdateDto {
+  @ApiProperty({ description: 'Update ID' })
+  id: string;
+
+  @ApiProperty({ description: 'Update title' })
+  title: string;
+
+  @ApiProperty({ description: 'Update content' })
+  content: string;
+
+  @ApiPropertyOptional({ description: 'Update type' })
+  post_type?: string;
+
+  @ApiPropertyOptional({ description: 'Update images (URLs)', type: [String] })
+  images?: string[];
+
+  @ApiPropertyOptional({ description: 'Update video URL' })
+  video_url?: string;
+
+  @ApiPropertyOptional({ description: 'Published at' })
+  published_at?: string;
+
+  @ApiPropertyOptional({ description: 'Created at' })
+  created_at?: string;
+}
+
+export class MarketplaceHarvestUpdateDto {
+  @ApiProperty({ description: 'Harvest update ID' })
+  id: string;
+
+  @ApiProperty({ description: 'Seller/Farm organization ID' })
+  seller_org_id: string;
+
+  @ApiProperty({ description: 'Crop/Product name' })
+  crop: string;
+
+  @ApiPropertyOptional({ description: 'Post content/description' })
+  content?: string;
+
+  @ApiPropertyOptional({ description: 'Harvest window/date information' })
+  expected_harvest_window?: string;
+
+  @ApiPropertyOptional({ description: 'Available quantity' })
+  quantity?: number;
+
+  @ApiPropertyOptional({ description: 'Unit of measurement' })
+  unit?: string;
+
+  @ApiPropertyOptional({ description: 'Additional notes' })
+  notes?: string;
+
+  @ApiPropertyOptional({ description: 'Array of image URLs', type: [String] })
+  images?: string[];
+
+  @ApiPropertyOptional({ description: 'Number of likes' })
+  likes_count?: number;
+
+  @ApiPropertyOptional({ description: 'Number of comments' })
+  comments_count?: number;
+
+  @ApiPropertyOptional({ description: 'Number of buyer requests' })
+  requests_count?: number;
+
+  @ApiPropertyOptional({ description: 'Has current user liked this' })
+  is_liked?: boolean;
+
+  @ApiPropertyOptional({ description: 'Time posted (ISO string)' })
+  created_at?: string;
+}
+
 export class MarketplaceProductDetailDto extends MarketplaceProductDto {
   @ApiProperty({ description: 'Full product description' })
   description?: string;
@@ -361,6 +431,20 @@ export class MarketplaceProductDetailDto extends MarketplaceProductDto {
 
   @ApiProperty({ description: 'Related products' })
   related_products?: MarketplaceProductDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Latest published seller product update associated with this product (if any)',
+    type: () => MarketplaceProductUpdateDto,
+  })
+  product_update?: MarketplaceProductUpdateDto;
+
+  @ApiPropertyOptional({
+    description:
+      'Latest harvest update associated with this product (if any)',
+    type: () => MarketplaceHarvestUpdateDto,
+  })
+  harvest_update?: MarketplaceHarvestUpdateDto;
 }
 
 export class MarketplaceCategoryDto {

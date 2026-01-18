@@ -418,6 +418,207 @@ export class BuyersService {
       sellerCompletedOrders = completedCount || 0;
     }
 
+    // Fetch latest published seller "product update" (scheduled post) associated with this product
+    // Note: We treat failures as non-fatal so product detail still loads even if posts are unavailable.
+    let productUpdate:
+      | {
+          id: string;
+          title: string;
+          content: string;
+          post_type?: string;
+          images?: string[];
+          video_url?: string;
+          published_at?: string;
+          created_at?: string;
+        }
+      | undefined;
+    try {
+      const { data: post, error: postError } = await client
+        .from('scheduled_posts')
+        .select(
+          'id, title, content, post_type, images, video_url, published_at, created_at',
+        )
+        .eq('seller_org_id', sellerOrgId)
+        .eq('product_id', productId)
+        .eq('status', 'published')
+        .order('published_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!postError && post) {
+        productUpdate = {
+          id: post.id,
+          title: post.title,
+          content: post.content,
+          post_type: post.post_type ?? undefined,
+          images: post.images ?? undefined,
+          video_url: post.video_url ?? undefined,
+          published_at: post.published_at ?? undefined,
+          created_at: post.created_at ?? undefined,
+        };
+      }
+    } catch (e) {
+      this.logger.warn(
+        `Failed to fetch product update for product ${productId}: ${
+          (e as any)?.message || e
+        }`,
+      );
+    }
+
+    // Fetch latest harvest update associated with this product (if any).
+    // Harvest updates should "leave the app" once an item is back in stock.
+    // Stored in harvest_requests with optional product_id FK.
+    let harvestUpdate:
+      | {
+          id: string;
+          seller_org_id: string;
+          crop: string;
+          content?: string;
+          expected_harvest_window?: string;
+          quantity?: number;
+          unit?: string;
+          notes?: string;
+          images?: string[];
+          likes_count?: number;
+          comments_count?: number;
+          requests_count?: number;
+          is_liked?: boolean;
+          created_at?: string;
+        }
+      | undefined;
+    if (Number(product.stock_quantity) <= 0) {
+      try {
+        const { data: harvest, error: harvestError } = await client
+          .from('harvest_requests')
+          .select(
+            `
+            id, seller_org_id, crop, content, expected_harvest_window, quantity, unit, notes,
+            images, likes_count, comments_count, requests_count, created_at
+          `,
+          )
+          .eq('seller_org_id', sellerOrgId)
+          .eq('product_id', productId)
+          .eq('status', 'active')
+          .eq('visibility', 'public')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        // Fallback: if harvest updates exist but product_id isn't linked (common in seed data),
+        // try to match by seller + a keyword from the product name against harvest crop.
+        let resolvedHarvest = !harvestError && harvest ? harvest : null;
+        if (!resolvedHarvest) {
+          const rawName = String(product.name || '').toLowerCase();
+          const tokens = rawName
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .map((t) => t.trim())
+            .filter(Boolean)
+            .filter((t) => t.length >= 4)
+            .filter(
+              (t) =>
+                ![
+                  'organic',
+                  'fresh',
+                  'premium',
+                  'local',
+                  'new',
+                  'bulk',
+                  'export',
+                  'ready',
+                  'certified',
+                ].includes(t),
+            );
+
+          const keyword = tokens[0];
+          const stem =
+            keyword && keyword.endsWith('es')
+              ? keyword.slice(0, -2)
+              : keyword && keyword.endsWith('s')
+                ? keyword.slice(0, -1)
+                : keyword;
+
+          if (keyword) {
+            const { data: fallbackHarvest, error: fallbackError } = await client
+              .from('harvest_requests')
+              .select(
+                `
+                id, seller_org_id, crop, content, expected_harvest_window, quantity, unit, notes,
+                images, likes_count, comments_count, requests_count, created_at
+              `,
+              )
+              .eq('seller_org_id', sellerOrgId)
+              .eq('status', 'active')
+              .eq('visibility', 'public')
+              .or(
+                stem && stem !== keyword
+                  ? `crop.ilike.%${keyword}%,crop.ilike.%${stem}%`
+                  : `crop.ilike.%${keyword}%`,
+              )
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (!fallbackError && fallbackHarvest) {
+              resolvedHarvest = fallbackHarvest;
+            }
+          }
+        }
+
+        if (resolvedHarvest) {
+          let isLiked = false;
+          if (buyerOrgId) {
+            const { data: likeRow } = await client
+              .from('harvest_likes')
+              .select('id')
+              .eq('harvest_id', resolvedHarvest.id)
+              .eq('buyer_org_id', buyerOrgId)
+              .maybeSingle();
+            isLiked = !!likeRow;
+          }
+
+          harvestUpdate = {
+            id: resolvedHarvest.id,
+            seller_org_id: resolvedHarvest.seller_org_id,
+            crop: resolvedHarvest.crop,
+            content: resolvedHarvest.content ?? undefined,
+            expected_harvest_window:
+              resolvedHarvest.expected_harvest_window ?? undefined,
+            quantity:
+              resolvedHarvest.quantity !== null &&
+              resolvedHarvest.quantity !== undefined
+                ? Number(resolvedHarvest.quantity)
+                : undefined,
+            unit: resolvedHarvest.unit ?? undefined,
+            notes: resolvedHarvest.notes ?? undefined,
+            images: resolvedHarvest.images ?? undefined,
+            likes_count:
+              resolvedHarvest.likes_count !== null &&
+              resolvedHarvest.likes_count !== undefined
+                ? Number(resolvedHarvest.likes_count)
+                : undefined,
+            comments_count:
+              resolvedHarvest.comments_count !== null &&
+              resolvedHarvest.comments_count !== undefined
+                ? Number(resolvedHarvest.comments_count)
+                : undefined,
+            requests_count:
+              resolvedHarvest.requests_count !== null &&
+              resolvedHarvest.requests_count !== undefined
+                ? Number(resolvedHarvest.requests_count)
+                : undefined,
+            is_liked: isLiked,
+            created_at: resolvedHarvest.created_at ?? undefined,
+          };
+        }
+      } catch (e) {
+        this.logger.warn(
+          `Failed to fetch harvest update for product ${productId}: ${
+            (e as any)?.message || e
+          }`,
+        );
+      }
+    }
+
     const transformedProduct: MarketplaceProductDetailDto = {
       id: product.id,
       name: product.name,
@@ -470,6 +671,8 @@ export class BuyersService {
         ? await this.isProductFavorited(buyerOrgId, productId)
         : false,
       recent_reviews: [], // TODO: Get recent reviews
+      product_update: productUpdate,
+      harvest_update: harvestUpdate,
       related_products:
         relatedProducts?.map((rp) => ({
           id: rp.id,
