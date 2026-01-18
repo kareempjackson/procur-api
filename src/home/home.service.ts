@@ -171,14 +171,14 @@ export class HomeService {
         business_type,
         logo_url,
         location,
-        is_verified,
+        farm_verified,
         years_in_business,
         specialties
       `,
       )
       .eq('account_type', 'seller')
       .eq('status', 'active')
-      .order('is_verified', { ascending: false })
+      .order('farm_verified', { ascending: false })
       .limit(limit);
 
     if (error) {
@@ -259,7 +259,7 @@ export class HomeService {
           product_count: productCount || 0,
           monthly_sales: monthlySales,
           years_in_business: seller.years_in_business,
-          is_verified: seller.is_verified,
+          is_verified: seller.farm_verified,
           specialties: seller.specialties,
         };
       }) || [],
@@ -592,7 +592,7 @@ export class HomeService {
         .from('organizations')
         .select('*', { count: 'exact', head: true })
         .eq('account_type', 'seller')
-        .eq('is_verified', true)
+        .eq('farm_verified', true)
         .eq('status', 'active'),
       supabase
         .from('product_requests')

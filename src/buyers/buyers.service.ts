@@ -4850,7 +4850,7 @@ Manage this order: ${link}`;
         `
         *,
         seller_organization:organizations!seller_org_id(
-          id, name, logo_url, address, country, is_verified
+          id, name, logo_url, address, country, farm_verified
         )
       `,
         { count: 'exact' },
@@ -4911,7 +4911,7 @@ Manage this order: ${link}`;
           likes_count: update.likes_count || 0,
           comments_count: update.comments_count || 0,
           requests_count: update.requests_count || 0,
-          is_verified: seller?.is_verified || false,
+          is_verified: seller?.farm_verified || false,
           is_liked: isLiked,
           created_at: update.created_at,
           time_ago: this.getTimeAgo(update.created_at),
@@ -4941,7 +4941,7 @@ Manage this order: ${link}`;
         `
         *,
         seller_organization:organizations!seller_org_id(
-          id, name, logo_url, address, country, is_verified, phone_number
+          id, name, logo_url, address, country, farm_verified, phone_number
         )
       `,
       )
@@ -5006,7 +5006,7 @@ Manage this order: ${link}`;
       likes_count: update.likes_count || 0,
       comments_count: update.comments_count || 0,
       requests_count: update.requests_count || 0,
-      is_verified: seller?.is_verified || false,
+      is_verified: seller?.farm_verified || false,
       is_liked: isLiked,
       created_at: update.created_at,
       time_ago: this.getTimeAgo(update.created_at),

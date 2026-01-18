@@ -117,7 +117,7 @@ export class HomeController {
         .from('organizations')
         .select('*', { count: 'exact', head: true })
         .eq('account_type', 'seller')
-        .eq('is_verified', true)
+        .eq('farm_verified', true)
         .eq('status', 'active'),
       supabase
         .from('product_requests')
