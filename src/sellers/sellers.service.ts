@@ -1370,30 +1370,547 @@ export class SellersService {
       query.end_date,
     );
 
-    // This would involve multiple database queries to gather all metrics
-    // For brevity, I'm providing a simplified implementation
+    // NOTE: These metrics power both `/seller` (home) and `/seller/analytics`.
+    // They must reflect real business definitions:
+    // - Revenue: paid orders (exclude cancelled/rejected/failed/refunded)
+    // - Orders: active + completed orders (exclude cancelled/rejected)
+    // - Pending: orders awaiting seller action (pending + any legacy/extended statuses)
+    // - Active products: products in active catalog state
+
+    return this.computeDashboardMetricsForPeriod(
+      sellerOrgId,
+      period_start,
+      period_end,
+      query.period,
+      query.start_date,
+      query.end_date,
+    );
+  }
+
+  async getSalesAnalytics(
+    sellerOrgId: string,
+    query: AnalyticsQueryDto,
+  ): Promise<SalesAnalyticsDto> {
+    await this.assertSellerVerified(sellerOrgId);
+    const { period_start, period_end } = this.getPeriodDates(
+      query.period,
+      query.start_date,
+      query.end_date,
+    );
+    const groupBy = (query.group_by as 'day' | 'week' | 'month' | undefined) || 'day';
+    return this.computeSalesAnalyticsForPeriod(
+      sellerOrgId,
+      period_start,
+      period_end,
+      groupBy,
+    );
+  }
+
+  async getProductAnalytics(
+    sellerOrgId: string,
+    query: AnalyticsQueryDto,
+  ): Promise<ProductAnalyticsDto> {
+    await this.assertSellerVerified(sellerOrgId);
+    const { period_start, period_end } = this.getPeriodDates(
+      query.period,
+      query.start_date,
+      query.end_date,
+    );
+    return this.computeProductAnalyticsForPeriod(sellerOrgId, period_start, period_end);
+  }
+
+  private toDayKeyUtc(iso: string): string {
+    const d = new Date(iso);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      d.getUTCDate(),
+    ).padStart(2, '0')}`;
+  }
+
+  private toMonthKeyUtc(iso: string): string {
+    const d = new Date(iso);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private toWeekKeyUtc(iso: string): string {
+    // ISO week key like "2026-W03"
+    const date = new Date(iso);
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    // Thursday in current week decides the year.
+    d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+    const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+    return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+  }
+
+  private bucketKey(iso: string, groupBy: 'day' | 'week' | 'month'): string {
+    if (groupBy === 'month') return this.toMonthKeyUtc(iso);
+    if (groupBy === 'week') return this.toWeekKeyUtc(iso);
+    return this.toDayKeyUtc(iso);
+  }
+
+  private async computeSalesAnalyticsForPeriod(
+    sellerOrgId: string,
+    period_start: string,
+    period_end: string,
+    groupBy: 'day' | 'week' | 'month',
+  ): Promise<SalesAnalyticsDto> {
     const client = this.supabaseService.getClient();
 
-    // Get orders data
-    const { data: orders } = await client
+    const { data: orders, error: ordersError } = await client
       .from('orders')
-      .select('total_amount, status, created_at')
+      .select(
+        'id, buyer_org_id, status, payment_status, total_amount, currency, created_at, accepted_at, delivered_at',
+      )
       .eq('seller_org_id', sellerOrgId)
       .gte('created_at', period_start)
       .lte('created_at', period_end);
 
-    // Get products data
-    const { data: products } = await client
-      .from('products')
-      .select('status, stock_quantity, min_stock_level')
-      .eq('seller_org_id', sellerOrgId);
+    if (ordersError) {
+      throw new BadRequestException(
+        `Failed to fetch orders for sales analytics: ${ordersError.message}`,
+      );
+    }
 
-    return this.calculateDashboardMetrics(
-      orders || [],
-      products || [],
+    const orderRows = (orders || []) as Array<{
+      id: string;
+      buyer_org_id: string | null;
+      status: string;
+      payment_status: string;
+      total_amount: string | number;
+      currency?: string | null;
+      created_at: string;
+      accepted_at?: string | null;
+      delivered_at?: string | null;
+    }>;
+
+    // Compute revenue from paid orders (created in period)
+    const paidOrders = orderRows.filter(
+      (o) => String(o.payment_status).toLowerCase() === 'paid',
+    );
+    const totalRevenue = paidOrders.reduce(
+      (sum, o) => sum + (Number(o.total_amount) || 0),
+      0,
+    );
+
+    const currency =
+      (paidOrders[0]?.currency as string | undefined) ||
+      ((orderRows[0]?.currency as string | undefined) ?? 'USD');
+
+    // Sales time series
+    const salesAgg = new Map<
+      string,
+      { date: string; revenue: number; orders_count: number; products_sold: number }
+    >();
+
+    // We treat "orders_count" as delivered orders count (matches "fulfilled" mental model).
+    orderRows.forEach((o) => {
+      const key = this.bucketKey(o.created_at, groupBy);
+      const cur = salesAgg.get(key) || {
+        date: key,
+        revenue: 0,
+        orders_count: 0,
+        products_sold: 0,
+      };
+      if (String(o.payment_status).toLowerCase() === 'paid') {
+        cur.revenue += Number(o.total_amount) || 0;
+      }
+      if (String(o.status).toLowerCase() === 'delivered') {
+        cur.orders_count += 1;
+      }
+      salesAgg.set(key, cur);
+    });
+
+    // Product sold and category/product breakdown from delivered + paid items
+    const { data: items, error: itemsError } = await client
+      .from('order_items')
+      .select(
+        `
+        product_id,
+        product_name,
+        quantity,
+        total_price,
+        orders!inner(id, created_at, status, payment_status, seller_org_id),
+        products:products(id, name, category)
+      `,
+      )
+      .eq('orders.seller_org_id', sellerOrgId)
+      .eq('orders.status', 'delivered')
+      .eq('orders.payment_status', 'paid')
+      .gte('orders.created_at', period_start)
+      .lte('orders.created_at', period_end);
+
+    if (itemsError) {
+      throw new BadRequestException(
+        `Failed to fetch order items for sales analytics: ${itemsError.message}`,
+      );
+    }
+
+    // Supabase join shapes can vary (object vs array) depending on relationship metadata.
+    // Keep this flexible and normalize as we read fields.
+    const itemRows = (items || []) as unknown as Array<any>;
+
+    // Add products_sold to series
+    itemRows.forEach((i) => {
+      const ordersRel = (i as any)?.orders;
+      const createdAt =
+        (Array.isArray(ordersRel) ? ordersRel?.[0]?.created_at : ordersRel?.created_at) ??
+        undefined;
+      if (!createdAt) return;
+      const key = this.bucketKey(createdAt, groupBy);
+      const cur = salesAgg.get(key) || {
+        date: key,
+        revenue: 0,
+        orders_count: 0,
+        products_sold: 0,
+      };
+      cur.products_sold += Number(i.quantity) || 0;
+      salesAgg.set(key, cur);
+    });
+
+    const salesData = Array.from(salesAgg.values()).sort((a, b) =>
+      a.date.localeCompare(b.date),
+    );
+
+    // Sales by category
+    const revenueByCategory = new Map<
+      string,
+      { category: string; revenue: number; ordersIds: Set<string> }
+    >();
+    itemRows.forEach((i) => {
+      const productsRel = (i as any)?.products;
+      const category =
+        (Array.isArray(productsRel) ? productsRel?.[0]?.category : productsRel?.category) ||
+        'Uncategorized';
+      const cur = revenueByCategory.get(category) || {
+        category,
+        revenue: 0,
+        ordersIds: new Set<string>(),
+      };
+      cur.revenue += Number(i.total_price) || 0;
+      // order id isn't selected directly; safe fallback: do not count unique orders here
+      revenueByCategory.set(category, cur);
+    });
+
+    const categoryRows = Array.from(revenueByCategory.values()).map((c) => ({
+      category: c.category,
+      revenue: c.revenue,
+      orders_count: 0,
+      percentage: totalRevenue > 0 ? (c.revenue / totalRevenue) * 100 : 0,
+    }));
+    categoryRows.sort((a, b) => b.revenue - a.revenue);
+
+    // Top products
+    const revenueByProduct = new Map<
+      string,
+      { product_id: string; product_name: string; quantity_sold: number; revenue: number }
+    >();
+    itemRows.forEach((i) => {
+      const id = i.product_id;
+      const productsRel = (i as any)?.products;
+      const name =
+        (Array.isArray(productsRel) ? productsRel?.[0]?.name : productsRel?.name) ||
+        i.product_name ||
+        'Product';
+      const cur = revenueByProduct.get(id) || {
+        product_id: id,
+        product_name: name,
+        quantity_sold: 0,
+        revenue: 0,
+      };
+      cur.quantity_sold += Number(i.quantity) || 0;
+      cur.revenue += Number(i.total_price) || 0;
+      revenueByProduct.set(id, cur);
+    });
+
+    const topProducts = Array.from(revenueByProduct.values())
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 25)
+      .map((p) => ({
+        product_id: p.product_id,
+        product_name: p.product_name,
+        quantity_sold: p.quantity_sold,
+        revenue: p.revenue,
+        percentage: totalRevenue > 0 ? (p.revenue / totalRevenue) * 100 : 0,
+      }));
+
+    // Order status distribution
+    const dist = {
+      pending: 0,
+      accepted: 0,
+      processing: 0,
+      shipped: 0,
+      delivered: 0,
+      cancelled: 0,
+      disputed: 0,
+    };
+    orderRows.forEach((o) => {
+      const s = String(o.status).toLowerCase();
+      if (s in dist) (dist as any)[s] += 1;
+    });
+
+    // Avg processing time (hours): accepted_at -> delivered_at
+    const durationsHours: number[] = [];
+    orderRows.forEach((o) => {
+      if (!o.accepted_at || !o.delivered_at) return;
+      const a = new Date(o.accepted_at).getTime();
+      const d = new Date(o.delivered_at).getTime();
+      if (!Number.isFinite(a) || !Number.isFinite(d) || d <= a) return;
+      durationsHours.push((d - a) / 3600000);
+    });
+    const avgProcessingTime =
+      durationsHours.length > 0
+        ? durationsHours.reduce((s, x) => s + x, 0) / durationsHours.length
+        : 0;
+
+    // Customer acquisition (buyer orgs)
+    const buyerIds = Array.from(
+      new Set(
+        orderRows
+          .map((o) => o.buyer_org_id ?? null)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    );
+    let returningCustomers = 0;
+    if (buyerIds.length > 0) {
+      const { data: prevBuyerOrders, error: prevBuyerOrdersError } = await client
+        .from('orders')
+        .select('buyer_org_id, created_at')
+        .eq('seller_org_id', sellerOrgId)
+        .in('buyer_org_id', buyerIds)
+        .lt('created_at', period_start);
+      if (prevBuyerOrdersError) {
+        throw new BadRequestException(
+          `Failed to fetch customer history for sales analytics: ${prevBuyerOrdersError.message}`,
+        );
+      }
+      const prevSet = new Set(
+        (prevBuyerOrders || [])
+          .map((o: any) => o.buyer_org_id as string | null)
+          .filter(Boolean) as string[],
+      );
+      returningCustomers = buyerIds.filter((id) => prevSet.has(id)).length;
+    }
+    const newCustomers = Math.max(0, buyerIds.length - returningCustomers);
+    const retentionRate =
+      buyerIds.length > 0 ? (returningCustomers / buyerIds.length) * 100 : 0;
+
+    return {
+      sales_data: salesData,
+      sales_by_category: categoryRows,
+      top_products: topProducts,
+      order_status_distribution: dist,
+      avg_processing_time: Number.isFinite(avgProcessingTime) ? avgProcessingTime : 0,
+      customer_data: {
+        new_customers: newCustomers,
+        returning_customers: returningCustomers,
+        customer_retention_rate: Number.isFinite(retentionRate) ? retentionRate : 0,
+      },
+      total_revenue: totalRevenue,
+      currency,
       period_start,
       period_end,
-    );
+    };
+  }
+
+  private async computeProductAnalyticsForPeriod(
+    sellerOrgId: string,
+    period_start: string,
+    period_end: string,
+  ): Promise<ProductAnalyticsDto> {
+    const client = this.supabaseService.getClient();
+
+    const [{ data: products, error: productsError }, { data: items, error: itemsError }] =
+      await Promise.all([
+        client
+          .from('products')
+          .select('id, name, category, status, stock_quantity, min_stock_level, base_price')
+          .eq('seller_org_id', sellerOrgId),
+        client
+          .from('order_items')
+          .select(
+            `
+          product_id,
+          quantity,
+          total_price,
+          orders!inner(id, created_at, status, payment_status, seller_org_id)
+        `,
+          )
+          .eq('orders.seller_org_id', sellerOrgId)
+          .eq('orders.status', 'delivered')
+          .eq('orders.payment_status', 'paid')
+          .gte('orders.created_at', period_start)
+          .lte('orders.created_at', period_end),
+      ]);
+
+    if (productsError) {
+      throw new BadRequestException(
+        `Failed to fetch products for product analytics: ${productsError.message}`,
+      );
+    }
+    if (itemsError) {
+      throw new BadRequestException(
+        `Failed to fetch order items for product analytics: ${itemsError.message}`,
+      );
+    }
+
+    const productRows = (products || []) as Array<{
+      id: string;
+      name: string;
+      category: string | null;
+      status: string;
+      stock_quantity: number | null;
+      min_stock_level: number | null;
+      base_price: string | number | null;
+    }>;
+
+    const itemRows = (items || []) as Array<{
+      product_id: string;
+      quantity: number;
+      total_price: string | number;
+    }>;
+
+    const perfByProduct = new Map<
+      string,
+      { orders: number; revenue: number; quantity: number }
+    >();
+    itemRows.forEach((i) => {
+      const cur = perfByProduct.get(i.product_id) || { orders: 0, revenue: 0, quantity: 0 };
+      cur.orders += 1;
+      cur.revenue += Number(i.total_price) || 0;
+      cur.quantity += Number(i.quantity) || 0;
+      perfByProduct.set(i.product_id, cur);
+    });
+
+    const productPerformance = productRows.map((p) => {
+      const perf = perfByProduct.get(p.id) || { orders: 0, revenue: 0, quantity: 0 };
+      const views = 0; // not yet tracked
+      const conversionRate = views > 0 ? (perf.orders / views) * 100 : 0;
+      return {
+        product_id: p.id,
+        product_name: p.name,
+        views,
+        orders: perf.orders,
+        revenue: perf.revenue,
+        conversion_rate: conversionRate,
+        stock_level: Number(p.stock_quantity ?? 0),
+        status: p.status,
+      };
+    });
+
+    // Category performance
+    const byCategory = new Map<
+      string,
+      {
+        category: string;
+        products_count: number;
+        total_revenue: number;
+        total_orders: number;
+        base_price_sum: number;
+        base_price_count: number;
+      }
+    >();
+    productRows.forEach((p) => {
+      const cat = (p.category || 'Uncategorized') as string;
+      const cur =
+        byCategory.get(cat) || {
+          category: cat,
+          products_count: 0,
+          total_revenue: 0,
+          total_orders: 0,
+          base_price_sum: 0,
+          base_price_count: 0,
+        };
+      cur.products_count += 1;
+      const base = Number(p.base_price);
+      if (Number.isFinite(base) && base > 0) {
+        cur.base_price_sum += base;
+        cur.base_price_count += 1;
+      }
+      const perf = perfByProduct.get(p.id);
+      if (perf) {
+        cur.total_revenue += perf.revenue;
+        cur.total_orders += perf.orders;
+      }
+      byCategory.set(cat, cur);
+    });
+
+    const categoryPerformance = Array.from(byCategory.values()).map((c) => ({
+      category: c.category,
+      products_count: c.products_count,
+      total_revenue: c.total_revenue,
+      avg_price: c.base_price_count > 0 ? c.base_price_sum / c.base_price_count : 0,
+      total_orders: c.total_orders,
+    }));
+    categoryPerformance.sort((a, b) => b.total_revenue - a.total_revenue);
+
+    // Inventory alerts
+    const lowStock = productRows
+      .filter((p) => {
+        const stock = Number(p.stock_quantity ?? 0);
+        const min = Number(p.min_stock_level ?? 0);
+        return stock > 0 && min > 0 && stock <= min;
+      })
+      .map((p) => ({
+        product_id: p.id,
+        product_name: p.name,
+        current_stock: Number(p.stock_quantity ?? 0),
+        min_stock_level: Number(p.min_stock_level ?? 0),
+      }));
+    const outOfStock = productRows
+      .filter((p) => Number(p.stock_quantity ?? 0) <= 0)
+      .map((p) => ({
+        product_id: p.id,
+        product_name: p.name,
+        last_stock_date: '', // not tracked
+      }));
+
+    // Price analysis
+    const prices = productRows
+      .map((p) => Number(p.base_price))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    const avgProductPrice =
+      prices.length > 0 ? prices.reduce((s, x) => s + x, 0) / prices.length : 0;
+
+    const ranges = [
+      { range: '$0–$10', min: 0, max: 10 },
+      { range: '$10–$25', min: 10, max: 25 },
+      { range: '$25–$50', min: 25, max: 50 },
+      { range: '$50+', min: 50, max: Infinity },
+    ];
+    const priceRanges = ranges.map((r) => {
+      const count = prices.filter((p) => p >= r.min && p < r.max).length;
+      return {
+        range: r.range,
+        products_count: count,
+        percentage: prices.length > 0 ? (count / prices.length) * 100 : 0,
+      };
+    });
+
+    // Lifecycle
+    const lifecycle = {
+      new_products: productRows.filter((p) => String(p.status).toLowerCase() === 'draft').length,
+      active_products: productRows.filter((p) => String(p.status).toLowerCase() === 'active').length,
+      discontinued_products: productRows.filter(
+        (p) => String(p.status).toLowerCase() === 'inactive' || String(p.status).toLowerCase() === 'archived',
+      ).length,
+      draft_products: productRows.filter((p) => String(p.status).toLowerCase() === 'draft').length,
+    };
+
+    return {
+      product_performance: productPerformance,
+      category_performance: categoryPerformance,
+      inventory_alerts: {
+        low_stock: lowStock,
+        out_of_stock: outOfStock,
+      },
+      price_analysis: {
+        avg_product_price: avgProductPrice,
+        price_ranges: priceRanges,
+      },
+      product_lifecycle: lifecycle,
+      period_start,
+      period_end,
+    };
   }
 
   // ==================== HELPER METHODS ====================
@@ -1615,49 +2132,331 @@ export class SellersService {
     endDate?: string,
   ): { period_start: string; period_end: string } {
     const now = new Date();
+
+    const startOfDay = (d: Date) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+    const endOfDay = (d: Date) =>
+      new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+
     let period_start: Date;
-    let period_end: Date = now;
+    let period_end: Date;
 
     if (period === 'custom' && startDate && endDate) {
-      period_start = new Date(startDate);
-      period_end = new Date(endDate);
+      // Interpret custom inputs as YYYY-MM-DD boundaries
+      period_start = startOfDay(new Date(startDate));
+      period_end = endOfDay(new Date(endDate));
     } else {
       switch (period) {
-        case 'today':
-          period_start = new Date(
-            now.getFullYear(),
-            now.getMonth(),
-            now.getDate(),
-          );
+        case 'today': {
+          period_start = startOfDay(now);
+          period_end = now;
           break;
-        case 'yesterday':
-          period_start = new Date(
-            now.getFullYear(),
-            now.getMonth(),
-            now.getDate() - 1,
-          );
-          period_end = new Date(
-            now.getFullYear(),
-            now.getMonth(),
-            now.getDate() - 1,
-            23,
-            59,
-            59,
-          );
+        }
+        case 'yesterday': {
+          const y = new Date(now);
+          y.setDate(y.getDate() - 1);
+          period_start = startOfDay(y);
+          period_end = endOfDay(y);
           break;
-        case 'last_7_days':
+        }
+        case 'last_7_days': {
+          period_end = now;
           period_start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
           break;
-        case 'last_30_days':
-        default:
+        }
+        case 'last_30_days': {
+          period_end = now;
           period_start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
           break;
+        }
+        case 'last_90_days': {
+          period_end = now;
+          period_start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+          break;
+        }
+        case 'this_month': {
+          period_start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
+          period_end = now;
+          break;
+        }
+        case 'last_month': {
+          const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+          const end = new Date(now.getFullYear(), now.getMonth(), 0);
+          period_start = startOfDay(start);
+          period_end = endOfDay(end);
+          break;
+        }
+        case 'this_year': {
+          period_start = new Date(now.getFullYear(), 0, 1, 0, 0, 0);
+          period_end = now;
+          break;
+        }
+        // Some clients may send this even if it's not in the enum yet.
+        case 'this_week': {
+          // Monday as start of week
+          const dow = now.getDay(); // 0=Sun..6=Sat
+          const deltaToMon = (dow + 6) % 7;
+          const monday = new Date(now);
+          monday.setDate(now.getDate() - deltaToMon);
+          period_start = startOfDay(monday);
+          period_end = now;
+          break;
+        }
+        default: {
+          period_end = now;
+          period_start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+          break;
+        }
       }
     }
 
     return {
       period_start: period_start.toISOString(),
       period_end: period_end.toISOString(),
+    };
+  }
+
+  private getPreviousPeriodDates(
+    period_start_iso: string,
+    period_end_iso: string,
+  ): { prev_start: string; prev_end: string } {
+    const start = new Date(period_start_iso);
+    const end = new Date(period_end_iso);
+    const durationMs = Math.max(1, end.getTime() - start.getTime());
+    const prevEnd = new Date(start.getTime() - 1);
+    const prevStart = new Date(prevEnd.getTime() - durationMs);
+    return { prev_start: prevStart.toISOString(), prev_end: prevEnd.toISOString() };
+  }
+
+  private async computeDashboardMetricsForPeriod(
+    sellerOrgId: string,
+    period_start: string,
+    period_end: string,
+    period?: string,
+    start_date?: string,
+    end_date?: string,
+  ): Promise<DashboardMetricsDto> {
+    const client = this.supabaseService.getClient();
+
+    const excludedOrderStatuses = new Set(['cancelled', 'rejected']);
+    const pendingLikeStatuses = new Set(['pending', 'confirmed']); // "confirmed" may exist in later migrations
+
+    const [{ data: orders, error: ordersError }, { data: products, error: productsError }] =
+      await Promise.all([
+        client
+          .from('orders')
+          .select('id, status, payment_status, total_amount, currency, created_at')
+          .eq('seller_org_id', sellerOrgId)
+          .gte('created_at', period_start)
+          .lte('created_at', period_end),
+        client
+          .from('products')
+          .select('id, status, stock_quantity, min_stock_level')
+          .eq('seller_org_id', sellerOrgId),
+      ]);
+
+    if (ordersError) {
+      throw new BadRequestException(
+        `Failed to fetch orders for metrics: ${ordersError.message}`,
+      );
+    }
+    if (productsError) {
+      throw new BadRequestException(
+        `Failed to fetch products for metrics: ${productsError.message}`,
+      );
+    }
+
+    const orderRows = (orders || []) as Array<{
+      id: string;
+      status: string;
+      payment_status: string;
+      total_amount: string | number;
+      currency?: string | null;
+      created_at: string;
+    }>;
+
+    const activeOrCompletedOrders = orderRows.filter(
+      (o) => !excludedOrderStatuses.has(String(o.status).toLowerCase()),
+    );
+    const deliveredOrders = activeOrCompletedOrders.filter(
+      (o) => String(o.status).toLowerCase() === 'delivered',
+    );
+    const activeOrders = activeOrCompletedOrders.filter((o) => {
+      const s = String(o.status).toLowerCase();
+      return s !== 'delivered';
+    });
+    const pendingOrders = orderRows.filter((o) =>
+      pendingLikeStatuses.has(String(o.status).toLowerCase()),
+    );
+
+    const paidOrders = activeOrCompletedOrders.filter(
+      (o) => String(o.payment_status).toLowerCase() === 'paid',
+    );
+
+    const totalRevenue = paidOrders.reduce(
+      (sum, o) => sum + (Number(o.total_amount) || 0),
+      0,
+    );
+    // "Orders" metric on dashboards should represent fulfilled volume (delivered),
+    // not all in-flight orders.
+    const totalOrders = deliveredOrders.length;
+    const paidOrdersCount = paidOrders.length;
+    const averageOrderValue = paidOrdersCount > 0 ? totalRevenue / paidOrdersCount : 0;
+
+    const productRows = (products || []) as Array<{
+      id: string;
+      status: string;
+      stock_quantity: number | null;
+      min_stock_level: number | null;
+    }>;
+
+    const activeProducts = productRows.filter(
+      (p) => String(p.status).toLowerCase() === 'active',
+    );
+
+    const lowStockProducts = activeProducts.filter((p) => {
+      const stock = Number(p.stock_quantity ?? 0);
+      const min = Number(p.min_stock_level ?? 0);
+      return stock > 0 && stock <= min;
+    }).length;
+
+    const outOfStockProducts = activeProducts.filter((p) => {
+      const stock = Number(p.stock_quantity ?? 0);
+      return stock <= 0;
+    }).length;
+
+    // Product sales breakdown (delivered + paid only)
+    const { data: deliveredItems, error: deliveredItemsError } = await client
+      .from('order_items')
+      .select(
+        `
+        product_id,
+        product_name,
+        quantity,
+        total_price,
+        orders!inner(created_at, status, payment_status, seller_org_id),
+        products:products(id, name)
+      `,
+      )
+      .eq('orders.seller_org_id', sellerOrgId)
+      .eq('orders.status', 'delivered')
+      .eq('orders.payment_status', 'paid')
+      .gte('orders.created_at', period_start)
+      .lte('orders.created_at', period_end);
+
+    if (deliveredItemsError) {
+      throw new BadRequestException(
+        `Failed to fetch order items for metrics: ${deliveredItemsError.message}`,
+      );
+    }
+
+    const itemRows = (deliveredItems || []) as unknown as Array<any>;
+
+    const totalProductsSold = itemRows.reduce(
+      (sum, i) => sum + (Number(i.quantity) || 0),
+      0,
+    );
+
+    const byProduct = new Map<
+      string,
+      { id: string; name: string; quantity: number; revenue: number }
+    >();
+
+    itemRows.forEach((i) => {
+      const id = i.product_id;
+      const productsRel = (i as any)?.products;
+      const name =
+        (Array.isArray(productsRel) ? productsRel?.[0]?.name : productsRel?.name) ||
+        i.product_name ||
+        'Product';
+      const cur = byProduct.get(id) || { id, name, quantity: 0, revenue: 0 };
+      cur.quantity += Number(i.quantity) || 0;
+      cur.revenue += Number(i.total_price) || 0;
+      byProduct.set(id, cur);
+    });
+
+    const top = Array.from(byProduct.values()).sort((a, b) => {
+      if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+      return b.quantity - a.quantity;
+    })[0];
+
+    // Growth vs previous period (same duration)
+    const { prev_start, prev_end } = this.getPreviousPeriodDates(period_start, period_end);
+    const { data: prevOrders, error: prevOrdersError } = await client
+      .from('orders')
+      .select('status, payment_status, total_amount')
+      .eq('seller_org_id', sellerOrgId)
+      .gte('created_at', prev_start)
+      .lte('created_at', prev_end);
+
+    if (prevOrdersError) {
+      throw new BadRequestException(
+        `Failed to fetch previous-period orders for metrics: ${prevOrdersError.message}`,
+      );
+    }
+
+    const prevRows = (prevOrders || []) as Array<{
+      status: string;
+      payment_status: string;
+      total_amount: string | number;
+    }>;
+
+    const prevActiveOrCompleted = prevRows.filter(
+      (o) => !excludedOrderStatuses.has(String(o.status).toLowerCase()),
+    );
+    const prevDeliveredCount = prevActiveOrCompleted.filter(
+      (o) => String(o.status).toLowerCase() === 'delivered',
+    ).length;
+    const prevPaid = prevActiveOrCompleted.filter(
+      (o) => String(o.payment_status).toLowerCase() === 'paid',
+    );
+    const prevRevenue = prevPaid.reduce(
+      (sum, o) => sum + (Number(o.total_amount) || 0),
+      0,
+    );
+    const prevOrdersCount = prevDeliveredCount;
+
+    const revenueGrowth =
+      prevRevenue > 0
+        ? ((totalRevenue - prevRevenue) / prevRevenue) * 100
+        : totalRevenue > 0
+          ? 100
+          : 0;
+
+    const ordersGrowth =
+      prevOrdersCount > 0
+        ? ((totalOrders - prevOrdersCount) / prevOrdersCount) * 100
+        : totalOrders > 0
+          ? 100
+          : 0;
+
+    const currency =
+      (paidOrders[0]?.currency as string | undefined) ||
+      ((activeOrCompletedOrders[0]?.currency as string | undefined) ?? undefined) ||
+      'USD';
+
+    return {
+      total_revenue: totalRevenue,
+      total_orders: totalOrders,
+      active_orders: activeOrders.length,
+      delivered_orders: deliveredOrders.length,
+      total_products_sold: totalProductsSold,
+      average_order_value: averageOrderValue,
+      pending_orders: pendingOrders.length,
+      active_products: activeProducts.length,
+      low_stock_products: lowStockProducts,
+      out_of_stock_products: outOfStockProducts,
+      revenue_growth: Number.isFinite(revenueGrowth) ? revenueGrowth : 0,
+      orders_growth: Number.isFinite(ordersGrowth) ? ordersGrowth : 0,
+      top_selling_product: {
+        id: top?.id || '',
+        name: top?.name || 'N/A',
+        quantity_sold: top?.quantity || 0,
+        revenue: top?.revenue || 0,
+      },
+      currency,
+      period_start,
+      period_end,
     };
   }
 
@@ -1723,45 +2522,27 @@ export class SellersService {
     period_start: string,
     period_end: string,
   ): DashboardMetricsDto {
-    const totalRevenue = orders.reduce(
-      (sum, order) => sum + parseFloat(order.total_amount),
-      0,
-    );
-    const totalOrders = orders.length;
-    const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
-
-    const pendingOrders = orders.filter(
-      (order) => order.status === 'pending',
-    ).length;
-    const activeProducts = products.filter(
-      (product) => product.status === 'active',
-    ).length;
-    const lowStockProducts = products.filter(
-      (product) =>
-        product.stock_quantity <= product.min_stock_level &&
-        product.stock_quantity > 0,
-    ).length;
-    const outOfStockProducts = products.filter(
-      (product) => product.stock_quantity === 0,
-    ).length;
+    // Kept for backward-compatibility in case other modules still call it.
+    // Prefer `computeDashboardMetricsForPeriod()` for correct, DB-backed semantics.
+    const totalOrders = Array.isArray(orders) ? orders.length : 0;
+    const activeProducts = Array.isArray(products)
+      ? products.filter((p) => String(p.status).toLowerCase() === 'active').length
+      : 0;
 
     return {
-      total_revenue: totalRevenue,
+      total_revenue: 0,
       total_orders: totalOrders,
-      total_products_sold: orders.reduce((sum, order) => sum + 1, 0), // Simplified
-      average_order_value: averageOrderValue,
-      pending_orders: pendingOrders,
+      active_orders: 0,
+      delivered_orders: 0,
+      total_products_sold: 0,
+      average_order_value: 0,
+      pending_orders: 0,
       active_products: activeProducts,
-      low_stock_products: lowStockProducts,
-      out_of_stock_products: outOfStockProducts,
-      revenue_growth: 0, // Would need previous period data
-      orders_growth: 0, // Would need previous period data
-      top_selling_product: {
-        id: '',
-        name: 'N/A',
-        quantity_sold: 0,
-        revenue: 0,
-      },
+      low_stock_products: 0,
+      out_of_stock_products: 0,
+      revenue_growth: 0,
+      orders_growth: 0,
+      top_selling_product: { id: '', name: 'N/A', quantity_sold: 0, revenue: 0 },
       currency: 'USD',
       period_start,
       period_end,
@@ -1956,11 +2737,40 @@ export class SellersService {
     await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
+    let linkedProduct:
+      | { id: string; name: string }
+      | null = null;
+    if (dto.product_id) {
+      const { data: product, error: productError } = await client
+        .from('products')
+        .select('id, name')
+        .eq('id', dto.product_id)
+        .eq('seller_org_id', sellerOrgId)
+        .maybeSingle();
+
+      if (productError) {
+        throw new BadRequestException(
+          `Failed to validate linked product: ${productError.message}`,
+        );
+      }
+
+      if (!product) {
+        throw new BadRequestException(
+          'Invalid product_id (product not found for this seller)',
+        );
+      }
+
+      linkedProduct = { id: product.id as string, name: product.name as string };
+    }
+
+    const cropToUse = linkedProduct?.name ?? dto.crop;
+
     const { data, error } = await client
       .from('harvest_requests')
       .insert({
         seller_org_id: sellerOrgId,
-        crop: dto.crop,
+        product_id: linkedProduct?.id ?? dto.product_id ?? null,
+        crop: cropToUse,
         expected_harvest_window: dto.expected_harvest_window,
         quantity: dto.quantity,
         unit: dto.unit,
@@ -1982,6 +2792,7 @@ export class SellersService {
     return {
       id: data.id,
       seller_org_id: data.seller_org_id,
+      product_id: (data as any).product_id ?? null,
       crop: data.crop,
       expected_harvest_window: data.expected_harvest_window,
       quantity: data.quantity,
@@ -2059,14 +2870,27 @@ export class SellersService {
     return this.mapFarmVisitToDto(row);
   }
 
-  async getHarvestFeed(sellerOrgId: string): Promise<HarvestFeedItemDto[]> {
+  async getHarvestFeed(
+    sellerOrgId: string,
+    sellerUserId: string,
+  ): Promise<HarvestFeedItemDto[]> {
     await this.assertSellerVerified(sellerOrgId);
     const client = this.supabaseService.getClient();
 
     const { data: harvests, error } = await client
       .from('harvest_requests')
-      .select('*')
+      .select(
+        `
+        *,
+        product:products(
+          id,
+          name,
+          product_images(id, image_url, is_primary, display_order)
+        )
+      `,
+      )
       .eq('seller_org_id', sellerOrgId)
+      .eq('created_by', sellerUserId)
       .order('created_at', { ascending: false })
       .limit(50);
 
@@ -2106,9 +2930,22 @@ export class SellersService {
       requestsByHarvest.set(r.harvest_id, list);
     });
 
-    return (harvests || []).map((h: any) => ({
+    return (harvests || []).map((h: any) => {
+      const product = (h as any).product as
+        | { id?: string; name?: string; product_images?: any[] }
+        | null
+        | undefined;
+      const primaryImage =
+        product?.product_images?.find?.((img: any) => img?.is_primary) ??
+        product?.product_images?.[0] ??
+        null;
+
+      return {
       id: h.id,
       seller_org_id: h.seller_org_id,
+      product_id: h.product_id ?? product?.id ?? null,
+      product_name: product?.name ?? null,
+      product_image_url: primaryImage?.image_url ?? null,
       crop: h.crop,
       expected_harvest_window: h.expected_harvest_window,
       quantity: h.quantity,
@@ -2145,7 +2982,8 @@ export class SellersService {
           created_at: r.created_at,
         }),
       ),
-    }));
+      };
+    });
   }
 
   async addHarvestComment(

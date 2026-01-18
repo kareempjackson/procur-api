@@ -53,6 +53,15 @@ export class DashboardMetricsDto {
   @ApiProperty({ description: 'Total orders for the period' })
   total_orders: number;
 
+  @ApiProperty({
+    description:
+      'Active (in-flight) orders for the period (excludes delivered/cancelled/rejected)',
+  })
+  active_orders: number;
+
+  @ApiProperty({ description: 'Delivered orders for the period' })
+  delivered_orders: number;
+
   @ApiProperty({ description: 'Total products sold' })
   total_products_sold: number;
 

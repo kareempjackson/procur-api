@@ -5,10 +5,19 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
 } from 'class-validator';
 
 export class CreateSellerHarvestDto {
+  @ApiPropertyOptional({
+    description:
+      'Optional product ID to link this harvest update to an existing uploaded product',
+  })
+  @IsOptional()
+  @IsUUID()
+  product_id?: string;
+
   @ApiProperty({ description: 'Primary crop being harvested' })
   @IsString()
   @IsNotEmpty()
@@ -63,6 +72,9 @@ export class HarvestRequestResponseDto {
 
   @ApiProperty()
   seller_org_id!: string;
+
+  @ApiPropertyOptional({ required: false })
+  product_id?: string | null;
 
   @ApiProperty()
   crop!: string;
@@ -203,6 +215,15 @@ export class HarvestFeedItemDto {
 
   @ApiProperty()
   seller_org_id!: string;
+
+  @ApiPropertyOptional()
+  product_id?: string | null;
+
+  @ApiPropertyOptional({ description: 'Linked product name (if any)' })
+  product_name?: string | null;
+
+  @ApiPropertyOptional({ description: 'Linked product primary image URL (if any)' })
+  product_image_url?: string | null;
 
   @ApiProperty()
   crop!: string;

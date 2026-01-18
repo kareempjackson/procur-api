@@ -811,7 +811,7 @@ export class SellersController {
   // ==================== ANALYTICS & REPORTS ====================
 
   @Get('analytics/dashboard')
-  @RequirePermissions('manage_seller_analytics')
+  @RequirePermissions('view_orders')
   @ApiOperation({
     summary: 'Get Dashboard Metrics',
     description: 'Get key metrics for the seller dashboard',
@@ -829,7 +829,7 @@ export class SellersController {
   }
 
   @Get('analytics/sales')
-  @RequirePermissions('manage_seller_analytics')
+  @RequirePermissions('view_orders')
   @ApiOperation({
     summary: 'Get Sales Analytics',
     description: 'Get detailed sales analytics and trends',
@@ -843,12 +843,11 @@ export class SellersController {
     @CurrentUser() user: UserContext,
     @Query() query: AnalyticsQueryDto,
   ) {
-    // Implementation would be similar to getDashboardMetrics but more detailed
-    return { message: 'Sales analytics endpoint - implementation pending' };
+    return this.sellersService.getSalesAnalytics(user.organizationId!, query);
   }
 
   @Get('analytics/products')
-  @RequirePermissions('manage_seller_analytics')
+  @RequirePermissions('view_orders')
   @ApiOperation({
     summary: 'Get Product Analytics',
     description: 'Get product performance analytics',
@@ -862,8 +861,7 @@ export class SellersController {
     @CurrentUser() user: UserContext,
     @Query() query: AnalyticsQueryDto,
   ) {
-    // Implementation would analyze product performance
-    return { message: 'Product analytics endpoint - implementation pending' };
+    return this.sellersService.getProductAnalytics(user.organizationId!, query);
   }
 
   @Post('reports/sales')
@@ -1000,7 +998,9 @@ export class SellersController {
   async getHarvestFeed(
     @CurrentUser() user: UserContext,
   ): Promise<HarvestFeedItemDto[]> {
-    return this.sellersService.getHarvestFeed(user.organizationId!);
+    // Scope to updates created by the currently logged-in seller user (not other
+    // users in the same seller org).
+    return this.sellersService.getHarvestFeed(user.organizationId!, user.id);
   }
 
   @Post('harvest/:harvestId/comments')

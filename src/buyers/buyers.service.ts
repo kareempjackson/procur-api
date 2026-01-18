@@ -396,6 +396,28 @@ export class BuyersService {
       }
     }
 
+    // Compute seller product count + completed orders (for the supplier card on product pages)
+    const sellerOrgId = product.seller_org_id as string;
+    let sellerProductCount = 0;
+    let sellerCompletedOrders = 0;
+    {
+      const [{ count: productCount }, { count: completedCount }] =
+        await Promise.all([
+          client
+            .from('products')
+            .select('id', { count: 'exact', head: true })
+            .eq('seller_org_id', sellerOrgId)
+            .eq('status', 'active'),
+          client
+            .from('orders')
+            .select('id', { count: 'exact', head: true })
+            .eq('seller_org_id', sellerOrgId)
+            .eq('status', 'delivered'),
+        ]);
+      sellerProductCount = productCount || 0;
+      sellerCompletedOrders = completedCount || 0;
+    }
+
     const transformedProduct: MarketplaceProductDetailDto = {
       id: product.id,
       name: product.name,
@@ -440,8 +462,8 @@ export class BuyersService {
         location: product.seller_organization.country,
         average_rating: sellerAverageRating,
         review_count: sellerReviewCount,
-        product_count: 0, // TODO: Count seller products
-        completed_orders: 0,
+        product_count: sellerProductCount,
+        completed_orders: sellerCompletedOrders,
         is_verified: true, // TODO: Add verification logic
       },
       is_favorited: buyerOrgId

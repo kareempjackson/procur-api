@@ -1,5 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, Length } from 'class-validator';
+import { IsIn, IsOptional, IsString, Length } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class UpdateUserProfileDto {
@@ -205,6 +205,23 @@ export class UpdateUserProfileDto {
   @IsString()
   @Length(1, 2000)
   description?: string;
+
+  @ApiPropertyOptional({
+    description: 'Preferred payout method for this organization',
+    example: 'cash',
+    enum: ['cash', 'cheque'],
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (typeof value === 'string') {
+      const v = value.trim().toLowerCase();
+      return v === '' ? undefined : v;
+    }
+    return value;
+  })
+  @IsString()
+  @IsIn(['cash', 'cheque'])
+  payoutMethod?: 'cash' | 'cheque';
 
   @ApiPropertyOptional({
     description: "URL to farmer's ID image stored in Supabase Storage",

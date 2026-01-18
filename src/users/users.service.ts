@@ -64,6 +64,7 @@ export class UsersService {
           businessName: (org as any).business_name ?? org.name,
           businessType: (org as any).business_type ?? null,
           accountType: (org as any).account_type ?? null,
+          payoutMethod: (org as any).payout_method ?? 'cash',
           address: (org as any).address ?? null,
           city: (org as any).city ?? null,
           state: (org as any).state ?? null,
@@ -144,6 +145,9 @@ export class UsersService {
       orgUpdates.website = updateData.website;
     if (typeof updateData?.description === 'string')
       orgUpdates.description = updateData.description;
+    if (typeof (updateData as any)?.payoutMethod === 'string') {
+      orgUpdates.payout_method = (updateData as any).payoutMethod;
+    }
     if (typeof (updateData as any)?.farmersIdPath === 'string')
       orgUpdates.farmers_id = (updateData as any).farmersIdPath;
     else if (typeof (updateData as any)?.farmersIdUrl === 'string')
