@@ -1341,4 +1341,51 @@ export class BuyersController {
       requestDto,
     );
   }
+
+  // ==================== CREDITS ENDPOINTS ====================
+
+  @Get('credits/balance')
+  @RequirePermissions('view_orders')
+  @ApiOperation({
+    summary: 'Get Credit Balance',
+    description: 'Get the current credit balance for the buyer organization',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Credit balance retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        credit_amount_cents: { type: 'number' },
+        credit_amount: { type: 'number' },
+        currency: { type: 'string' },
+      },
+    },
+  })
+  async getCreditBalance(
+    @CurrentUser() user: UserContext,
+  ): Promise<{
+    credit_amount_cents: number;
+    credit_amount: number;
+    currency: string;
+  }> {
+    return this.buyersService.getCreditBalance(user.organizationId!);
+  }
+
+  @Get('credits/transactions')
+  @RequirePermissions('view_orders')
+  @ApiOperation({
+    summary: 'Get Credit Transaction History',
+    description: 'Get the credit transaction history for the buyer organization',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Credit transactions retrieved successfully',
+  })
+  async getCreditTransactions(
+    @CurrentUser() user: UserContext,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    return this.buyersService.getCreditTransactions(user.organizationId!, query);
+  }
 }

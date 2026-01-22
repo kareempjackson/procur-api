@@ -32,6 +32,15 @@ export class MarkFarmerPayoutCompletedDto {
   proof_url?: string;
 }
 
+export class UpdateFarmerPayoutStatusDto {
+  @IsString()
+  status!: 'pending' | 'scheduled' | 'completed';
+
+  @IsOptional()
+  @IsString()
+  proof_url?: string;
+}
+
 export class AdminPaymentIdParamDto {
   @IsUUID()
   id!: string;

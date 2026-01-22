@@ -5,12 +5,15 @@ import { SupabaseService } from '../database/supabase.service';
 export class FinanceService {
   constructor(private readonly db: SupabaseService) {}
 
-  async createPayoutBatch(minAmountCents: number) {
+  async createPayoutBatch(minAmountCents: number = 10000) {
+    // Enforce minimum $100 (10000 cents) - sellers cannot get payouts under $100
+    const effectiveMin = Math.max(minAmountCents, 10000);
+
     const client = this.db.getClient();
     const { data: balances, error: balErr } = await client
       .from('seller_balances')
       .select('*')
-      .gte('available_amount_cents', minAmountCents);
+      .gte('available_amount_cents', effectiveMin);
     if (balErr) throw new BadRequestException(balErr.message);
 
     const reference = `PB-${new Date().toISOString().slice(0, 10)}-${Math.random()

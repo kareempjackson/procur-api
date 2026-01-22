@@ -455,6 +455,19 @@ export class OrderClearingService {
       );
     }
 
+    // Check if clearing transactions already exist for this order
+    const { data: existingTransactions, error: existingError } = await client
+      .from('transactions')
+      .select('id')
+      .eq('order_id', orderId)
+      .contains('metadata', { flow: 'direct_deposit_clearing' })
+      .limit(1);
+
+    if (!existingError && existingTransactions && existingTransactions.length > 0) {
+      // Transactions already exist, skip creation (idempotent)
+      return { success: true };
+    }
+
     const buyerOrgId = order.buyer_org_id as string | null;
     const sellerOrgId = order.seller_org_id as string | null;
 
@@ -464,12 +477,30 @@ export class OrderClearingService {
       );
     }
 
-    // Ensure we have bank info for farmer before creating payout leg
-    const bankInfo = await this.bankInfo.getRawBankInfo(sellerOrgId);
-    if (!bankInfo) {
-      throw new BadRequestException(
-        'Farmer bank information is missing – add bank details before creating payout',
-      );
+    // Fetch seller organization to get payout method
+    const { data: sellerOrg, error: sellerOrgError } = await client
+      .from('organizations')
+      .select('payout_method')
+      .eq('id', sellerOrgId)
+      .single();
+
+    if (sellerOrgError || !sellerOrg) {
+      throw new BadRequestException('Seller organization not found');
+    }
+
+    // Default to 'cash' if not set (matches DB default)
+    const payoutMethod = (sellerOrg.payout_method as string) || 'cash';
+
+    // Only require bank info if payout method is bank_transfer
+    let bankToken: string | null = null;
+    if (payoutMethod === 'bank_transfer') {
+      const bankInfo = await this.bankInfo.getRawBankInfo(sellerOrgId);
+      if (!bankInfo) {
+        throw new BadRequestException(
+          'Farmer bank information is missing – add bank details before creating payout',
+        );
+      }
+      bankToken = bankInfo.token;
     }
 
     const amount = Number(order.total_amount ?? 0);
@@ -500,6 +531,27 @@ export class OrderClearingService {
 
     const nowIso = new Date().toISOString();
 
+    // Build farmer payout metadata based on payout method
+    const farmerPayoutMetadata: Record<string, unknown> = {
+      flow: 'direct_deposit_clearing',
+      leg: 'farmer_payout',
+      phase: 'awaiting_funds',
+      payout_method: payoutMethod,
+    };
+
+    // Only include bank_token if using bank transfer
+    if (bankToken) {
+      farmerPayoutMetadata.bank_token = bankToken;
+    }
+
+    // Format payout method for description
+    const payoutMethodLabel =
+      payoutMethod === 'bank_transfer'
+        ? 'bank transfer'
+        : payoutMethod === 'cheque'
+          ? 'cheque'
+          : 'cash';
+
     const { error: insertError } = await client.from('transactions').insert([
       {
         // Leg 1: buyer settlement (sale)
@@ -525,7 +577,7 @@ export class OrderClearingService {
         updated_at: nowIso,
       },
       {
-        // Leg 2: farmer payout (payout)
+        // Leg 2: farmer payout
         transaction_number: payoutTxnNum as string,
         order_id: order.id,
         seller_org_id: sellerOrgId,
@@ -534,17 +586,12 @@ export class OrderClearingService {
         status: 'pending',
         amount,
         currency: 'XCD',
-        payment_method: 'bank_transfer',
+        payment_method: payoutMethod,
         platform_fee: 0,
         payment_processing_fee: 0,
         net_amount: amount,
-        description: 'Farmer payout (bank transfer from Procur)',
-        metadata: {
-          flow: 'direct_deposit_clearing',
-          leg: 'farmer_payout',
-          phase: 'awaiting_funds',
-          bank_token: bankInfo.token,
-        },
+        description: `Farmer payout (${payoutMethodLabel} from Procur)`,
+        metadata: farmerPayoutMetadata,
         created_at: nowIso,
         updated_at: nowIso,
       },

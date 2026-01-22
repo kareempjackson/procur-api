@@ -108,6 +108,7 @@ export interface AdminOrderSummary {
   driverUserId?: string | null;
   driverName?: string | null;
   assignedDriverAt?: string | null;
+  inspectionStatus?: string | null;
 }
 
 export interface AdminDashboardSummary {
@@ -2213,6 +2214,54 @@ export class AdminService {
       }
     }
 
+    // If order is delivered, credit the seller's balance
+    const orderStatus = input.status || 'delivered';
+    if (orderStatus === 'delivered') {
+      const totalAmountCents = Math.round(totalAmount * 100);
+
+      if (input.seller_org_id && totalAmountCents > 0) {
+        // Check if seller already has a balance record
+        const { data: existingBalance } = await client
+          .from('seller_balances')
+          .select('id, available_amount_cents')
+          .eq('seller_org_id', input.seller_org_id)
+          .maybeSingle();
+
+        if (existingBalance) {
+          // Update existing balance
+          await client
+            .from('seller_balances')
+            .update({
+              available_amount_cents:
+                Number(existingBalance.available_amount_cents || 0) +
+                totalAmountCents,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('seller_org_id', input.seller_org_id);
+        } else {
+          // Create new balance record
+          await client.from('seller_balances').insert({
+            seller_org_id: input.seller_org_id,
+            available_amount_cents: totalAmountCents,
+            pending_amount_cents: 0,
+            credit_amount_cents: 0,
+            currency: (input.currency || 'XCD').toUpperCase(),
+          });
+        }
+
+        // Add timeline event
+        await client.from('order_timeline').insert({
+          order_id: order.id as string,
+          event_type: 'balance_credited',
+          title: 'Amount added to seller balance',
+          description: `$${(totalAmountCents / 100).toFixed(2)} credited to seller account`,
+          actor_type: 'system',
+          is_visible_to_buyer: false,
+          is_visible_to_seller: true,
+        });
+      }
+    }
+
     return {
       id: order.id as string,
       order_number: String(order.order_number ?? order.id),
@@ -2282,6 +2331,19 @@ export class AdminService {
     if (!['accepted', 'processing', 'shipped', 'delivered'].includes(status)) {
       throw new BadRequestException(
         `Order must be accepted or in transit before inspection approval (current status: ${status})`,
+      );
+    }
+
+    // Check if inspection has already been processed
+    const existingInspectionStatus = (order.inspection_status as string | null) ?? null;
+    if (existingInspectionStatus === 'approved') {
+      throw new BadRequestException(
+        'This order has already been approved after inspection.',
+      );
+    }
+    if (existingInspectionStatus === 'rejected') {
+      throw new BadRequestException(
+        'This order has already been rejected after inspection.',
       );
     }
 
@@ -2567,6 +2629,7 @@ export class AdminService {
         (order.estimated_delivery_date as string | null) ?? null,
       trackingNumber: (order.tracking_number as string | null) ?? null,
       shippingMethod: (order.shipping_method as string | null) ?? null,
+      inspectionStatus: (order.inspection_status as string | null) ?? null,
     };
 
     return {
@@ -2584,6 +2647,21 @@ export class AdminService {
   ): Promise<{ success: boolean }> {
     const client = this.supabase.getClient();
 
+    // First, get the current order to check the previous status
+    const { data: existingOrder, error: fetchError } = await client
+      .from('orders')
+      .select('id, status, seller_org_id, total_amount, currency')
+      .eq('id', orderId)
+      .single();
+
+    if (fetchError || !existingOrder) {
+      throw new BadRequestException(
+        `Order not found: ${fetchError?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    const previousStatus = existingOrder.status as string;
+
     const { data, error } = await client
       .from('orders')
       .update({ status })
@@ -2595,6 +2673,56 @@ export class AdminService {
       throw new BadRequestException(
         `Failed to update order status: ${error?.message ?? 'Unknown error'}`,
       );
+    }
+
+    // If order is being marked as delivered, credit the seller's balance
+    if (status === 'delivered' && previousStatus !== 'delivered') {
+      const sellerOrgId = existingOrder.seller_org_id as string;
+      const totalAmountCents = Math.round(
+        Number(existingOrder.total_amount || 0) * 100,
+      );
+
+      if (sellerOrgId && totalAmountCents > 0) {
+        // Check if seller already has a balance record
+        const { data: existingBalance } = await client
+          .from('seller_balances')
+          .select('id, available_amount_cents')
+          .eq('seller_org_id', sellerOrgId)
+          .maybeSingle();
+
+        if (existingBalance) {
+          // Update existing balance
+          await client
+            .from('seller_balances')
+            .update({
+              available_amount_cents:
+                Number(existingBalance.available_amount_cents || 0) +
+                totalAmountCents,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('seller_org_id', sellerOrgId);
+        } else {
+          // Create new balance record
+          await client.from('seller_balances').insert({
+            seller_org_id: sellerOrgId,
+            available_amount_cents: totalAmountCents,
+            pending_amount_cents: 0,
+            credit_amount_cents: 0,
+            currency: (existingOrder.currency as string) || 'XCD',
+          });
+        }
+
+        // Add timeline event
+        await client.from('order_timeline').insert({
+          order_id: orderId,
+          event_type: 'balance_credited',
+          title: 'Amount added to seller balance',
+          description: `$${(totalAmountCents / 100).toFixed(2)} credited to seller account`,
+          actor_type: 'system',
+          is_visible_to_buyer: false,
+          is_visible_to_seller: true,
+        });
+      }
     }
 
     return { success: true };
@@ -2609,7 +2737,9 @@ export class AdminService {
 
     const { data: existing, error: loadError } = await client
       .from('orders')
-      .select('id, order_number, payment_status, buyer_user_id')
+      .select(
+        'id, order_number, payment_status, buyer_user_id, seller_org_id, total_amount, currency',
+      )
       .eq('id', orderId)
       .single();
 
@@ -2649,6 +2779,106 @@ export class AdminService {
         reference: dto.reference ?? null,
       },
     });
+
+    // Also update the farmer payout transaction status to match the order payment status
+    // This ensures the seller sees the correct status on their payouts page
+    if (['scheduled', 'paid', 'pending'].includes(dto.payment_status)) {
+      const txStatus =
+        dto.payment_status === 'paid' ? 'completed' : dto.payment_status;
+
+      // Find the farmer payout transaction for this order
+      // First try with metadata filter, then fallback to type-based search
+      let payoutTx: { id: string; metadata: unknown } | null = null;
+
+      const { data: txByMetadata } = await client
+        .from('transactions')
+        .select('id, metadata')
+        .eq('order_id', orderId)
+        .contains('metadata', {
+          flow: 'direct_deposit_clearing',
+          leg: 'farmer_payout',
+        })
+        .limit(1)
+        .maybeSingle();
+
+      if (txByMetadata) {
+        payoutTx = txByMetadata;
+      } else {
+        // Fallback: look for payout transaction by type
+        const { data: txByType } = await client
+          .from('transactions')
+          .select('id, metadata')
+          .eq('order_id', orderId)
+          .eq('type', 'payout')
+          .limit(1)
+          .maybeSingle();
+
+        if (txByType) {
+          payoutTx = txByType;
+        }
+      }
+
+      const phaseMap: Record<string, string> = {
+        pending: 'awaiting_funds',
+        scheduled: 'scheduled_for_payout',
+        completed: 'completed',
+      };
+
+      if (payoutTx) {
+        const payoutMeta = (payoutTx.metadata as Record<string, unknown>) || {};
+
+        const updatedMeta = {
+          ...payoutMeta,
+          flow: 'direct_deposit_clearing',
+          leg: 'farmer_payout',
+          phase: phaseMap[txStatus] || txStatus,
+        };
+
+        const txUpdate: Record<string, unknown> = {
+          status: txStatus,
+          metadata: updatedMeta,
+          updated_at: nowIso,
+        };
+
+        if (txStatus === 'completed') {
+          txUpdate.processed_at = nowIso;
+          txUpdate.settled_at = nowIso;
+        } else {
+          // Clear the timestamps when reverting from paid to pending/scheduled
+          txUpdate.processed_at = null;
+          txUpdate.settled_at = null;
+        }
+
+        await client.from('transactions').update(txUpdate).eq('id', payoutTx.id);
+      } else if (existing.seller_org_id && existing.total_amount) {
+        // No transaction exists - create one for the farmer payout
+        // Generate a transaction number
+        const txNum = `TXN-PO-${Date.now().toString(36).toUpperCase()}`;
+
+        const newTxData = {
+          order_id: orderId,
+          seller_org_id: existing.seller_org_id,
+          type: 'payout',
+          amount: Number(existing.total_amount),
+          currency: existing.currency || 'XCD',
+          status: txStatus,
+          transaction_number: txNum,
+          metadata: {
+            flow: 'direct_deposit_clearing',
+            leg: 'farmer_payout',
+            phase: phaseMap[txStatus] || txStatus,
+            payout_method: 'manual',
+            created_via: 'admin_payment_status_update',
+          },
+          processed_at: txStatus === 'completed' ? nowIso : null,
+          settled_at: txStatus === 'completed' ? nowIso : null,
+          created_at: nowIso,
+          updated_at: nowIso,
+        };
+
+        await client.from('transactions').insert(newTxData);
+      }
+    }
 
     // Notify buyer via WhatsApp when payment becomes paid (if paired)
     if (dto.payment_status === 'paid' && existing.buyer_user_id) {
@@ -4028,5 +4258,1007 @@ Login here: ${loginUrl}
     }
 
     return { organizationId: org.id as string, userId: user.id as string };
+  }
+
+  // ==================== SELLER CREDITS ====================
+
+  /**
+   * Adjust a seller's credit balance (add or deduct)
+   */
+  async adjustSellerCredit(
+    dto: {
+      seller_org_id: string;
+      amount_cents: number;
+      type: 'credit' | 'debit';
+      reason: string;
+      note?: string;
+      reference?: string;
+      order_id?: string;
+    },
+    adminUserId: string,
+  ): Promise<{ transaction_id: string; new_balance_cents: number }> {
+    const client = this.supabase.getClient();
+
+    // Validate seller exists
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name')
+      .eq('id', dto.seller_org_id)
+      .eq('account_type', 'seller')
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Seller organization not found');
+    }
+
+    // Calculate the actual amount (negative for debits)
+    const actualAmount =
+      dto.type === 'debit'
+        ? -Math.abs(dto.amount_cents)
+        : Math.abs(dto.amount_cents);
+
+    // Use the database function to adjust credit
+    const { data, error } = await client.rpc('adjust_seller_credit', {
+      p_seller_org_id: dto.seller_org_id,
+      p_amount_cents: actualAmount,
+      p_type: dto.type,
+      p_reason: dto.reason,
+      p_note: dto.note || null,
+      p_reference: dto.reference || null,
+      p_order_id: dto.order_id || null,
+      p_admin_user_id: adminUserId,
+    });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to adjust seller credit: ${error.message}`,
+      );
+    }
+
+    const result = Array.isArray(data) ? data[0] : data;
+
+    return {
+      transaction_id: result?.transaction_id,
+      new_balance_cents: result?.new_balance_cents ?? 0,
+    };
+  }
+
+  /**
+   * Get a seller's credit balance
+   */
+  async getSellerCreditBalance(sellerOrgId: string): Promise<{
+    seller_org_id: string;
+    seller_name: string;
+    credit_amount_cents: number;
+    credit_amount: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+
+    // Get org info
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name')
+      .eq('id', sellerOrgId)
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Seller organization not found');
+    }
+
+    // Get balance
+    const { data: balance } = await client
+      .from('seller_balances')
+      .select('credit_amount_cents, currency')
+      .eq('seller_org_id', sellerOrgId)
+      .maybeSingle();
+
+    const creditCents = Number(balance?.credit_amount_cents || 0);
+
+    return {
+      seller_org_id: sellerOrgId,
+      seller_name: org.business_name as string,
+      credit_amount_cents: creditCents,
+      credit_amount: creditCents / 100,
+      currency: (balance?.currency as string) || 'XCD',
+    };
+  }
+
+  /**
+   * Get all sellers with credit balances (positive or negative)
+   */
+  async getSellersWithCredits(query: {
+    page?: number;
+    limit?: number;
+  }): Promise<{
+    sellers: Array<{
+      seller_org_id: string;
+      seller_name: string;
+      credit_amount_cents: number;
+      credit_amount: number;
+      currency: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('seller_balances')
+      .select(
+        `
+        seller_org_id,
+        credit_amount_cents,
+        currency,
+        organizations!inner(id, business_name)
+      `,
+        { count: 'exact' },
+      )
+      .neq('credit_amount_cents', 0)
+      .range(from, from + limit - 1)
+      .order('credit_amount_cents', { ascending: true });
+
+    if (error) {
+      throw new BadRequestException(`Failed to fetch sellers with credits: ${error.message}`);
+    }
+
+    const sellers = (data || []).map((row: any) => ({
+      seller_org_id: row.seller_org_id,
+      seller_name: row.organizations?.business_name || 'Unknown',
+      credit_amount_cents: Number(row.credit_amount_cents || 0),
+      credit_amount: Number(row.credit_amount_cents || 0) / 100,
+      currency: row.currency || 'XCD',
+    }));
+
+    return {
+      sellers,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Get credit transaction history for a seller
+   */
+  async getSellerCreditTransactions(
+    sellerOrgId: string,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    transactions: Array<{
+      id: string;
+      amount_cents: number;
+      amount: number;
+      balance_after_cents: number;
+      balance_after: number;
+      type: string;
+      reason: string;
+      note: string | null;
+      reference: string | null;
+      order_id: string | null;
+      created_by: string | null;
+      created_by_name: string | null;
+      created_at: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('seller_credit_transactions')
+      .select(
+        `
+        id,
+        amount_cents,
+        balance_after_cents,
+        type,
+        reason,
+        note,
+        reference,
+        order_id,
+        created_by,
+        created_at,
+        users:created_by(fullname)
+      `,
+        { count: 'exact' },
+      )
+      .eq('seller_org_id', sellerOrgId)
+      .range(from, from + limit - 1)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch credit transactions: ${error.message}`,
+      );
+    }
+
+    const transactions = (data || []).map((row: any) => ({
+      id: row.id,
+      amount_cents: Number(row.amount_cents || 0),
+      amount: Number(row.amount_cents || 0) / 100,
+      balance_after_cents: Number(row.balance_after_cents || 0),
+      balance_after: Number(row.balance_after_cents || 0) / 100,
+      type: row.type,
+      reason: row.reason,
+      note: row.note,
+      reference: row.reference,
+      order_id: row.order_id,
+      created_by: row.created_by,
+      created_by_name: row.users?.fullname || null,
+      created_at: row.created_at,
+    }));
+
+    return {
+      transactions,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  // ==================== SELLER BALANCE MANAGEMENT ====================
+
+  /**
+   * Get a seller's full balance information (available balance + credit balance)
+   */
+  async getSellerFullBalance(sellerOrgId: string): Promise<{
+    seller_org_id: string;
+    seller_name: string;
+    available_amount_cents: number;
+    available_amount: number;
+    pending_amount_cents: number;
+    pending_amount: number;
+    credit_amount_cents: number;
+    credit_amount: number;
+    currency: string;
+    can_request_payout: boolean;
+  }> {
+    const client = this.supabase.getClient();
+
+    // Get org info
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name')
+      .eq('id', sellerOrgId)
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Seller organization not found');
+    }
+
+    // Get balance
+    const { data: balance } = await client
+      .from('seller_balances')
+      .select('available_amount_cents, pending_amount_cents, credit_amount_cents, currency')
+      .eq('seller_org_id', sellerOrgId)
+      .maybeSingle();
+
+    const availableCents = Number(balance?.available_amount_cents || 0);
+    const pendingCents = Number(balance?.pending_amount_cents || 0);
+    const creditCents = Number(balance?.credit_amount_cents || 0);
+    const minPayoutCents = 10000; // $100
+
+    return {
+      seller_org_id: sellerOrgId,
+      seller_name: org.business_name as string,
+      available_amount_cents: availableCents,
+      available_amount: availableCents / 100,
+      pending_amount_cents: pendingCents,
+      pending_amount: pendingCents / 100,
+      credit_amount_cents: creditCents,
+      credit_amount: creditCents / 100,
+      currency: (balance?.currency as string) || 'XCD',
+      can_request_payout: availableCents >= minPayoutCents,
+    };
+  }
+
+  /**
+   * Get unpaid delivered orders for a seller
+   */
+  async getSellerUnpaidOrders(
+    sellerOrgId: string,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    orders: Array<{
+      id: string;
+      order_number: string;
+      total_amount: number;
+      currency: string;
+      status: string;
+      delivered_at: string | null;
+      buyer_name: string;
+    }>;
+    total: number;
+    total_amount_cents: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = query.page || 1;
+    const limit = query.limit || 50;
+    const offset = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('orders')
+      .select(
+        `
+        id,
+        order_number,
+        total_amount,
+        currency,
+        status,
+        delivered_at,
+        organizations!buyer_org_id(business_name, name)
+      `,
+        { count: 'exact' },
+      )
+      .eq('seller_org_id', sellerOrgId)
+      .eq('status', 'delivered')
+      .or('payout_status.is.null,payout_status.eq.pending')
+      .order('delivered_at', { ascending: false, nullsFirst: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      throw new BadRequestException(`Failed to fetch unpaid orders: ${error.message}`);
+    }
+
+    const orders = (data || []).map((row: any) => ({
+      id: row.id,
+      order_number: row.order_number,
+      total_amount: Number(row.total_amount || 0),
+      currency: row.currency || 'XCD',
+      status: row.status,
+      delivered_at: row.delivered_at,
+      buyer_name: row.organizations?.business_name || row.organizations?.name || 'Unknown',
+    }));
+
+    // Calculate total unpaid amount
+    const totalAmountCents = orders.reduce(
+      (sum, order) => sum + Math.round(order.total_amount * 100),
+      0,
+    );
+
+    return {
+      orders,
+      total: count || 0,
+      total_amount_cents: totalAmountCents,
+    };
+  }
+
+  /**
+   * Adjust a seller's available balance (e.g., deduct for already-paid payouts)
+   */
+  async adjustSellerAvailableBalance(
+    dto: {
+      seller_org_id: string;
+      amount_cents: number;
+      type: 'add' | 'deduct';
+      reason: string;
+      note?: string;
+      order_ids?: string[]; // Orders to mark as paid out
+    },
+    adminUserId: string,
+  ): Promise<{ success: boolean; new_balance_cents: number; orders_marked_paid: number }> {
+    const client = this.supabase.getClient();
+
+    // Validate seller exists
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name')
+      .eq('id', dto.seller_org_id)
+      .eq('account_type', 'seller')
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Seller organization not found');
+    }
+
+    // Get current balance
+    const { data: currentBalance } = await client
+      .from('seller_balances')
+      .select('available_amount_cents')
+      .eq('seller_org_id', dto.seller_org_id)
+      .maybeSingle();
+
+    const currentCents = Number(currentBalance?.available_amount_cents || 0);
+    const adjustmentCents = Math.abs(dto.amount_cents);
+    
+    let newBalanceCents: number;
+    if (dto.type === 'deduct') {
+      newBalanceCents = currentCents - adjustmentCents;
+      // Allow negative balance (seller owes)
+    } else {
+      newBalanceCents = currentCents + adjustmentCents;
+    }
+
+    // Mark orders as paid out if provided
+    let ordersMarkedPaid = 0;
+    if (dto.order_ids && dto.order_ids.length > 0 && dto.type === 'deduct') {
+      const { error: orderError, count } = await client
+        .from('orders')
+        .update({
+          payout_status: 'paid',
+          paid_out_at: new Date().toISOString(),
+          paid_out_by: adminUserId,
+        })
+        .in('id', dto.order_ids)
+        .eq('seller_org_id', dto.seller_org_id);
+
+      if (orderError) {
+        throw new BadRequestException(`Failed to mark orders as paid: ${orderError.message}`);
+      }
+      ordersMarkedPaid = count || dto.order_ids.length;
+    }
+
+    // Upsert seller balance
+    const { error: updateError } = await client
+      .from('seller_balances')
+      .upsert({
+        seller_org_id: dto.seller_org_id,
+        available_amount_cents: newBalanceCents,
+        updated_at: new Date().toISOString(),
+      }, {
+        onConflict: 'seller_org_id',
+      });
+
+    if (updateError) {
+      throw new BadRequestException(
+        `Failed to adjust seller balance: ${updateError.message}`,
+      );
+    }
+
+    // Create a transaction record for audit trail
+    await client.from('transactions').insert({
+      seller_org_id: dto.seller_org_id,
+      amount_cents: dto.type === 'deduct' ? -adjustmentCents : adjustmentCents,
+      currency: 'XCD',
+      type: 'adjustment',
+      status: 'completed',
+      metadata: {
+        reason: dto.reason,
+        note: dto.note,
+        admin_user_id: adminUserId,
+        previous_balance_cents: currentCents,
+        new_balance_cents: newBalanceCents,
+        order_ids: dto.order_ids || [],
+        orders_marked_paid: ordersMarkedPaid,
+      },
+      processed_at: new Date().toISOString(),
+      settled_at: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      new_balance_cents: newBalanceCents,
+      orders_marked_paid: ordersMarkedPaid,
+    };
+  }
+
+  // ==================== PAYOUT REQUESTS ====================
+
+  /**
+   * Get all payout requests with seller info
+   */
+  async getPayoutRequests(query: { page?: number; limit?: number; status?: string }) {
+    const client = this.supabase.getClient();
+    const page = query.page || 1;
+    const limit = query.limit || 20;
+    const offset = (page - 1) * limit;
+
+    let queryBuilder = client
+      .from('payout_requests')
+      .select(
+        `
+        *,
+        organizations!seller_org_id(id, name, business_name)
+      `,
+        { count: 'exact' },
+      )
+      .order('requested_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (query.status) {
+      queryBuilder = queryBuilder.eq('status', query.status);
+    }
+
+    const { data, error, count } = await queryBuilder;
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    const requests = (data || []).map((row: any) => ({
+      id: row.id,
+      seller_org_id: row.seller_org_id,
+      seller_name: row.organizations?.business_name || row.organizations?.name || 'Unknown',
+      amount: Number(row.amount_cents || 0) / 100,
+      amount_cents: Number(row.amount_cents || 0),
+      currency: row.currency,
+      status: row.status,
+      requested_at: row.requested_at,
+      processed_at: row.processed_at,
+      completed_at: row.completed_at,
+      rejection_reason: row.rejection_reason,
+      note: row.note,
+      admin_note: row.admin_note,
+      proof_url: row.proof_url,
+    }));
+
+    return {
+      requests,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Get details of a specific payout request
+   */
+  async getPayoutRequestDetail(requestId: string) {
+    const client = this.supabase.getClient();
+
+    const { data, error } = await client
+      .from('payout_requests')
+      .select(
+        `
+        *,
+        organizations!seller_org_id(id, name, business_name),
+        users!processed_by(fullname, email)
+      `,
+      )
+      .eq('id', requestId)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    // Get seller's current balance
+    const { data: balance } = await client
+      .from('seller_balances')
+      .select('available_amount_cents, currency')
+      .eq('seller_org_id', data.seller_org_id)
+      .maybeSingle();
+
+    return {
+      id: data.id,
+      seller_org_id: data.seller_org_id,
+      seller_name:
+        (data as any).organizations?.business_name ||
+        (data as any).organizations?.name ||
+        'Unknown',
+      amount: Number(data.amount_cents || 0) / 100,
+      amount_cents: Number(data.amount_cents || 0),
+      currency: data.currency,
+      status: data.status,
+      requested_at: data.requested_at,
+      processed_at: data.processed_at,
+      completed_at: data.completed_at,
+      rejection_reason: data.rejection_reason,
+      note: data.note,
+      admin_note: data.admin_note,
+      proof_url: data.proof_url,
+      processed_by_name: (data as any).users?.fullname || null,
+      seller_current_balance: Number(balance?.available_amount_cents || 0) / 100,
+      seller_current_balance_cents: Number(balance?.available_amount_cents || 0),
+    };
+  }
+
+  /**
+   * Approve a payout request
+   */
+  async approvePayoutRequest(
+    requestId: string,
+    dto: { admin_note?: string },
+    adminUserId: string,
+  ) {
+    const client = this.supabase.getClient();
+
+    const { data: request, error: fetchError } = await client
+      .from('payout_requests')
+      .select('id, status, seller_org_id, amount_cents')
+      .eq('id', requestId)
+      .single();
+
+    if (fetchError || !request) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    if (request.status !== 'pending') {
+      throw new BadRequestException('Can only approve pending requests');
+    }
+
+    // Verify seller has sufficient balance
+    const { data: balance } = await client
+      .from('seller_balances')
+      .select('available_amount_cents')
+      .eq('seller_org_id', request.seller_org_id)
+      .maybeSingle();
+
+    const availableCents = Number(balance?.available_amount_cents || 0);
+    if (availableCents < Number(request.amount_cents)) {
+      throw new BadRequestException(
+        `Seller has insufficient balance. Available: $${(availableCents / 100).toFixed(2)}, Requested: $${(Number(request.amount_cents) / 100).toFixed(2)}`,
+      );
+    }
+
+    const { error: updateError } = await client
+      .from('payout_requests')
+      .update({
+        status: 'approved',
+        processed_at: new Date().toISOString(),
+        processed_by: adminUserId,
+        admin_note: dto.admin_note || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (updateError) {
+      throw new BadRequestException(`Failed to approve request: ${updateError.message}`);
+    }
+
+    return { success: true, message: 'Payout request approved' };
+  }
+
+  /**
+   * Reject a payout request
+   */
+  async rejectPayoutRequest(
+    requestId: string,
+    dto: { rejection_reason: string; admin_note?: string },
+    adminUserId: string,
+  ) {
+    const client = this.supabase.getClient();
+
+    const { data: request, error: fetchError } = await client
+      .from('payout_requests')
+      .select('id, status')
+      .eq('id', requestId)
+      .single();
+
+    if (fetchError || !request) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    if (request.status !== 'pending') {
+      throw new BadRequestException('Can only reject pending requests');
+    }
+
+    const { error: updateError } = await client
+      .from('payout_requests')
+      .update({
+        status: 'rejected',
+        processed_at: new Date().toISOString(),
+        processed_by: adminUserId,
+        rejection_reason: dto.rejection_reason,
+        admin_note: dto.admin_note || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (updateError) {
+      throw new BadRequestException(`Failed to reject request: ${updateError.message}`);
+    }
+
+    return { success: true, message: 'Payout request rejected' };
+  }
+
+  /**
+   * Complete a payout request (mark as paid and deduct from balance)
+   */
+  async completePayoutRequest(
+    requestId: string,
+    dto: { proof_url?: string; admin_note?: string },
+    adminUserId: string,
+  ) {
+    const client = this.supabase.getClient();
+
+    const { data: request, error: fetchError } = await client
+      .from('payout_requests')
+      .select('id, status, seller_org_id, amount_cents, currency')
+      .eq('id', requestId)
+      .single();
+
+    if (fetchError || !request) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    if (request.status !== 'approved') {
+      throw new BadRequestException('Can only complete approved requests');
+    }
+
+    // Verify seller still has sufficient balance
+    const { data: balance } = await client
+      .from('seller_balances')
+      .select('available_amount_cents')
+      .eq('seller_org_id', request.seller_org_id)
+      .maybeSingle();
+
+    const availableCents = Number(balance?.available_amount_cents || 0);
+    const amountCents = Number(request.amount_cents);
+
+    if (availableCents < amountCents) {
+      throw new BadRequestException(
+        `Seller has insufficient balance. Available: $${(availableCents / 100).toFixed(2)}, Requested: $${(amountCents / 100).toFixed(2)}`,
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // Update the payout request
+    const { error: updateError } = await client
+      .from('payout_requests')
+      .update({
+        status: 'completed',
+        completed_at: nowIso,
+        processed_by: adminUserId,
+        proof_url: dto.proof_url || null,
+        admin_note: dto.admin_note || null,
+        updated_at: nowIso,
+      })
+      .eq('id', requestId);
+
+    if (updateError) {
+      throw new BadRequestException(`Failed to complete request: ${updateError.message}`);
+    }
+
+    // Deduct from seller balance
+    await client
+      .from('seller_balances')
+      .update({
+        available_amount_cents: availableCents - amountCents,
+        updated_at: nowIso,
+      })
+      .eq('seller_org_id', request.seller_org_id);
+
+    return { success: true, message: 'Payout completed successfully' };
+  }
+
+  // ==================== BUYER CREDITS ====================
+
+  /**
+   * Get a buyer's credit balance
+   */
+  async getBuyerCreditBalance(buyerOrgId: string): Promise<{
+    buyer_org_id: string;
+    buyer_name: string;
+    credit_amount_cents: number;
+    credit_amount: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+
+    // Get org info
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name, name')
+      .eq('id', buyerOrgId)
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Buyer organization not found');
+    }
+
+    // Get balance
+    const { data: balance } = await client
+      .from('buyer_balances')
+      .select('credit_amount_cents, currency')
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    const creditCents = Number(balance?.credit_amount_cents || 0);
+
+    return {
+      buyer_org_id: buyerOrgId,
+      buyer_name: (org.business_name as string) || (org.name as string) || 'Unknown',
+      credit_amount_cents: creditCents,
+      credit_amount: creditCents / 100,
+      currency: (balance?.currency as string) || 'XCD',
+    };
+  }
+
+  /**
+   * Adjust a buyer's credit balance
+   */
+  async adjustBuyerCredit(
+    dto: {
+      buyer_org_id: string;
+      amount_cents: number;
+      type: 'credit' | 'debit';
+      reason: string;
+      note?: string;
+      order_id?: string;
+    },
+    adminUserId: string,
+  ): Promise<{ transaction_id: string; new_balance_cents: number }> {
+    const client = this.supabase.getClient();
+
+    // Validate buyer exists
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, business_name')
+      .eq('id', dto.buyer_org_id)
+      .eq('account_type', 'buyer')
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Buyer organization not found');
+    }
+
+    // Calculate the actual amount (negative for debits)
+    const actualAmount =
+      dto.type === 'debit'
+        ? -Math.abs(dto.amount_cents)
+        : Math.abs(dto.amount_cents);
+
+    // Use the database function to adjust credit
+    const { data, error } = await client.rpc('adjust_buyer_credit', {
+      p_buyer_org_id: dto.buyer_org_id,
+      p_amount_cents: actualAmount,
+      p_type: dto.type,
+      p_reason: dto.reason,
+      p_note: dto.note || null,
+      p_order_id: dto.order_id || null,
+      p_admin_user_id: adminUserId,
+    });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to adjust buyer credit: ${error.message}`,
+      );
+    }
+
+    const result = Array.isArray(data) ? data[0] : data;
+
+    return {
+      transaction_id: result?.transaction_id,
+      new_balance_cents: result?.new_balance_cents ?? 0,
+    };
+  }
+
+  /**
+   * Get credit transaction history for a buyer
+   */
+  async getBuyerCreditTransactions(
+    buyerOrgId: string,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    transactions: Array<{
+      id: string;
+      amount_cents: number;
+      amount: number;
+      balance_after_cents: number;
+      balance_after: number;
+      type: string;
+      reason: string;
+      note: string | null;
+      order_id: string | null;
+      created_by: string | null;
+      created_by_name: string | null;
+      created_at: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('buyer_credit_transactions')
+      .select(
+        `
+        id,
+        amount_cents,
+        balance_after_cents,
+        type,
+        reason,
+        note,
+        order_id,
+        created_by,
+        created_at,
+        users:created_by(fullname)
+      `,
+        { count: 'exact' },
+      )
+      .eq('buyer_org_id', buyerOrgId)
+      .range(from, from + limit - 1)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch credit transactions: ${error.message}`,
+      );
+    }
+
+    const transactions = (data || []).map((row: any) => ({
+      id: row.id,
+      amount_cents: Number(row.amount_cents || 0),
+      amount: Number(row.amount_cents || 0) / 100,
+      balance_after_cents: Number(row.balance_after_cents || 0),
+      balance_after: Number(row.balance_after_cents || 0) / 100,
+      type: row.type,
+      reason: row.reason,
+      note: row.note,
+      order_id: row.order_id,
+      created_by: row.created_by,
+      created_by_name: row.users?.fullname || null,
+      created_at: row.created_at,
+    }));
+
+    return {
+      transactions,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Get all buyers with credit balances
+   */
+  async getBuyersWithCredits(query: {
+    page?: number;
+    limit?: number;
+  }): Promise<{
+    buyers: Array<{
+      buyer_org_id: string;
+      buyer_name: string;
+      credit_amount_cents: number;
+      credit_amount: number;
+      currency: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('buyer_balances')
+      .select(
+        `
+        buyer_org_id,
+        credit_amount_cents,
+        currency,
+        organizations!inner(id, business_name, name)
+      `,
+        { count: 'exact' },
+      )
+      .gt('credit_amount_cents', 0)
+      .range(from, from + limit - 1)
+      .order('credit_amount_cents', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(`Failed to fetch buyers with credits: ${error.message}`);
+    }
+
+    const buyers = (data || []).map((row: any) => ({
+      buyer_org_id: row.buyer_org_id,
+      buyer_name: row.organizations?.business_name || row.organizations?.name || 'Unknown',
+      credit_amount_cents: Number(row.credit_amount_cents || 0),
+      credit_amount: Number(row.credit_amount_cents || 0) / 100,
+      currency: row.currency || 'XCD',
+    }));
+
+    return {
+      buyers,
+      total: count || 0,
+      page,
+      limit,
+    };
   }
 }

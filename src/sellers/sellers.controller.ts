@@ -1136,6 +1136,81 @@ export class SellersController {
     return this.bankInfoService.getMaskedBankInfo(user.organizationId);
   }
 
+  // ==================== PAYOUTS & BALANCE ====================
+
+  @Get('balance')
+  @RequirePermissions('view_transactions')
+  @ApiOperation({
+    summary: 'Get Seller Balance',
+    description: 'Get current available and pending balance for the seller',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Balance retrieved successfully',
+  })
+  async getBalance(@CurrentUser() user: UserContext) {
+    return await this.sellersService.getSellerBalance(user.organizationId!);
+  }
+
+  @Get('payouts')
+  @RequirePermissions('view_transactions')
+  @ApiOperation({
+    summary: 'List Payouts',
+    description: 'Get paginated list of completed payouts for the seller',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'status', required: false, type: String })
+  @ApiResponse({
+    status: 200,
+    description: 'Payouts retrieved successfully',
+  })
+  async getPayouts(
+    @CurrentUser() user: UserContext,
+    @Query() query: { page?: number; limit?: number; status?: string },
+  ) {
+    return await this.sellersService.getSellerPayouts(
+      user.organizationId!,
+      query,
+    );
+  }
+
+  @Get('payouts/settings')
+  @RequirePermissions('view_transactions')
+  @ApiOperation({
+    summary: 'Get Payout Settings',
+    description: 'Get minimum payout threshold and schedule info',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payout settings retrieved successfully',
+  })
+  async getPayoutSettings(@CurrentUser() user: UserContext) {
+    return await this.sellersService.getPayoutSettings(user.organizationId!);
+  }
+
+  @Get('credits/transactions')
+  @RequirePermissions('view_transactions')
+  @ApiOperation({
+    summary: 'Get Credit Transaction History',
+    description: "Get the seller's credit/debit transaction history",
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({
+    status: 200,
+    description: 'Credit transactions retrieved successfully',
+  })
+  async getCreditTransactions(
+    @CurrentUser() user: UserContext,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    return await this.sellersService.getSellerCreditTransactions(
+      user.organizationId!,
+      query,
+    );
+  }
+
   // ==================== PRODUCT REQUESTS ENDPOINTS ====================
 
   @Get('product-requests')
@@ -1208,6 +1283,65 @@ export class SellersController {
       requestId,
       createDto,
       user.id,
+    );
+  }
+
+  // ==================== PAYOUT REQUESTS ====================
+
+  @Post('payouts/request')
+  @ApiOperation({
+    summary: 'Request a payout',
+    description:
+      'Submit a request to withdraw funds from the available balance. Minimum payout is $100.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Payout request submitted successfully',
+  })
+  @ApiBadRequestResponse({
+    description: 'Insufficient balance or pending request already exists',
+  })
+  async requestPayout(
+    @CurrentUser() user: UserContext,
+    @Body() body: { amount?: number; note?: string },
+  ) {
+    return await this.sellersService.requestPayout(user.organizationId!, body);
+  }
+
+  @Get('payouts/requests')
+  @ApiOperation({
+    summary: 'Get payout requests',
+    description: 'Get a paginated list of payout requests for the seller.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'status', required: false, type: String })
+  async getPayoutRequests(
+    @CurrentUser() user: UserContext,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('status') status?: string,
+  ) {
+    return await this.sellersService.getPayoutRequests(user.organizationId!, {
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      status,
+    });
+  }
+
+  @Delete('payouts/requests/:id')
+  @ApiOperation({
+    summary: 'Cancel a payout request',
+    description: 'Cancel a pending payout request.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async cancelPayoutRequest(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) requestId: string,
+  ) {
+    return await this.sellersService.cancelPayoutRequest(
+      user.organizationId!,
+      requestId,
     );
   }
 }

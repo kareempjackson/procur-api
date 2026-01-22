@@ -15,6 +15,8 @@ import {
   ApiResponse,
   ApiTags,
   ApiBody,
+  ApiQuery,
+  ApiParam,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -46,7 +48,9 @@ import {
   AdminPaymentsQueryDto,
   MarkBuyerSettlementCompletedDto,
   MarkFarmerPayoutCompletedDto,
+  UpdateFarmerPayoutStatusDto,
 } from './dto/admin-payments.dto';
+import { AdjustSellerCreditDto } from './dto/seller-credit.dto';
 import {
   AdminProductResponseDto,
   AdminProductQueryDto,
@@ -1325,5 +1329,260 @@ export class AdminController {
     },
   ): Promise<{ organizationId: string; userId: string }> {
     return this.adminService.createSellerFromAdmin(body);
+  }
+
+  // ===== Payout Requests =====
+
+  @Get('payout-requests')
+  @ApiOperation({
+    summary: 'Get all payout requests',
+    description: 'Get a paginated list of all payout requests from sellers.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'status', required: false, type: String })
+  async getPayoutRequests(
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('status') status?: string,
+  ) {
+    return this.adminService.getPayoutRequests({
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      status,
+    });
+  }
+
+  @Get('payout-requests/:id')
+  @ApiOperation({
+    summary: 'Get payout request details',
+    description: 'Get details of a specific payout request.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async getPayoutRequestDetail(@Param('id') requestId: string) {
+    return this.adminService.getPayoutRequestDetail(requestId);
+  }
+
+  @Patch('payout-requests/:id/approve')
+  @ApiOperation({
+    summary: 'Approve a payout request',
+    description: 'Approve a pending payout request for processing.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async approvePayoutRequest(
+    @Param('id') requestId: string,
+    @Body() body: { admin_note?: string },
+    @CurrentUser() user: UserContext,
+  ) {
+    return this.adminService.approvePayoutRequest(requestId, body, user.id);
+  }
+
+  @Patch('payout-requests/:id/reject')
+  @ApiOperation({
+    summary: 'Reject a payout request',
+    description: 'Reject a pending payout request.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async rejectPayoutRequest(
+    @Param('id') requestId: string,
+    @Body() body: { rejection_reason: string; admin_note?: string },
+    @CurrentUser() user: UserContext,
+  ) {
+    return this.adminService.rejectPayoutRequest(requestId, body, user.id);
+  }
+
+  @Patch('payout-requests/:id/complete')
+  @ApiOperation({
+    summary: 'Complete a payout request',
+    description:
+      'Mark an approved payout request as completed (paid). This deducts from the seller balance.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async completePayoutRequest(
+    @Param('id') requestId: string,
+    @Body() body: { proof_url?: string; admin_note?: string },
+    @CurrentUser() user: UserContext,
+  ) {
+    return this.adminService.completePayoutRequest(requestId, body, user.id);
+  }
+
+  // ===== Seller Credits =====
+
+  @Post('sellers/:id/credits')
+  @ApiOperation({
+    summary: 'Adjust seller credit balance',
+    description:
+      'Add or deduct credits from a seller account (e.g., for change owed, overpayment adjustments)',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Credit adjustment successful',
+  })
+  async adjustSellerCredit(
+    @Param('id') sellerId: string,
+    @Body() dto: AdjustSellerCreditDto,
+    @CurrentUser() user: UserContext,
+  ): Promise<{ transaction_id: string; new_balance_cents: number }> {
+    return this.adminService.adjustSellerCredit(
+      { ...dto, seller_org_id: sellerId },
+      user.id,
+    );
+  }
+
+  @Get('sellers/:id/credits')
+  @ApiOperation({
+    summary: 'Get seller credit balance',
+    description: 'Get the current credit balance for a seller',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller credit balance retrieved',
+  })
+  async getSellerCreditBalance(@Param('id') sellerId: string) {
+    return this.adminService.getSellerCreditBalance(sellerId);
+  }
+
+  @Get('sellers/:id/credits/transactions')
+  @ApiOperation({
+    summary: 'Get seller credit transaction history',
+    description: 'Get all credit/debit transactions for a seller',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Credit transactions retrieved',
+  })
+  async getSellerCreditTransactions(
+    @Param('id') sellerId: string,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    return this.adminService.getSellerCreditTransactions(sellerId, query);
+  }
+
+  @Get('sellers/credits/all')
+  @ApiOperation({
+    summary: 'Get all sellers with credit balances',
+    description: 'List all sellers that have non-zero credit balances',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Sellers with credits retrieved',
+  })
+  async getSellersWithCredits(@Query() query: { page?: number; limit?: number }) {
+    return this.adminService.getSellersWithCredits(query);
+  }
+
+  // ===== Seller Balance Management =====
+
+  @Get('sellers/:id/balance')
+  @ApiOperation({
+    summary: 'Get seller full balance',
+    description: 'Get available balance, pending balance, and credit balance for a seller',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller balance retrieved',
+  })
+  async getSellerFullBalance(@Param('id') sellerId: string) {
+    return this.adminService.getSellerFullBalance(sellerId);
+  }
+
+  @Post('sellers/:id/balance/adjust')
+  @ApiOperation({
+    summary: 'Adjust seller available balance',
+    description: 'Add or deduct from seller available balance (e.g., for already-paid payouts)',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Balance adjustment successful',
+  })
+  async adjustSellerBalance(
+    @Param('id') sellerId: string,
+    @Body() dto: { amount_cents: number; type: 'add' | 'deduct'; reason: string; note?: string; order_ids?: string[] },
+    @CurrentUser() user: UserContext,
+  ) {
+    return this.adminService.adjustSellerAvailableBalance(
+      { ...dto, seller_org_id: sellerId },
+      user.id,
+    );
+  }
+
+  @Get('sellers/:id/orders/unpaid')
+  @ApiOperation({
+    summary: 'Get unpaid delivered orders for a seller',
+    description: 'Get all delivered orders that have not been paid out yet',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Unpaid orders retrieved',
+  })
+  async getSellerUnpaidOrders(
+    @Param('id') sellerId: string,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    return this.adminService.getSellerUnpaidOrders(sellerId, query);
+  }
+
+  // ===== Buyer Credits =====
+
+  @Get('buyers/:id/credits')
+  @ApiOperation({
+    summary: 'Get buyer credit balance',
+    description: 'Get the current credit balance for a buyer',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Buyer credit balance retrieved',
+  })
+  async getBuyerCreditBalance(@Param('id') buyerId: string) {
+    return this.adminService.getBuyerCreditBalance(buyerId);
+  }
+
+  @Post('buyers/:id/credits')
+  @ApiOperation({
+    summary: 'Adjust buyer credit balance',
+    description: 'Add or deduct credits from a buyer account',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Credit adjustment successful',
+  })
+  async adjustBuyerCredit(
+    @Param('id') buyerId: string,
+    @Body() dto: { amount_cents: number; type: 'credit' | 'debit'; reason: string; note?: string; order_id?: string },
+    @CurrentUser() user: UserContext,
+  ): Promise<{ transaction_id: string; new_balance_cents: number }> {
+    return this.adminService.adjustBuyerCredit(
+      { ...dto, buyer_org_id: buyerId },
+      user.id,
+    );
+  }
+
+  @Get('buyers/:id/credits/transactions')
+  @ApiOperation({
+    summary: 'Get buyer credit transaction history',
+    description: 'Get all credit/debit transactions for a buyer',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Credit transactions retrieved',
+  })
+  async getBuyerCreditTransactions(
+    @Param('id') buyerId: string,
+    @Query() query: { page?: number; limit?: number },
+  ) {
+    return this.adminService.getBuyerCreditTransactions(buyerId, query);
+  }
+
+  @Get('buyers/credits/all')
+  @ApiOperation({
+    summary: 'Get all buyers with credit balances',
+    description: 'List all buyers that have credit balances',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Buyers with credits retrieved',
+  })
+  async getBuyersWithCredits(@Query() query: { page?: number; limit?: number }) {
+    return this.adminService.getBuyersWithCredits(query);
   }
 }

@@ -4,10 +4,10 @@ import { IsIn, IsOptional, IsString } from 'class-validator';
 export class UpdateAdminOrderPaymentStatusDto {
   @ApiProperty({
     description: 'New payment status for the order',
-    enum: ['pending', 'paid', 'failed', 'refunded', 'partially_refunded'],
+    enum: ['pending', 'scheduled', 'paid', 'failed', 'refunded', 'partially_refunded'],
   })
   @IsString()
-  @IsIn(['pending', 'paid', 'failed', 'refunded', 'partially_refunded'])
+  @IsIn(['pending', 'scheduled', 'paid', 'failed', 'refunded', 'partially_refunded'])
   payment_status!: string;
 
   @ApiProperty({

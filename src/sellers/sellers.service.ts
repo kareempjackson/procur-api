@@ -812,7 +812,8 @@ export class SellersService {
     const client = this.supabaseService.getClient();
 
     // Check if order exists and belongs to seller
-    await this.getOrderById(sellerOrgId, orderId);
+    const existingOrder = await this.getOrderById(sellerOrgId, orderId);
+    const previousStatus = existingOrder.status;
 
     const updateData: UpdateOrderData = {
       ...updateOrderStatusDto,
@@ -837,6 +838,58 @@ export class SellersService {
       throw new BadRequestException(
         `Failed to update order status: ${error.message}`,
       );
+    }
+
+    // If order is being marked as delivered, credit the seller's balance
+    if (
+      updateOrderStatusDto.status === 'delivered' &&
+      previousStatus !== 'delivered'
+    ) {
+      const totalAmountCents = Math.round(
+        Number(existingOrder.total_amount || 0) * 100,
+      );
+
+      if (totalAmountCents > 0) {
+        // Check if seller already has a balance record
+        const { data: existingBalance } = await client
+          .from('seller_balances')
+          .select('id, available_amount_cents')
+          .eq('seller_org_id', sellerOrgId)
+          .maybeSingle();
+
+        if (existingBalance) {
+          // Update existing balance
+          await client
+            .from('seller_balances')
+            .update({
+              available_amount_cents:
+                Number(existingBalance.available_amount_cents || 0) +
+                totalAmountCents,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('seller_org_id', sellerOrgId);
+        } else {
+          // Create new balance record
+          await client.from('seller_balances').insert({
+            seller_org_id: sellerOrgId,
+            available_amount_cents: totalAmountCents,
+            pending_amount_cents: 0,
+            credit_amount_cents: 0,
+            currency: existingOrder.currency || 'XCD',
+          });
+        }
+
+        // Add timeline event
+        await client.from('order_timeline').insert({
+          order_id: orderId,
+          event_type: 'balance_credited',
+          title: 'Amount added to your balance',
+          description: `$${(totalAmountCents / 100).toFixed(2)} credited to your account`,
+          actor_type: 'system',
+          is_visible_to_buyer: false,
+          is_visible_to_seller: true,
+        });
+      }
     }
 
     return this.mapOrderToResponse(data);
@@ -3137,6 +3190,252 @@ export class SellersService {
     };
   }
 
+  // ==================== PAYOUTS & BALANCE ====================
+
+  /**
+   * Get seller's current balance (available and pending amounts)
+   */
+  async getSellerBalance(sellerOrgId: string) {
+    const client = this.supabaseService.getClient();
+
+    const { data, error } = await client
+      .from('seller_balances')
+      .select('*')
+      .eq('seller_org_id', sellerOrgId)
+      .maybeSingle();
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    const balance = data || {
+      available_amount_cents: 0,
+      pending_amount_cents: 0,
+      credit_amount_cents: 0,
+      currency: 'USD',
+    };
+
+    const minPayoutCents = 10000; // $100 minimum
+    const creditCents = Number(balance.credit_amount_cents || 0);
+
+    return {
+      available_amount: Number(balance.available_amount_cents || 0) / 100,
+      available_amount_cents: Number(balance.available_amount_cents || 0),
+      pending_amount: Number(balance.pending_amount_cents || 0) / 100,
+      pending_amount_cents: Number(balance.pending_amount_cents || 0),
+      // Credits: positive means seller owes Procur, negative means Procur owes seller
+      credit_amount: creditCents / 100,
+      credit_amount_cents: creditCents,
+      has_credit_balance: creditCents !== 0,
+      credit_type: creditCents > 0 ? 'owes_procur' : creditCents < 0 ? 'owed_by_procur' : 'none',
+      currency: balance.currency || 'USD',
+      minimum_payout_amount: minPayoutCents / 100,
+      minimum_payout_cents: minPayoutCents,
+      can_request_payout:
+        Number(balance.available_amount_cents || 0) >= minPayoutCents,
+    };
+  }
+
+  /**
+   * Get seller's payout history (from transactions with leg: 'farmer_payout')
+   * This matches what the admin sees in the payments page.
+   */
+  async getSellerPayouts(
+    sellerOrgId: string,
+    query: { page?: number; limit?: number; status?: string },
+  ) {
+    const client = this.supabaseService.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    // Query transactions that are farmer payouts for this seller
+    let dbQuery = client
+      .from('transactions')
+      .select(
+        'id, transaction_number, order_id, amount, currency, status, metadata, processed_at, settled_at, created_at',
+        { count: 'exact' },
+      )
+      .eq('seller_org_id', sellerOrgId)
+      .contains('metadata', {
+        flow: 'direct_deposit_clearing',
+        leg: 'farmer_payout',
+      })
+      .order('created_at', { ascending: false });
+
+    if (query.status) {
+      dbQuery = dbQuery.eq('status', query.status);
+    }
+
+    const { data, error, count } = await dbQuery.range(from, from + limit - 1);
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    // Map to a consistent format
+    const payouts = (data || []).map((tx: any) => {
+      const meta = (tx.metadata || {}) as {
+        phase?: string;
+        payout_proof_url?: string;
+      };
+      return {
+        id: tx.id,
+        transaction_number: tx.transaction_number,
+        order_id: tx.order_id,
+        amount: Number(tx.amount || 0),
+        amount_cents: Math.round(Number(tx.amount || 0) * 100),
+        currency: tx.currency || 'XCD',
+        status: tx.status,
+        phase: meta.phase || null,
+        proof_url: meta.payout_proof_url || null,
+        processed_at: tx.processed_at,
+        paid_at: tx.settled_at,
+        created_at: tx.created_at,
+      };
+    });
+
+    return {
+      payouts,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Get seller's credit transaction history
+   */
+  async getSellerCreditTransactions(
+    sellerOrgId: string,
+    query: { page?: number; limit?: number },
+  ) {
+    const client = this.supabaseService.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('seller_credit_transactions')
+      .select(
+        `
+        id,
+        amount_cents,
+        balance_after_cents,
+        type,
+        reason,
+        note,
+        reference,
+        order_id,
+        created_at
+      `,
+        { count: 'exact' },
+      )
+      .eq('seller_org_id', sellerOrgId)
+      .range(from, from + limit - 1)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    const transactions = (data || []).map((row: any) => ({
+      id: row.id,
+      amount_cents: Number(row.amount_cents || 0),
+      amount: Number(row.amount_cents || 0) / 100,
+      balance_after_cents: Number(row.balance_after_cents || 0),
+      balance_after: Number(row.balance_after_cents || 0) / 100,
+      type: row.type,
+      reason: row.reason,
+      note: row.note,
+      reference: row.reference,
+      order_id: row.order_id,
+      created_at: row.created_at,
+    }));
+
+    return {
+      transactions,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Get payout settings (minimum threshold, schedule, next payout date)
+   */
+  async getPayoutSettings(sellerOrgId: string) {
+    const client = this.supabaseService.getClient();
+
+    // Find the most recent scheduled payout for this seller
+    const { data: lastScheduledPayout } = await client
+      .from('transactions')
+      .select('created_at, updated_at, metadata')
+      .eq('seller_org_id', sellerOrgId)
+      .eq('status', 'scheduled')
+      .contains('metadata', {
+        flow: 'direct_deposit_clearing',
+        leg: 'farmer_payout',
+      })
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let nextPayoutDate: string;
+
+    if (lastScheduledPayout) {
+      // Calculate 2 weeks from when the payout was scheduled
+      const scheduledDate = new Date(
+        lastScheduledPayout.updated_at || lastScheduledPayout.created_at,
+      );
+      const twoWeeksLater = new Date(scheduledDate);
+      twoWeeksLater.setDate(scheduledDate.getDate() + 14);
+      nextPayoutDate = twoWeeksLater.toISOString().split('T')[0];
+    } else {
+      // No scheduled payouts - use the next bi-weekly Friday
+      nextPayoutDate = this.calculateNextBiweeklyFriday();
+    }
+
+    return {
+      minimum_payout_amount: 100,
+      minimum_payout_cents: 10000,
+      currency: 'USD',
+      payout_frequency_days: 14,
+      payout_frequency_label: 'Every 2 weeks',
+      next_payout_date: nextPayoutDate,
+    };
+  }
+
+  /**
+   * Calculate the next bi-weekly payout date (every other Friday)
+   * Used as a fallback when no scheduled payouts exist
+   */
+  private calculateNextBiweeklyFriday(): string {
+    const today = new Date();
+    const dayOfWeek = today.getDay();
+
+    // Find next Friday (day 5)
+    let daysUntilFriday = (5 - dayOfWeek + 7) % 7;
+    if (daysUntilFriday === 0) daysUntilFriday = 7; // If today is Friday, next Friday
+
+    const nextFriday = new Date(today);
+    nextFriday.setDate(today.getDate() + daysUntilFriday);
+
+    // Use a reference date (a Friday) to determine bi-weekly cycle
+    const referenceDate = new Date('2026-01-03'); // A known Friday
+    const diffDays = Math.floor(
+      (nextFriday.getTime() - referenceDate.getTime()) / (1000 * 60 * 60 * 24),
+    );
+    const weekNumber = Math.floor(diffDays / 7);
+
+    if (weekNumber % 2 !== 0) {
+      // Not a payout week, add 7 days
+      nextFriday.setDate(nextFriday.getDate() + 7);
+    }
+
+    return nextFriday.toISOString().split('T')[0];
+  }
+
   // ==================== PRODUCT REQUESTS (SELLER VIEW) ====================
 
   async getProductRequests(
@@ -3447,5 +3746,173 @@ export class SellersService {
       created_at: row.created_at as string,
       updated_at: row.updated_at as string,
     };
+  }
+
+  // ==================== PAYOUT REQUESTS ====================
+
+  /**
+   * Request a payout from the available balance
+   */
+  async requestPayout(
+    sellerOrgId: string,
+    dto: { amount?: number; note?: string },
+  ) {
+    const client = this.supabaseService.getClient();
+
+    // Get current balance
+    const balance = await this.getSellerBalance(sellerOrgId);
+
+    if (!balance.can_request_payout) {
+      throw new BadRequestException(
+        `Minimum payout amount is $${balance.minimum_payout_amount}. Your available balance is $${balance.available_amount.toFixed(2)}.`,
+      );
+    }
+
+    // Check for pending payout requests
+    const { data: pendingRequest } = await client
+      .from('payout_requests')
+      .select('id')
+      .eq('seller_org_id', sellerOrgId)
+      .in('status', ['pending', 'approved'])
+      .maybeSingle();
+
+    if (pendingRequest) {
+      throw new BadRequestException(
+        'You already have a pending payout request. Please wait for it to be processed.',
+      );
+    }
+
+    // Use full available balance if no amount specified
+    const requestedAmountCents = dto.amount
+      ? Math.round(dto.amount * 100)
+      : balance.available_amount_cents;
+
+    if (requestedAmountCents > balance.available_amount_cents) {
+      throw new BadRequestException(
+        `Requested amount exceeds available balance of $${balance.available_amount.toFixed(2)}.`,
+      );
+    }
+
+    if (requestedAmountCents < balance.minimum_payout_cents) {
+      throw new BadRequestException(
+        `Minimum payout amount is $${balance.minimum_payout_amount}.`,
+      );
+    }
+
+    // Create payout request
+    const { data: request, error } = await client
+      .from('payout_requests')
+      .insert({
+        seller_org_id: sellerOrgId,
+        amount_cents: requestedAmountCents,
+        currency: balance.currency || 'XCD',
+        status: 'pending',
+        note: dto.note || null,
+      })
+      .select('id, amount_cents, currency, status, requested_at')
+      .single();
+
+    if (error) {
+      throw new BadRequestException(`Failed to create payout request: ${error.message}`);
+    }
+
+    return {
+      id: request.id,
+      amount: requestedAmountCents / 100,
+      amount_cents: requestedAmountCents,
+      currency: request.currency,
+      status: request.status,
+      requested_at: request.requested_at,
+      message: 'Payout request submitted successfully',
+    };
+  }
+
+  /**
+   * Get payout requests for a seller
+   */
+  async getPayoutRequests(
+    sellerOrgId: string,
+    query: { page?: number; limit?: number; status?: string },
+  ) {
+    const client = this.supabaseService.getClient();
+    const page = query.page || 1;
+    const limit = query.limit || 20;
+    const offset = (page - 1) * limit;
+
+    let queryBuilder = client
+      .from('payout_requests')
+      .select('*', { count: 'exact' })
+      .eq('seller_org_id', sellerOrgId)
+      .order('requested_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (query.status) {
+      queryBuilder = queryBuilder.eq('status', query.status);
+    }
+
+    const { data, error, count } = await queryBuilder;
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    const requests = (data || []).map((row: any) => ({
+      id: row.id,
+      amount: Number(row.amount_cents || 0) / 100,
+      amount_cents: Number(row.amount_cents || 0),
+      currency: row.currency,
+      status: row.status,
+      requested_at: row.requested_at,
+      processed_at: row.processed_at,
+      completed_at: row.completed_at,
+      rejection_reason: row.rejection_reason,
+      note: row.note,
+      admin_note: row.admin_note,
+    }));
+
+    return {
+      requests,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * Cancel a pending payout request
+   */
+  async cancelPayoutRequest(sellerOrgId: string, requestId: string) {
+    const client = this.supabaseService.getClient();
+
+    const { data: request, error: fetchError } = await client
+      .from('payout_requests')
+      .select('id, status')
+      .eq('id', requestId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (fetchError || !request) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    if (request.status !== 'pending') {
+      throw new BadRequestException(
+        'Can only cancel pending payout requests',
+      );
+    }
+
+    const { error: updateError } = await client
+      .from('payout_requests')
+      .update({
+        status: 'cancelled',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (updateError) {
+      throw new BadRequestException(`Failed to cancel request: ${updateError.message}`);
+    }
+
+    return { success: true, message: 'Payout request cancelled' };
   }
 }

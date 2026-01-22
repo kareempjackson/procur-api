@@ -71,6 +71,13 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   preferred_delivery_date?: string;
+
+  @ApiPropertyOptional({ description: 'Credits to apply to this order (in cents)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  credits_applied_cents?: number;
 }
 
 export class BuyerOrderQueryDto {

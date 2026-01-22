@@ -2175,8 +2175,29 @@ export class BuyersService {
       const platformFeeAmount = Number(
         ((orderSubtotal * platformFeePercent) / 100).toFixed(2),
       );
-      const totalAmount =
+      const totalAmountBeforeCredits =
         orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
+
+      // Handle credits - only apply credits to the first seller order in the checkout group
+      let creditsAppliedCents = 0;
+      if (idx === 0 && createDto.credits_applied_cents && createDto.credits_applied_cents > 0) {
+        // Get buyer's current credit balance
+        const { data: buyerBalance } = await this.supabase
+          .getClient()
+          .from('buyer_balances')
+          .select('credit_amount_cents')
+          .eq('buyer_org_id', buyerOrgId)
+          .maybeSingle();
+
+        const availableCreditsCents = Number(buyerBalance?.credit_amount_cents || 0);
+        const requestedCreditsCents = createDto.credits_applied_cents;
+        const maxCreditsCents = Math.round(totalAmountBeforeCredits * 100); // Max is the order total
+
+        // Apply the minimum of: requested, available, and order total
+        creditsAppliedCents = Math.min(requestedCreditsCents, availableCreditsCents, maxCreditsCents);
+      }
+
+      const totalAmount = totalAmountBeforeCredits - (creditsAppliedCents / 100);
 
       // Generate order number
       const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
@@ -2196,6 +2217,7 @@ export class BuyersService {
           tax_amount: taxAmount,
           shipping_amount: shippingAmount,
           discount_amount: 0,
+          credits_applied_cents: creditsAppliedCents,
           total_amount: totalAmount,
           currency: 'XCD',
           shipping_address: shippingAddress,
@@ -2261,6 +2283,22 @@ export class BuyersService {
           metadata: { items_count: items.length },
           created_by: buyerUserId,
         });
+
+      // Deduct credits from buyer balance if credits were applied
+      if (creditsAppliedCents > 0) {
+        this.logger.debug(
+          `Deducting ${creditsAppliedCents} cents credits from buyer ${buyerOrgId} for order ${order.id}`,
+        );
+        await this.supabase.getClient().rpc('adjust_buyer_credit', {
+          p_buyer_org_id: buyerOrgId,
+          p_amount_cents: -creditsAppliedCents, // Negative to deduct
+          p_type: 'usage',
+          p_reason: 'order_applied',
+          p_note: `Applied to order ${orderNumber}`,
+          p_order_id: order.id,
+          p_admin_user_id: null,
+        });
+      }
 
       // Auto-create conversation for this order
       runSideEffect(
@@ -5400,6 +5438,107 @@ Manage this order: ${link}`;
         `Failed to create harvest request: ${error.message}`,
       );
     }
+  }
+
+  // ==================== CREDITS METHODS ====================
+
+  /**
+   * Get credit balance for a buyer organization
+   */
+  async getCreditBalance(buyerOrgId: string): Promise<{
+    credit_amount_cents: number;
+    credit_amount: number;
+    currency: string;
+  }> {
+    const client = this.supabase.getClient();
+
+    const { data: balance } = await client
+      .from('buyer_balances')
+      .select('credit_amount_cents, currency')
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    const creditCents = Number(balance?.credit_amount_cents || 0);
+
+    return {
+      credit_amount_cents: creditCents,
+      credit_amount: creditCents / 100,
+      currency: (balance?.currency as string) || 'XCD',
+    };
+  }
+
+  /**
+   * Get credit transaction history for a buyer organization
+   */
+  async getCreditTransactions(
+    buyerOrgId: string,
+    query: { page?: number; limit?: number },
+  ): Promise<{
+    transactions: Array<{
+      id: string;
+      amount_cents: number;
+      amount: number;
+      balance_after_cents: number;
+      balance_after: number;
+      type: string;
+      reason: string;
+      note: string | null;
+      order_id: string | null;
+      created_at: string;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const client = this.supabase.getClient();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await client
+      .from('buyer_credit_transactions')
+      .select(
+        `
+        id,
+        amount_cents,
+        balance_after_cents,
+        type,
+        reason,
+        note,
+        order_id,
+        created_at
+      `,
+        { count: 'exact' },
+      )
+      .eq('buyer_org_id', buyerOrgId)
+      .range(from, from + limit - 1)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch credit transactions: ${error.message}`,
+      );
+    }
+
+    const transactions = (data || []).map((row: any) => ({
+      id: row.id,
+      amount_cents: Number(row.amount_cents || 0),
+      amount: Number(row.amount_cents || 0) / 100,
+      balance_after_cents: Number(row.balance_after_cents || 0),
+      balance_after: Number(row.balance_after_cents || 0) / 100,
+      type: row.type,
+      reason: row.reason,
+      note: row.note,
+      order_id: row.order_id,
+      created_at: row.created_at,
+    }));
+
+    return {
+      transactions,
+      total: count || 0,
+      page,
+      limit,
+    };
   }
 
   // ==================== HELPER METHODS ====================
