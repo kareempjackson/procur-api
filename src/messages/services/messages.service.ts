@@ -1,12 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { SupabaseService } from '../../database/supabase.service';
 import { NotificationsGateway } from '../../notifications/notifications.gateway';
+import { EventsService } from '../../events/events.service';
+import { EventTypes, AggregateTypes } from '../../events/event-types';
 
 @Injectable()
 export class MessagesService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly notificationsGateway: NotificationsGateway,
+    private readonly eventsService: EventsService,
   ) {}
 
   async sendMessage(conversationId: string, body: any, userId: string) {
@@ -45,6 +48,15 @@ export class MessagesService {
       // Don't fail message send if notification fails
       console.error('Failed to emit message notification:', e);
     }
+
+    // Emit message sent event
+    await this.eventsService.emit({
+      type: EventTypes.Message.SENT,
+      aggregateType: AggregateTypes.MESSAGE,
+      aggregateId: data.id,
+      actorId: userId,
+      payload: { conversationId, contentType: data.content_type },
+    });
 
     return data;
   }

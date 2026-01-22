@@ -60,10 +60,15 @@ import {
   UpdateOrderData,
   CreateScheduledPostData,
 } from '../database/types/database.types';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes } from '../events/event-types';
 
 @Injectable()
 export class SellersService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly eventsService: EventsService,
+  ) {}
 
   /**
    * Load platform fee configuration (shared settings controlled in the admin panel).
@@ -290,6 +295,21 @@ export class SellersService {
       .select('*, product_images(*)')
       .eq('id', data.id)
       .single();
+
+    // Emit product created event
+    await this.eventsService.emit({
+      type: EventTypes.Product.CREATED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: data.id,
+      actorId: userId,
+      organizationId: sellerOrgId,
+      payload: {
+        name: data.name,
+        price: data.base_price,
+        category: data.category,
+        adminProductId: data.admin_product_id,
+      },
+    });
 
     return this.mapProductToResponse(withImages ?? data);
   }
@@ -523,6 +543,16 @@ export class SellersService {
       );
     }
 
+    // Emit product updated event
+    await this.eventsService.emit({
+      type: EventTypes.Product.UPDATED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: productId,
+      actorId: userId,
+      organizationId: sellerOrgId,
+      payload: { changedFields: Object.keys(updateProductDto) },
+    });
+
     return this.mapProductToResponse(data);
   }
 
@@ -544,6 +574,15 @@ export class SellersService {
         `Failed to delete product: ${error.message}`,
       );
     }
+
+    // Emit product deleted event
+    await this.eventsService.emit({
+      type: EventTypes.Product.DELETED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: productId,
+      organizationId: sellerOrgId,
+      payload: { productId },
+    });
   }
 
   async addProductImage(
@@ -754,6 +793,19 @@ export class SellersService {
       throw new BadRequestException(`Failed to accept order: ${error.message}`);
     }
 
+    // Emit order accepted event
+    await this.eventsService.emit({
+      type: EventTypes.Order.ACCEPTED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      actorId: userId,
+      organizationId: sellerOrgId,
+      payload: {
+        orderNumber: order.order_number,
+        estimatedDeliveryDate: acceptOrderDto.estimated_delivery_date,
+      },
+    });
+
     return this.mapOrderToResponse(data);
   }
 
@@ -798,6 +850,19 @@ export class SellersService {
     if (error) {
       throw new BadRequestException(`Failed to reject order: ${error.message}`);
     }
+
+    // Emit order rejected event
+    await this.eventsService.emit({
+      type: EventTypes.Order.REJECTED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      actorId: userId,
+      organizationId: sellerOrgId,
+      payload: {
+        orderNumber: order.order_number,
+        reason: rejectOrderDto.reason,
+      },
+    });
 
     return this.mapOrderToResponse(data);
   }
@@ -890,6 +955,30 @@ export class SellersService {
           is_visible_to_seller: true,
         });
       }
+    }
+
+    // Emit appropriate order status event
+    const status = updateOrderStatusDto.status;
+    const eventTypeMap: Record<string, typeof EventTypes.Order.PROCESSING | typeof EventTypes.Order.SHIPPED | typeof EventTypes.Order.DELIVERED> = {
+      processing: EventTypes.Order.PROCESSING,
+      shipped: EventTypes.Order.SHIPPED,
+      delivered: EventTypes.Order.DELIVERED,
+    };
+    const eventType = eventTypeMap[status as string];
+    if (eventType) {
+      await this.eventsService.emit({
+        type: eventType,
+        aggregateType: AggregateTypes.ORDER,
+        aggregateId: orderId,
+        actorId: userId,
+        organizationId: sellerOrgId,
+        payload: {
+          orderNumber: existingOrder.order_number,
+          previousStatus,
+          newStatus: status,
+          trackingNumber: updateOrderStatusDto.tracking_number,
+        },
+      });
     }
 
     return this.mapOrderToResponse(data);
@@ -1028,6 +1117,20 @@ export class SellersService {
       },
       is_visible_to_buyer: true,
       is_visible_to_seller: true,
+    });
+
+    // Emit buyer review created event
+    await this.eventsService.emit({
+      type: EventTypes.Review.BUYER_CREATED,
+      aggregateType: AggregateTypes.REVIEW,
+      aggregateId: orderId,
+      actorId: userId,
+      organizationId: sellerOrgId,
+      payload: {
+        orderId,
+        buyerOrgId: order.buyer_org_id,
+        rating: reviewDto.overall_rating,
+      },
     });
   }
 

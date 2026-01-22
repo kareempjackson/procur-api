@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
 import { SellersService } from '../sellers/sellers.service';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes } from '../events/event-types';
 
 export type OfflinePaymentMethod =
   | 'bank_transfer'
@@ -27,6 +29,7 @@ export class PaymentLinksService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly sellersService: SellersService,
+    private readonly eventsService: EventsService,
   ) {}
 
   /**
@@ -259,6 +262,20 @@ export class PaymentLinksService {
       process.env.FRONTEND_PUBLIC_URL ||
       process.env.FRONTEND_URL ||
       'http://localhost:3001';
+
+    // Emit payment link created event
+    await this.eventsService.emit({
+      type: EventTypes.Payment.LINK_CREATED,
+      aggregateType: AggregateTypes.PAYMENT,
+      aggregateId: link.id as string,
+      actorId: input.createdByUserId,
+      organizationId: input.sellerOrgId,
+      payload: {
+        orderId: order.id,
+        linkCode: link.link_code,
+        totalAmount,
+      },
+    });
 
     return {
       id: link.id as string,

@@ -37,6 +37,8 @@ import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import { CaptchaService } from '../common/utils/captcha.service';
 import { UserRole } from '../common/enums/user-role.enum';
 import type { UserContext } from '../common/interfaces/jwt-payload.interface';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes, ActorTypes } from '../events/event-types';
 
 type InvitationRecord = {
   id: string;
@@ -94,6 +96,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly captchaService: CaptchaService,
+    private readonly eventsService: EventsService,
     // Optional: present if WhatsappModule is loaded
     private readonly waSend?: WaSendService,
     private readonly waTemplates?: WaTemplateService,
@@ -195,6 +198,20 @@ export class AuthService {
 
       this.logger.log(`User created successfully: ${email}`);
 
+      // Emit signup completed event
+      await this.eventsService.emit({
+        type: EventTypes.Auth.SIGNUP_COMPLETED,
+        aggregateType: AggregateTypes.USER,
+        aggregateId: user.id,
+        actorId: user.id,
+        payload: {
+          email,
+          accountType,
+          businessType,
+          country,
+        },
+      });
+
       return {
         message:
           'User created successfully. Please check your email for verification.',
@@ -255,6 +272,18 @@ export class AuthService {
     }
 
     this.logger.log(`OTP requested for phone ${phone}`);
+
+    // Emit OTP requested event
+    if (user) {
+      await this.eventsService.emit({
+        type: EventTypes.Auth.OTP_REQUESTED,
+        aggregateType: AggregateTypes.USER,
+        aggregateId: user.id,
+        actorId: user.id,
+        payload: { phone, channel },
+      });
+    }
+
     return { message: 'Code sent if the account exists.' };
   }
 
@@ -304,6 +333,25 @@ export class AuthService {
     const expiresIn = this.getTokenExpirationSeconds();
 
     this.logger.log(`OTP sign-in successful for ${phone}`);
+
+    // Emit OTP verified and login succeeded events
+    await this.eventsService.emit({
+      type: EventTypes.Auth.OTP_VERIFIED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: { phone },
+    });
+
+    await this.eventsService.emit({
+      type: EventTypes.Auth.LOGIN_SUCCEEDED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      organizationId,
+      payload: { method: 'otp', phone },
+    });
+
     return {
       accessToken,
       tokenType: 'Bearer',
@@ -321,6 +369,7 @@ export class AuthService {
       },
     };
   }
+
   async changePassword(
     userCtx: { id: string },
     dto: ChangePasswordDto,
@@ -349,8 +398,19 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
     await this.supabaseService.updateUserPassword(user.id, hashedPassword);
     this.logger.log(`Password updated for user ${user.email}`);
+
+    // Emit password changed event
+    await this.eventsService.emit({
+      type: EventTypes.Auth.PASSWORD_CHANGED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      payload: {},
+    });
+
     return { message: 'Password updated successfully' };
   }
+
   async signin(signinDto: SigninDto): Promise<AuthResponseDto> {
     const { email, password } = signinDto;
 
@@ -384,6 +444,14 @@ export class AuthService {
       isPasswordValid = await bcrypt.compare(password, user.password);
     }
     if (!isPasswordValid) {
+      // Emit login failed event
+      await this.eventsService.emit({
+        type: EventTypes.Auth.LOGIN_FAILED,
+        aggregateType: AggregateTypes.USER,
+        aggregateId: user.id,
+        actorType: ActorTypes.SYSTEM,
+        payload: { email, reason: 'invalid_password' },
+      });
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -413,6 +481,16 @@ export class AuthService {
     const expiresIn = this.getTokenExpirationSeconds();
 
     this.logger.log(`User signed in successfully: ${email}`);
+
+    // Emit login succeeded event
+    await this.eventsService.emit({
+      type: EventTypes.Auth.LOGIN_SUCCEEDED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      organizationId,
+      payload: { method: 'password', email },
+    });
 
     return {
       accessToken,
@@ -607,6 +685,16 @@ export class AuthService {
       const expiresIn = this.getTokenExpirationSeconds();
 
       this.logger.log(`Email verified successfully: ${user.email}`);
+
+      // Emit email verified event
+      await this.eventsService.emit({
+        type: EventTypes.Auth.EMAIL_VERIFIED,
+        aggregateType: AggregateTypes.USER,
+        aggregateId: user.id,
+        actorId: user.id,
+        organizationId,
+        payload: { email: user.email },
+      });
 
       return {
         message: 'Email verified successfully. Welcome to Procur!',
@@ -866,6 +954,16 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+
+    // Emit invitation accepted event
+    await this.eventsService.emit({
+      type: EventTypes.Auth.INVITATION_ACCEPTED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      organizationId: effectiveOrgId,
+      payload: { invitationId: invite.id, email },
+    });
 
     return {
       accessToken,

@@ -1,9 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { SupabaseService } from '../../database/supabase.service';
+import { EventsService } from '../../events/events.service';
+import { EventTypes, AggregateTypes } from '../../events/event-types';
 
 @Injectable()
 export class ConversationsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly eventsService: EventsService,
+  ) {}
 
   async createConversation(body: any, userId: string) {
     const client = this.supabase.getClient();
@@ -39,6 +44,19 @@ export class ConversationsService {
         .insert(participants);
       if (pErr) throw pErr;
     }
+
+    // Emit conversation created event
+    await this.eventsService.emit({
+      type: EventTypes.Message.CONVERSATION_CREATED,
+      aggregateType: AggregateTypes.MESSAGE,
+      aggregateId: conversation.id,
+      actorId: userId,
+      payload: {
+        type: body.type,
+        contextType: body.context?.type,
+        contextId: body.context?.id,
+      },
+    });
 
     return conversation;
   }

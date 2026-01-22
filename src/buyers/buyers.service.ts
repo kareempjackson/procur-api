@@ -12,6 +12,8 @@ import { EmailService } from '../email/email.service';
 import { SupabaseService } from '../database/supabase.service';
 import { ConversationsService } from '../messages/services/conversations.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes } from '../events/event-types';
 import {
   // Cart DTOs
   AddToCartDto,
@@ -86,6 +88,7 @@ export class BuyersService {
     private readonly emailService: EmailService,
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
+    private readonly eventsService: EventsService,
   ) {}
 
   private async getVisibleMarketplaceSellerOrgIds(): Promise<string[]> {
@@ -1266,6 +1269,20 @@ export class BuyersService {
       .from('shopping_carts')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', cartId);
+
+    // Emit cart item added event
+    await this.eventsService.emit({
+      type: EventTypes.Cart.ITEM_ADDED,
+      aggregateType: AggregateTypes.CART,
+      aggregateId: cartId,
+      actorId: buyerUserId,
+      organizationId: buyerOrgId,
+      payload: {
+        productId: product_id,
+        quantity,
+        sellerOrgId: (product as any).seller_org_id,
+      },
+    });
   }
 
   async updateCartItem(
@@ -1330,6 +1347,16 @@ export class BuyersService {
       .from('shopping_carts')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', cartItem.cart_id);
+
+    // Emit cart item updated event
+    await this.eventsService.emit({
+      type: EventTypes.Cart.ITEM_UPDATED,
+      aggregateType: AggregateTypes.CART,
+      aggregateId: cartItem.cart_id,
+      actorId: buyerUserId,
+      organizationId: buyerOrgId,
+      payload: { productId: cartItem.product_id, newQuantity: quantity },
+    });
   }
 
   async removeFromCart(
@@ -1382,6 +1409,16 @@ export class BuyersService {
       .from('shopping_carts')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', cartItem.cart_id);
+
+    // Emit cart item removed event
+    await this.eventsService.emit({
+      type: EventTypes.Cart.ITEM_REMOVED,
+      aggregateType: AggregateTypes.CART,
+      aggregateId: cartItem.cart_id,
+      actorId: buyerUserId,
+      organizationId: buyerOrgId,
+      payload: { itemId },
+    });
   }
 
   async clearCart(buyerOrgId: string, buyerUserId: string): Promise<void> {
@@ -1412,6 +1449,16 @@ export class BuyersService {
       .from('shopping_carts')
       .update({ updated_at: new Date().toISOString() })
       .eq('id', cart.id);
+
+    // Emit cart cleared event
+    await this.eventsService.emit({
+      type: EventTypes.Cart.CLEARED,
+      aggregateType: AggregateTypes.CART,
+      aggregateId: cart.id,
+      actorId: buyerUserId,
+      organizationId: buyerOrgId,
+      payload: {},
+    });
   }
 
   async getCartSummary(
@@ -1473,6 +1520,21 @@ export class BuyersService {
       throw new BadRequestException(
         `Failed to create request: ${error.message}`,
       );
+
+    // Emit product request created event
+    await this.eventsService.emit({
+      type: EventTypes.Request.CREATED,
+      aggregateType: AggregateTypes.REQUEST,
+      aggregateId: data.id,
+      actorId: buyerUserId,
+      organizationId: buyerOrgId,
+      payload: {
+        requestNumber: data.request_number,
+        productName: data.product_name,
+        quantity: data.quantity,
+        targetSellerId: data.target_seller_id,
+      },
+    });
 
     return {
       id: data.id,
@@ -2555,6 +2617,25 @@ Manage this order: ${link}`;
       },
       12000,
     );
+
+    // Emit order created events for each order
+    for (const order of createdOrders) {
+      await this.eventsService.emit({
+        type: EventTypes.Order.CREATED,
+        aggregateType: AggregateTypes.ORDER,
+        aggregateId: order.id,
+        actorId: buyerUserId,
+        organizationId: buyerOrgId,
+        payload: {
+          orderNumber: order.order_number,
+          sellerOrgId: order.seller_org_id,
+          totalAmount: order.total_amount,
+          itemCount: sellerGroups.get(order.seller_org_id)?.length || 0,
+          checkoutGroupId,
+          currency: order.currency,
+        },
+      });
+    }
 
     this.logger.log(
       `createOrder complete. first_order=${firstOrder?.id} items=${firstOrderItems?.length || 0}`,
@@ -4305,6 +4386,15 @@ Manage this order: ${link}`;
       description: 'Order cancelled by buyer',
       created_by: buyerOrgId,
     });
+
+    // Emit order cancelled event
+    await this.eventsService.emit({
+      type: EventTypes.Order.CANCELLED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      organizationId: buyerOrgId,
+      payload: { cancelledBy: 'buyer', reason: 'Cancelled by buyer' },
+    });
   }
 
   async createOrderReview(
@@ -4371,6 +4461,19 @@ Manage this order: ${link}`;
       },
       is_visible_to_buyer: true,
       is_visible_to_seller: true,
+    });
+
+    // Emit seller review created event
+    await this.eventsService.emit({
+      type: EventTypes.Review.SELLER_CREATED,
+      aggregateType: AggregateTypes.REVIEW,
+      aggregateId: orderId,
+      organizationId: buyerOrgId,
+      payload: {
+        orderId,
+        sellerOrgId: order.seller_org_id,
+        rating: reviewDto.overall_rating,
+      },
     });
   }
 
@@ -4751,6 +4854,15 @@ Manage this order: ${link}`;
         `Failed to add to favorites: ${error.message}`,
       );
     }
+
+    // Emit product favorited event
+    await this.eventsService.emit({
+      type: EventTypes.Product.FAVORITED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: productId,
+      organizationId: buyerOrgId,
+      payload: { productId },
+    });
   }
 
   async removeProductFromFavorites(
@@ -4768,6 +4880,15 @@ Manage this order: ${link}`;
       throw new BadRequestException(
         `Failed to remove from favorites: ${error.message}`,
       );
+
+    // Emit product unfavorited event
+    await this.eventsService.emit({
+      type: EventTypes.Product.UNFAVORITED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: productId,
+      organizationId: buyerOrgId,
+      payload: { productId },
+    });
   }
 
   async getFavoriteSellers(buyerOrgId: string): Promise<FavoriteSellerDto[]> {
@@ -4869,6 +4990,14 @@ Manage this order: ${link}`;
         `Failed to add seller to favorites: ${error.message}`,
       );
     }
+
+    // Emit favorite seller added event
+    await this.eventsService.emit({
+      type: EventTypes.Favorite.SELLER_ADDED,
+      aggregateType: AggregateTypes.FAVORITE,
+      organizationId: buyerOrgId,
+      payload: { sellerOrgId: sellerId },
+    });
   }
 
   async removeSellerFromFavorites(
@@ -4886,6 +5015,14 @@ Manage this order: ${link}`;
       throw new BadRequestException(
         `Failed to remove seller from favorites: ${error.message}`,
       );
+
+    // Emit favorite seller removed event
+    await this.eventsService.emit({
+      type: EventTypes.Favorite.SELLER_REMOVED,
+      aggregateType: AggregateTypes.FAVORITE,
+      organizationId: buyerOrgId,
+      payload: { sellerOrgId: sellerId },
+    });
   }
 
   // ==================== TRANSACTION METHODS ====================

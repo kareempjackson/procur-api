@@ -58,6 +58,8 @@ import {
 import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { SellersService } from '../sellers/sellers.service';
 import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes, ActorTypes } from '../events/event-types';
 
 export interface AdminOrganizationSummary {
   id: string;
@@ -155,6 +157,26 @@ export interface PlatformFeesSettings {
   currency: string;
 }
 
+export interface AdminEventItem {
+  id: string;
+  eventType: string;
+  eventVersion: number;
+  aggregateType: string | null;
+  aggregateId: string | null;
+  actorId: string | null;
+  actorType: string;
+  organizationId: string | null;
+  payload: Record<string, any>;
+  metadata: Record<string, any> | null;
+  createdAt: string;
+  // Enriched data from joins
+  actorEmail: string | null;
+  actorFullname: string | null;
+  targetUserEmail: string | null;
+  targetUserFullname: string | null;
+  organizationName: string | null;
+}
+
 @Injectable()
 export class AdminService {
   constructor(
@@ -165,6 +187,7 @@ export class AdminService {
     private readonly whatsapp: WhatsappService,
     private readonly email: EmailService,
     private readonly sellersService: SellersService,
+    private readonly eventsService: EventsService,
   ) {}
 
   private get privateBucket(): string {
@@ -338,6 +361,14 @@ export class AdminService {
           `Failed to update platform fees configuration: ${error.message}`,
         );
       }
+
+      // Emit platform fees updated event
+      await this.eventsService.emit({
+        type: EventTypes.Admin.PLATFORM_FEES_UPDATED,
+        aggregateType: AggregateTypes.SETTINGS,
+        actorType: ActorTypes.USER,
+        payload: { changedFields: Object.keys(patch), ...input },
+      });
     }
 
     return this.getPlatformFeesSettings();
@@ -885,6 +916,191 @@ export class AdminService {
     };
   }
 
+  async listEvents(query: {
+    page?: number;
+    limit?: number;
+    eventType?: string;
+    aggregateType?: string;
+    aggregateId?: string;
+    actorId?: string;
+    organizationId?: string;
+    search?: string;
+    from?: string;
+    to?: string;
+  }): Promise<{
+    items: AdminEventItem[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const {
+      page = 1,
+      limit = 50,
+      eventType,
+      aggregateType,
+      aggregateId,
+      actorId,
+      organizationId,
+      search,
+      from,
+      to,
+    } = query;
+
+    const fromIdx = (page - 1) * limit;
+    const toIdx = fromIdx + limit - 1;
+
+    const client = this.supabase.getClient();
+
+    // First, get the events with pagination
+    let eventsBuilder = client
+      .from('events')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(fromIdx, toIdx);
+
+    if (eventType) {
+      eventsBuilder = eventsBuilder.ilike('event_type', `%${eventType}%`);
+    }
+    if (aggregateType) {
+      eventsBuilder = eventsBuilder.eq('aggregate_type', aggregateType);
+    }
+    if (aggregateId) {
+      eventsBuilder = eventsBuilder.eq('aggregate_id', aggregateId);
+    }
+    if (actorId) {
+      eventsBuilder = eventsBuilder.eq('actor_id', actorId);
+    }
+    if (organizationId) {
+      eventsBuilder = eventsBuilder.eq('organization_id', organizationId);
+    }
+    if (from) {
+      eventsBuilder = eventsBuilder.gte('created_at', from);
+    }
+    if (to) {
+      eventsBuilder = eventsBuilder.lte('created_at', to);
+    }
+    if (search) {
+      eventsBuilder = eventsBuilder.or(
+        [
+          `event_type.ilike.%${search}%`,
+          `aggregate_type.ilike.%${search}%`,
+        ].join(','),
+      );
+    }
+
+    const { data: events, error: eventsError, count } = await eventsBuilder;
+
+    if (eventsError) {
+      throw new BadRequestException(
+        `Failed to list events: ${eventsError.message}`,
+      );
+    }
+
+    if (!events || events.length === 0) {
+      return { items: [], total: 0, page, limit };
+    }
+
+    // Collect unique user IDs to fetch in bulk
+    const actorIds = new Set<string>();
+    const targetUserIds = new Set<string>();
+    const orgIds = new Set<string>();
+
+    for (const event of events) {
+      if (event.actor_id) actorIds.add(event.actor_id);
+      if (event.organization_id) orgIds.add(event.organization_id);
+      
+      // Check if aggregateType is 'user' - then aggregate_id is the target user
+      if (event.aggregate_type === 'user' && event.aggregate_id) {
+        targetUserIds.add(event.aggregate_id);
+      }
+      // Also check payload for target user IDs
+      const payload = event.payload as Record<string, any>;
+      if (payload?.targetUserId) targetUserIds.add(payload.targetUserId);
+      if (payload?.userId) targetUserIds.add(payload.userId);
+    }
+
+    // Fetch all users we need info for
+    const allUserIds = [...new Set([...actorIds, ...targetUserIds])];
+    const usersMap = new Map<string, { email: string; fullname: string }>();
+
+    if (allUserIds.length > 0) {
+      const { data: users } = await client
+        .from('users')
+        .select('id, email, fullname')
+        .in('id', allUserIds);
+
+      if (users) {
+        for (const user of users) {
+          usersMap.set(user.id, {
+            email: user.email,
+            fullname: user.fullname || '',
+          });
+        }
+      }
+    }
+
+    // Fetch organizations
+    const orgsMap = new Map<string, string>();
+    if (orgIds.size > 0) {
+      const { data: orgs } = await client
+        .from('organizations')
+        .select('id, name')
+        .in('id', [...orgIds]);
+
+      if (orgs) {
+        for (const org of orgs) {
+          orgsMap.set(org.id, org.name);
+        }
+      }
+    }
+
+    // Map events to response format with enriched data
+    const items: AdminEventItem[] = events.map((event: any) => {
+      const actor = event.actor_id ? usersMap.get(event.actor_id) : null;
+      const payload = event.payload as Record<string, any>;
+      
+      // Determine target user from aggregate or payload
+      let targetUserId = null;
+      if (event.aggregate_type === 'user' && event.aggregate_id) {
+        targetUserId = event.aggregate_id;
+      } else if (payload?.targetUserId) {
+        targetUserId = payload.targetUserId;
+      } else if (payload?.userId) {
+        targetUserId = payload.userId;
+      }
+      const targetUser = targetUserId ? usersMap.get(targetUserId) : null;
+
+      return {
+        id: event.id,
+        eventType: event.event_type,
+        eventVersion: event.event_version || 1,
+        aggregateType: event.aggregate_type,
+        aggregateId: event.aggregate_id,
+        actorId: event.actor_id,
+        actorType: event.actor_type || 'user',
+        organizationId: event.organization_id,
+        payload: payload || {},
+        metadata: event.metadata || null,
+        createdAt: event.created_at,
+        // Enriched data
+        actorEmail: actor?.email || null,
+        actorFullname: actor?.fullname || null,
+        targetUserEmail: targetUser?.email || null,
+        targetUserFullname: targetUser?.fullname || null,
+        organizationName: event.organization_id
+          ? orgsMap.get(event.organization_id) || null
+          : null,
+      };
+    });
+
+    return {
+      items,
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
   async updateOrganizationStatus(
     id: string,
     accountType: 'buyer' | 'seller',
@@ -907,6 +1123,21 @@ export class AdminService {
         }`,
       );
     }
+
+    // Emit organization status event
+    const eventType =
+      status === OrganizationStatus.ACTIVE
+        ? EventTypes.Organization.ACTIVATED
+        : status === OrganizationStatus.SUSPENDED
+          ? EventTypes.Organization.SUSPENDED
+          : EventTypes.Organization.VERIFIED;
+    await this.eventsService.emit({
+      type: eventType,
+      aggregateType: AggregateTypes.ORGANIZATION,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: { status, accountType },
+    });
 
     return { success: true };
   }
@@ -1034,6 +1265,15 @@ export class AdminService {
         );
       }
     }
+
+    // Emit organization deleted event
+    await this.eventsService.emit({
+      type: EventTypes.Organization.DELETED,
+      aggregateType: AggregateTypes.ORGANIZATION,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: { accountType },
+    });
 
     return { success: true };
   }
@@ -2725,6 +2965,15 @@ export class AdminService {
       }
     }
 
+    // Emit admin order status updated event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.ORDER_STATUS_UPDATED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      actorType: ActorTypes.USER,
+      payload: { previousStatus, newStatus: status },
+    });
+
     return { success: true };
   }
 
@@ -2903,6 +3152,19 @@ export class AdminService {
       }
     }
 
+    // Emit admin payment status updated event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PAYMENT_STATUS_UPDATED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      actorId: adminUserId,
+      payload: {
+        previousStatus: existing.payment_status,
+        newStatus: dto.payment_status,
+        reference: dto.reference,
+      },
+    });
+
     return { success: true };
   }
 
@@ -2945,6 +3207,15 @@ export class AdminService {
         `Failed to assign driver: ${error?.message ?? 'Unknown error'}`,
       );
     }
+
+    // Emit driver assigned event
+    await this.eventsService.emit({
+      type: EventTypes.Order.DRIVER_ASSIGNED,
+      aggregateType: AggregateTypes.ORDER,
+      aggregateId: orderId,
+      actorType: ActorTypes.USER,
+      payload: { driverId },
+    });
 
     return { success: true };
   }
@@ -3078,6 +3349,15 @@ export class AdminService {
       );
     }
 
+    // Emit admin product created event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PRODUCT_CREATED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: data.id as string,
+      actorType: ActorTypes.USER,
+      payload: { name: dto.name, category: dto.category },
+    });
+
     return {
       id: data.id as string,
       name: data.name as string,
@@ -3133,6 +3413,15 @@ export class AdminService {
       );
     }
 
+    // Emit admin product updated event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PRODUCT_UPDATED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: { changedFields: Object.keys(patch) },
+    });
+
     return {
       id: data.id as string,
       name: data.name as string,
@@ -3161,6 +3450,15 @@ export class AdminService {
         `Failed to delete admin product: ${error.message}`,
       );
     }
+
+    // Emit admin product deleted event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PRODUCT_DELETED,
+      aggregateType: AggregateTypes.PRODUCT,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: {},
+    });
 
     return { success: true };
   }
@@ -3440,6 +3738,15 @@ export class AdminService {
       );
     }
 
+    // Emit driver created event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.DRIVER_CREATED,
+      aggregateType: AggregateTypes.DRIVER,
+      aggregateId: data.id as string,
+      actorType: ActorTypes.USER,
+      payload: { email: dto.email, fullname: dto.fullname },
+    });
+
     return {
       id: data.id as string,
       email: data.email as string,
@@ -3484,6 +3791,15 @@ export class AdminService {
       );
     }
 
+    // Emit driver updated event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.DRIVER_UPDATED,
+      aggregateType: AggregateTypes.DRIVER,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: { changedFields: Object.keys(patch) },
+    });
+
     return {
       id: data.id as string,
       email: data.email as string,
@@ -3516,6 +3832,15 @@ export class AdminService {
     // in the Supabase Authentication user list. Failures here should not block
     // the primary soft-delete behaviour.
     await this.supabase.deleteAuthUser(id);
+
+    // Emit driver deleted event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.DRIVER_DELETED,
+      aggregateType: AggregateTypes.DRIVER,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: {},
+    });
 
     return { success: true };
   }
@@ -3594,6 +3919,15 @@ export class AdminService {
       );
     }
 
+    // Emit admin user created event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.USER_CREATED,
+      aggregateType: AggregateTypes.ADMIN,
+      aggregateId: data.id as string,
+      actorType: ActorTypes.USER,
+      payload: { email: dto.email, role: dto.role },
+    });
+
     return {
       id: data.id as string,
       email: data.email as string,
@@ -3655,6 +3989,15 @@ export class AdminService {
         }`,
       );
     }
+
+    // Emit admin user updated event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.USER_UPDATED,
+      aggregateType: AggregateTypes.ADMIN,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: { changedFields: Object.keys(patch) },
+    });
 
     return {
       id: data.id as string,
@@ -3855,6 +4198,15 @@ export class AdminService {
     // Best-effort removal from Supabase Auth so the admin no longer appears
     // in the Supabase Authentication user list.
     await this.supabase.deleteAuthUser(id);
+
+    // Emit admin user deleted event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.USER_DELETED,
+      aggregateType: AggregateTypes.ADMIN,
+      aggregateId: id,
+      actorType: ActorTypes.USER,
+      payload: {},
+    });
 
     return { success: true };
   }
@@ -4905,6 +5257,16 @@ Login here: ${loginUrl}
       throw new BadRequestException(`Failed to approve request: ${updateError.message}`);
     }
 
+    // Emit payout approved event
+    await this.eventsService.emit({
+      type: EventTypes.Payout.APPROVED,
+      aggregateType: AggregateTypes.PAYOUT,
+      aggregateId: requestId,
+      actorId: adminUserId,
+      organizationId: request.seller_org_id,
+      payload: { amountCents: request.amount_cents },
+    });
+
     return { success: true, message: 'Payout request approved' };
   }
 
@@ -4947,6 +5309,15 @@ Login here: ${loginUrl}
     if (updateError) {
       throw new BadRequestException(`Failed to reject request: ${updateError.message}`);
     }
+
+    // Emit payout rejected event
+    await this.eventsService.emit({
+      type: EventTypes.Payout.REJECTED,
+      aggregateType: AggregateTypes.PAYOUT,
+      aggregateId: requestId,
+      actorId: adminUserId,
+      payload: { reason: dto.rejection_reason },
+    });
 
     return { success: true, message: 'Payout request rejected' };
   }
@@ -5018,6 +5389,16 @@ Login here: ${loginUrl}
         updated_at: nowIso,
       })
       .eq('seller_org_id', request.seller_org_id);
+
+    // Emit payout completed event
+    await this.eventsService.emit({
+      type: EventTypes.Payout.COMPLETED,
+      aggregateType: AggregateTypes.PAYOUT,
+      aggregateId: requestId,
+      actorId: adminUserId,
+      organizationId: request.seller_org_id,
+      payload: { amountCents, currency: request.currency },
+    });
 
     return { success: true, message: 'Payout completed successfully' };
   }

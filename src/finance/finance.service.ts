@@ -1,9 +1,14 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { SupabaseService } from '../database/supabase.service';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes, ActorTypes } from '../events/event-types';
 
 @Injectable()
 export class FinanceService {
-  constructor(private readonly db: SupabaseService) {}
+  constructor(
+    private readonly db: SupabaseService,
+    private readonly eventsService: EventsService,
+  ) {}
 
   async createPayoutBatch(minAmountCents: number = 10000) {
     // Enforce minimum $100 (10000 cents) - sellers cannot get payouts under $100

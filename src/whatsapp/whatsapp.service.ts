@@ -20,6 +20,8 @@ import { TemplateService } from './templates/template.service';
 import IORedis from 'ioredis';
 import { WaQueue } from './wa.queue';
 import * as crypto from 'crypto';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes, ActorTypes } from '../events/event-types';
 
 @Injectable()
 export class WhatsappService {
@@ -47,6 +49,7 @@ export class WhatsappService {
     private readonly waQueue: WaQueue,
     private readonly sendSvc: SendService,
     private readonly tmplSvc: TemplateService,
+    private readonly eventsService: EventsService,
   ) {
     // Read from env first, then from nested config
     this.phoneNumberId =
@@ -120,6 +123,14 @@ export class WhatsappService {
     await this.audit('admin_start_bot', {
       user_id: userId,
       from_e164: phoneE164,
+    });
+
+    // Emit WhatsApp bot started event
+    await this.eventsService.emit({
+      type: EventTypes.WhatsApp.BOT_STARTED,
+      aggregateType: AggregateTypes.WHATSAPP,
+      actorType: ActorTypes.SYSTEM,
+      payload: { userId, phone: phoneE164 },
     });
   }
 
@@ -267,6 +278,16 @@ export class WhatsappService {
       from_e164: `+${from}`,
       type,
       user_id: userId || null,
+    });
+
+    // Emit WhatsApp message received event
+    await this.eventsService.emit({
+      type: EventTypes.WhatsApp.MESSAGE_RECEIVED,
+      aggregateType: AggregateTypes.WHATSAPP,
+      aggregateId: messageId,
+      actorId: userId,
+      actorType: userId ? ActorTypes.USER : ActorTypes.EXTERNAL,
+      payload: { phone: `+${from}`, messageType: type },
     });
 
     // Frictionless identify: hydrate session by phone number if not set

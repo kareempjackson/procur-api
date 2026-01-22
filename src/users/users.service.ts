@@ -17,6 +17,8 @@ import {
   HeaderImageUploadUrlResponseDto,
 } from './dto/header-image-upload.dto';
 import { EmailService } from '../email/email.service';
+import { EventsService } from '../events/events.service';
+import { EventTypes, AggregateTypes } from '../events/event-types';
 
 @Injectable()
 export class UsersService {
@@ -26,6 +28,7 @@ export class UsersService {
     private readonly supabase: SupabaseService,
     private readonly configService: ConfigService,
     private readonly emailService: EmailService,
+    private readonly eventsService: EventsService,
   ) {
     this.privateBucket =
       this.configService.get<string>('storage.privateBucket') || 'private';
@@ -191,6 +194,19 @@ export class UsersService {
         orgUpdates,
       );
     }
+
+    // Emit profile updated event
+    await this.eventsService.emit({
+      type: EventTypes.User.PROFILE_UPDATED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: user.id,
+      actorId: user.id,
+      organizationId: user.organizationId,
+      payload: {
+        changedUserFields: Object.keys(userUpdates),
+        changedOrgFields: Object.keys(orgUpdates),
+      },
+    });
 
     return { message: 'Profile updated', ...results };
   }
@@ -449,6 +465,15 @@ export class UsersService {
       token,
     );
 
+    // Emit invitation sent event
+    await this.eventsService.emit({
+      type: EventTypes.Auth.INVITATION_SENT,
+      aggregateType: AggregateTypes.USER,
+      actorId: user.id,
+      organizationId: user.organizationId,
+      payload: { email, roleId, organizationName },
+    });
+
     return { success: true };
   }
 
@@ -514,6 +539,15 @@ export class UsersService {
       );
     }
 
+    // Emit invitation cancelled event
+    await this.eventsService.emit({
+      type: EventTypes.Auth.INVITATION_CANCELLED,
+      aggregateType: AggregateTypes.USER,
+      actorId: user.id,
+      organizationId: user.organizationId,
+      payload: { invitationId },
+    });
+
     return { success: true };
   }
 
@@ -561,6 +595,16 @@ export class UsersService {
         `Failed to remove team member: ${updateError.message}`,
       );
     }
+
+    // Emit user removed from org event
+    await this.eventsService.emit({
+      type: EventTypes.User.REMOVED_FROM_ORG,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: membership.user_id,
+      actorId: user.id,
+      organizationId: user.organizationId,
+      payload: { removedUserId: membership.user_id, orgUserId },
+    });
 
     return { success: true };
   }

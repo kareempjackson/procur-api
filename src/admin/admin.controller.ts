@@ -28,6 +28,7 @@ import type {
   AdminDashboardSummary,
   AdminDashboardCharts,
   AdminAuditLogItem,
+  AdminEventItem,
 } from './admin.service';
 import { AdminOrgQueryDto } from './dto/admin-org-query.dto';
 import { AdminOrderQueryDto } from './dto/admin-order-query.dto';
@@ -67,6 +68,7 @@ import {
 } from './dto/admin-user.dto';
 import { UpdateAdminOrganizationStatusDto } from './dto/admin-org-status.dto';
 import { AdminAuditLogQueryDto } from './dto/admin-audit.dto';
+import { AdminEventsQueryDto } from './dto/admin-events.dto';
 import {
   UpdateFarmVerificationDto,
   UpdateFarmersIdVerificationDto,
@@ -1040,6 +1042,28 @@ export class AdminController {
     limit: number;
   }> {
     return this.adminService.listAuditLogs(query);
+  }
+
+  // ===== Events (Domain Events) =====
+
+  @Get('events')
+  @ApiOperation({
+    summary: 'List domain events',
+    description:
+      'Paginated list of domain events with actor and target information. Shows which admin made changes and to what user/entity.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Events retrieved successfully',
+    type: Object,
+  })
+  async listEvents(@Query() query: AdminEventsQueryDto): Promise<{
+    items: AdminEventItem[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    return this.adminService.listEvents(query);
   }
 
   // ===== Organization status (verification) =====
