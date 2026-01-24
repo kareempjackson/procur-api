@@ -8,6 +8,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { IsBoolean } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { UserRole } from '../../common/enums/user-role.enum';
 
 export class AdminUserResponseDto {
@@ -39,6 +40,7 @@ export class AdminUserResponseDto {
 export class CreateAdminUserDto {
   @ApiProperty()
   @IsEmail()
+  @Transform(({ value }) => value?.toLowerCase().trim())
   email: string;
 
   @ApiProperty()
@@ -71,6 +73,7 @@ export class UpdateAdminUserDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsEmail()
+  @Transform(({ value }) => value?.toLowerCase().trim())
   email?: string;
 
   @ApiPropertyOptional()

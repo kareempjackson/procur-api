@@ -7,6 +7,7 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class AdminDriverResponseDto {
   @ApiProperty()
@@ -42,6 +43,7 @@ export class AdminDriverResponseDto {
 export class CreateDriverDto {
   @ApiProperty()
   @IsEmail()
+  @Transform(({ value }) => value?.toLowerCase().trim())
   email: string;
 
   @ApiProperty()

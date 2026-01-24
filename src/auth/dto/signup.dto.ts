@@ -9,6 +9,7 @@ import {
   ValidateIf,
   Matches,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { AccountType } from '../../common/enums/account-type.enum';
 import { BuyerBusinessType } from '../../common/enums/buyer-business-type.enum';
 import { SellerBusinessType } from '../../common/enums/seller-business-type.enum';
@@ -20,6 +21,7 @@ export class SignupDto {
     description: 'User email address',
   })
   @IsEmail()
+  @Transform(({ value }) => value?.toLowerCase().trim())
   email: string;
 
   @ApiProperty({
