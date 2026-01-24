@@ -1243,7 +1243,46 @@ export class AdminController {
     return this.adminService.deleteAdminUser(id);
   }
 
-  // ===== User WhatsApp management (admin-triggered) =====
+  // ===== Organization Member User management (admin-triggered) =====
+
+  @Patch('users/:id')
+  @ApiOperation({
+    summary: 'Update organization member user profile',
+    description:
+      'Update an organization member user profile (fullname, email, password, active status). For buyer/seller team members.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        fullname: { type: 'string' },
+        email: { type: 'string', format: 'email' },
+        password: { type: 'string', minLength: 8 },
+        isActive: { type: 'boolean' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'User profile updated successfully',
+  })
+  async updateOrganizationMemberUser(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      fullname?: string;
+      email?: string;
+      password?: string;
+      isActive?: boolean;
+    },
+  ): Promise<{
+    id: string;
+    email: string;
+    fullname: string;
+    isActive: boolean;
+  }> {
+    return this.adminService.updateOrganizationMemberUser(id, body);
+  }
 
   @Patch('users/:id/phone')
   @ApiOperation({

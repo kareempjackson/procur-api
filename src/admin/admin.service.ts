@@ -4211,6 +4211,77 @@ export class AdminService {
     return { success: true };
   }
 
+  // ===== Organization Member User Updates (admin-triggered) =====
+
+  /**
+   * Update an organization member user's profile (fullname, email, password, active status).
+   * This is for buyer/seller team members, not platform admin users.
+   */
+  async updateOrganizationMemberUser(
+    userId: string,
+    dto: {
+      fullname?: string;
+      email?: string;
+      password?: string;
+      isActive?: boolean;
+    },
+  ): Promise<{
+    id: string;
+    email: string;
+    fullname: string;
+    isActive: boolean;
+  }> {
+    const client = this.supabase.getClient();
+
+    const patch: Record<string, unknown> = {};
+
+    if (dto.email !== undefined) patch.email = dto.email.toLowerCase().trim();
+    if (dto.fullname !== undefined) patch.fullname = dto.fullname;
+    if (dto.isActive !== undefined) patch.is_active = dto.isActive;
+
+    if (dto.password !== undefined && dto.password.length >= 8) {
+      const saltRounds = 12;
+      patch.password = await bcrypt.hash(dto.password, saltRounds);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+
+    const { data, error } = await client
+      .from('users')
+      .update(patch)
+      .eq('id', userId)
+      .select('id, email, fullname, is_active')
+      .single();
+
+    if (error || !data) {
+      const pgCode = (error as any)?.code as string | undefined;
+      if (pgCode === '23505') {
+        throw new BadRequestException('A user with this email already exists');
+      }
+      throw new BadRequestException(
+        `Failed to update user: ${(error as any)?.message ?? 'Unknown error'}`,
+      );
+    }
+
+    // Emit event
+    await this.eventsService.emit({
+      type: EventTypes.Admin.USER_UPDATED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: userId,
+      actorType: ActorTypes.USER,
+      payload: { changedFields: Object.keys(patch) },
+    });
+
+    return {
+      id: data.id as string,
+      email: data.email as string,
+      fullname: data.fullname as string,
+      isActive: data.is_active as boolean,
+    };
+  }
+
   // ===== User WhatsApp helpers (admin-triggered) =====
 
   /**
