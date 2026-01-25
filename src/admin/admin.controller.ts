@@ -87,6 +87,7 @@ import {
 } from '../sellers/dto';
 import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
+import { AdminUpdateOrderDto } from './dto/admin-order-update.dto';
 import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 
 @ApiTags('Admin')
@@ -641,6 +642,25 @@ export class AdminController {
         quantity: i.quantity,
       })),
     });
+  }
+
+  @Patch('orders/:id/items')
+  @ApiOperation({
+    summary: 'Update order items (admin)',
+    description:
+      'Update order items on behalf of a buyer. Add new items, update quantities, or remove items. Only allowed for pending or accepted orders.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Order updated successfully',
+  })
+  async updateOrderItems(
+    @Param('id') id: string,
+    @Body() dto: AdminUpdateOrderDto,
+    @CurrentUser() user: UserContext,
+  ): Promise<{ success: boolean; order: any }> {
+    return this.adminService.updateOrderItems(id, dto, user.id);
   }
 
   // ===== Payments (direct-deposit clearing) =====

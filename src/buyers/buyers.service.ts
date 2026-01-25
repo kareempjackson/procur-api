@@ -50,6 +50,7 @@ import {
   OrderReviewDto,
   OrderTimelineEventDto,
   OrderSummaryDto,
+  UpdateOrderDto,
 
   // Profile DTOs
   CreateAddressDto,
@@ -2961,6 +2962,317 @@ Manage this order: ${link}`;
     );
 
     return { checkout_group_id: checkoutGroupId, orders: transformedOrders };
+  }
+
+  /**
+   * Update an existing order (add/remove items, change quantities).
+   * Only allowed for orders in pending or accepted status.
+   */
+  async updateOrder(
+    buyerOrgId: string,
+    buyerUserId: string,
+    orderId: string,
+    updateDto: UpdateOrderDto,
+  ): Promise<BuyerOrderResponseDto> {
+    const client = this.supabase.getClient();
+
+    // Fetch the order to validate ownership and status
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select('*, seller_organization:organizations!seller_org_id(name)')
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    // Only allow updates for pending or accepted orders
+    const allowedStatuses = ['pending', 'accepted'];
+    if (!allowedStatuses.includes(order.status)) {
+      throw new BadRequestException(
+        `Order cannot be updated. Current status: ${order.status}. Updates only allowed for pending or accepted orders.`,
+      );
+    }
+
+    // Track changes for timeline
+    const changes: string[] = [];
+
+    // Handle item updates
+    if (updateDto.items && updateDto.items.length > 0) {
+      // Get current order items
+      const { data: currentItems } = await client
+        .from('order_items')
+        .select('*')
+        .eq('order_id', orderId);
+
+      const existingItemsMap = new Map(
+        (currentItems || []).map((item: any) => [item.id, item]),
+      );
+
+      let newSubtotal = 0;
+
+      for (const itemUpdate of updateDto.items) {
+        if (itemUpdate.id) {
+          // Update existing item
+          const existingItem = existingItemsMap.get(itemUpdate.id);
+          if (!existingItem) {
+            throw new NotFoundException(`Order item ${itemUpdate.id} not found`);
+          }
+
+          if (itemUpdate.quantity === 0) {
+            // Remove item
+            const { error: deleteError } = await client
+              .from('order_items')
+              .delete()
+              .eq('id', itemUpdate.id);
+
+            if (deleteError) {
+              throw new BadRequestException(
+                `Failed to remove item: ${deleteError.message}`,
+              );
+            }
+
+            // Restore stock if product exists
+            if (existingItem.product_id) {
+              const { data: product } = await client
+                .from('products')
+                .select('stock_quantity')
+                .eq('id', existingItem.product_id)
+                .single();
+
+              if (product) {
+                await client
+                  .from('products')
+                  .update({
+                    stock_quantity: product.stock_quantity + existingItem.quantity,
+                  })
+                  .eq('id', existingItem.product_id);
+              }
+            }
+
+            changes.push(`Removed ${existingItem.product_name} (qty: ${existingItem.quantity})`);
+            existingItemsMap.delete(itemUpdate.id);
+          } else {
+            // Update quantity
+            const unitPrice = itemUpdate.unit_price ?? existingItem.unit_price;
+            const newTotalPrice = unitPrice * itemUpdate.quantity;
+            const quantityDiff = itemUpdate.quantity - existingItem.quantity;
+
+            const { error: updateError } = await client
+              .from('order_items')
+              .update({
+                quantity: itemUpdate.quantity,
+                unit_price: unitPrice,
+                total_price: newTotalPrice,
+              })
+              .eq('id', itemUpdate.id);
+
+            if (updateError) {
+              throw new BadRequestException(
+                `Failed to update item: ${updateError.message}`,
+              );
+            }
+
+            // Adjust stock if product exists
+            if (existingItem.product_id && quantityDiff !== 0) {
+              const { data: product } = await client
+                .from('products')
+                .select('stock_quantity')
+                .eq('id', existingItem.product_id)
+                .single();
+
+              if (product) {
+                await client
+                  .from('products')
+                  .update({
+                    stock_quantity: product.stock_quantity - quantityDiff,
+                  })
+                  .eq('id', existingItem.product_id);
+              }
+            }
+
+            changes.push(
+              `Updated ${existingItem.product_name}: qty ${existingItem.quantity} → ${itemUpdate.quantity}`,
+            );
+            existingItemsMap.set(itemUpdate.id, {
+              ...existingItem,
+              quantity: itemUpdate.quantity,
+              unit_price: unitPrice,
+              total_price: newTotalPrice,
+            });
+          }
+        } else if (itemUpdate.product_id || itemUpdate.product_name) {
+          // Add new item
+          let productName = itemUpdate.product_name || 'Custom item';
+          let productSku: string | null = null;
+          let unitPrice = itemUpdate.unit_price || 0;
+          let productSnapshot: any = null;
+
+          if (itemUpdate.product_id) {
+            // Validate product exists and is from the same seller
+            const { data: product } = await client
+              .from('products')
+              .select('*, product_images(image_url, is_primary)')
+              .eq('id', itemUpdate.product_id)
+              .eq('seller_org_id', order.seller_org_id)
+              .eq('status', 'active')
+              .single();
+
+            if (!product) {
+              throw new BadRequestException(
+                `Product ${itemUpdate.product_id} not found or not available from this seller`,
+              );
+            }
+
+            if (product.stock_quantity < itemUpdate.quantity) {
+              throw new BadRequestException(
+                `Insufficient stock for product ${product.name}`,
+              );
+            }
+
+            productName = product.name;
+            productSku = product.sku;
+            unitPrice = itemUpdate.unit_price ?? (product.sale_price || product.base_price);
+            productSnapshot = product;
+
+            // Reduce stock
+            await client
+              .from('products')
+              .update({
+                stock_quantity: product.stock_quantity - itemUpdate.quantity,
+              })
+              .eq('id', itemUpdate.product_id);
+          }
+
+          const totalPrice = unitPrice * itemUpdate.quantity;
+
+          const { error: insertError } = await client.from('order_items').insert({
+            order_id: orderId,
+            product_id: itemUpdate.product_id || null,
+            product_name: productName,
+            product_sku: productSku,
+            unit_price: unitPrice,
+            quantity: itemUpdate.quantity,
+            total_price: totalPrice,
+            product_snapshot: productSnapshot,
+          });
+
+          if (insertError) {
+            throw new BadRequestException(
+              `Failed to add item: ${insertError.message}`,
+            );
+          }
+
+          changes.push(`Added ${productName} (qty: ${itemUpdate.quantity})`);
+        }
+      }
+
+      // Recalculate order totals from remaining items
+      const { data: updatedItems } = await client
+        .from('order_items')
+        .select('*')
+        .eq('order_id', orderId);
+
+      newSubtotal = (updatedItems || []).reduce(
+        (sum: number, item: any) => sum + Number(item.total_price || 0),
+        0,
+      );
+
+      // Recalculate total with existing shipping/tax/discount
+      const feesConfig = await this.getPlatformFeesConfig();
+      const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
+      const platformFeeAmount = Number(
+        ((newSubtotal * platformFeePercent) / 100).toFixed(2),
+      );
+
+      const newTotal =
+        newSubtotal +
+        Number(order.shipping_amount || 0) +
+        Number(order.tax_amount || 0) -
+        Number(order.discount_amount || 0) +
+        platformFeeAmount;
+
+      // Update order totals
+      const { error: updateOrderError } = await client
+        .from('orders')
+        .update({
+          subtotal: newSubtotal,
+          total_amount: newTotal,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+
+      if (updateOrderError) {
+        throw new BadRequestException(
+          `Failed to update order totals: ${updateOrderError.message}`,
+        );
+      }
+    }
+
+    // Update buyer notes if provided
+    if (updateDto.buyer_notes !== undefined) {
+      const { error } = await client
+        .from('orders')
+        .update({
+          buyer_notes: updateDto.buyer_notes,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+
+      if (error) {
+        throw new BadRequestException(`Failed to update notes: ${error.message}`);
+      }
+      changes.push('Updated buyer notes');
+    }
+
+    // Update delivery date if provided
+    if (updateDto.preferred_delivery_date !== undefined) {
+      const { error } = await client
+        .from('orders')
+        .update({
+          estimated_delivery_date: updateDto.preferred_delivery_date,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update delivery date: ${error.message}`,
+        );
+      }
+      changes.push('Updated preferred delivery date');
+    }
+
+    // Create timeline entry
+    if (changes.length > 0) {
+      await client.from('order_timeline').insert({
+        order_id: orderId,
+        event_type: 'order_updated',
+        title: 'Order updated',
+        description: updateDto.update_reason || `Changes: ${changes.join('; ')}`,
+        metadata: { changes, updated_by: buyerUserId },
+        created_by: buyerUserId,
+      });
+
+      // Emit order updated event
+      await this.eventsService.emit({
+        type: EventTypes.Order.UPDATED || 'order.updated',
+        aggregateType: AggregateTypes.ORDER,
+        aggregateId: orderId,
+        actorId: buyerUserId,
+        organizationId: buyerOrgId,
+        payload: {
+          orderNumber: order.order_number,
+          changes,
+          updateReason: updateDto.update_reason,
+        },
+      });
+    }
+
+    // Return updated order
+    return this.getOrderById(buyerOrgId, orderId);
   }
 
   /**

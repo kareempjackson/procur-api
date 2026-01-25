@@ -69,6 +69,7 @@ import {
   OrderReviewDto,
   OrderTimelineEventDto,
   OrderSummaryDto,
+  UpdateOrderDto,
 
   // Profile DTOs
   CreateAddressDto,
@@ -759,6 +760,36 @@ export class BuyersController {
   ): Promise<BuyerOrderResponseDto> {
     // TODO: Implement cancelOrder in service
     throw new Error('Not implemented');
+  }
+
+  @Patch('orders/:id')
+  @RequirePermissions('place_orders')
+  @ApiOperation({
+    summary: 'Update Order',
+    description:
+      'Update an existing order (add/remove items, change quantities). Only allowed for orders in pending or accepted status.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Order updated successfully',
+    type: BuyerOrderResponseDto,
+  })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  @ApiBadRequestResponse({
+    description: 'Order cannot be updated (already processing/shipped/delivered)',
+  })
+  async updateOrder(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Body() updateDto: UpdateOrderDto,
+  ): Promise<BuyerOrderResponseDto> {
+    return this.buyersService.updateOrder(
+      user.organizationId!,
+      user.id,
+      orderId,
+      updateDto,
+    );
   }
 
   @Get('orders/:id/timeline')

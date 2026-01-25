@@ -91,6 +91,7 @@ export const CartEventTypes = {
 // ============================================================================
 export const OrderEventTypes = {
   CREATED: 'order.created',
+  UPDATED: 'order.updated',
   ACCEPTED: 'order.accepted',
   REJECTED: 'order.rejected',
   PROCESSING: 'order.processing',
@@ -327,6 +328,7 @@ export type AggregateType = ValueOf<typeof AggregateTypes>;
 // Actor types
 export const ActorTypes = {
   USER: 'user',
+  ADMIN: 'admin',
   SYSTEM: 'system',
   WEBHOOK: 'webhook',
   CRON: 'cron',

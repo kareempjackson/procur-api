@@ -2881,6 +2881,312 @@ export class AdminService {
     };
   }
 
+  /**
+   * Update order items on behalf of a buyer (admin action).
+   * Allows adding, updating, or removing items from an order.
+   */
+  async updateOrderItems(
+    orderId: string,
+    dto: {
+      items?: {
+        id?: string;
+        product_id?: string;
+        product_name?: string;
+        product_sku?: string;
+        quantity: number;
+        unit_price?: number;
+      }[];
+      buyer_notes?: string;
+      seller_notes?: string;
+      internal_notes?: string;
+      preferred_delivery_date?: string;
+      shipping_amount?: number;
+      discount_amount?: number;
+      update_reason?: string;
+    },
+    adminUserId: string,
+  ): Promise<{ success: boolean; order: any }> {
+    const client = this.supabase.getClient();
+
+    // Fetch the order
+    const { data: order, error: orderError } = await client
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .single();
+
+    if (orderError || !order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    // Only allow updates for pending or accepted orders
+    const allowedStatuses = ['pending', 'accepted'];
+    if (!allowedStatuses.includes(order.status as string)) {
+      throw new BadRequestException(
+        `Order cannot be updated. Current status: ${order.status}. Updates only allowed for pending or accepted orders.`,
+      );
+    }
+
+    const changes: string[] = [];
+
+    // Handle item updates
+    if (dto.items && dto.items.length > 0) {
+      // Get current order items
+      const { data: currentItems } = await client
+        .from('order_items')
+        .select('*')
+        .eq('order_id', orderId);
+
+      const existingItemsMap = new Map(
+        (currentItems || []).map((item: any) => [item.id, item]),
+      );
+
+      for (const itemUpdate of dto.items) {
+        if (itemUpdate.id) {
+          // Update existing item
+          const existingItem = existingItemsMap.get(itemUpdate.id);
+          if (!existingItem) {
+            throw new NotFoundException(`Order item ${itemUpdate.id} not found`);
+          }
+
+          if (itemUpdate.quantity === 0) {
+            // Remove item
+            const { error: deleteError } = await client
+              .from('order_items')
+              .delete()
+              .eq('id', itemUpdate.id);
+
+            if (deleteError) {
+              throw new BadRequestException(
+                `Failed to remove item: ${deleteError.message}`,
+              );
+            }
+
+            // Restore stock if product exists
+            if (existingItem.product_id) {
+              const { data: product } = await client
+                .from('products')
+                .select('stock_quantity')
+                .eq('id', existingItem.product_id)
+                .single();
+
+              if (product) {
+                await client
+                  .from('products')
+                  .update({
+                    stock_quantity: (product.stock_quantity as number) + (existingItem.quantity as number),
+                  })
+                  .eq('id', existingItem.product_id);
+              }
+            }
+
+            changes.push(
+              `Removed ${existingItem.product_name} (qty: ${existingItem.quantity})`,
+            );
+            existingItemsMap.delete(itemUpdate.id);
+          } else {
+            // Update quantity/price
+            const unitPrice = itemUpdate.unit_price ?? existingItem.unit_price;
+            const newTotalPrice = (unitPrice as number) * itemUpdate.quantity;
+            const quantityDiff = itemUpdate.quantity - (existingItem.quantity as number);
+
+            const { error: updateError } = await client
+              .from('order_items')
+              .update({
+                quantity: itemUpdate.quantity,
+                unit_price: unitPrice,
+                total_price: newTotalPrice,
+              })
+              .eq('id', itemUpdate.id);
+
+            if (updateError) {
+              throw new BadRequestException(
+                `Failed to update item: ${updateError.message}`,
+              );
+            }
+
+            // Adjust stock if product exists
+            if (existingItem.product_id && quantityDiff !== 0) {
+              const { data: product } = await client
+                .from('products')
+                .select('stock_quantity')
+                .eq('id', existingItem.product_id)
+                .single();
+
+              if (product) {
+                await client
+                  .from('products')
+                  .update({
+                    stock_quantity: (product.stock_quantity as number) - quantityDiff,
+                  })
+                  .eq('id', existingItem.product_id);
+              }
+            }
+
+            changes.push(
+              `Updated ${existingItem.product_name}: qty ${existingItem.quantity} → ${itemUpdate.quantity}`,
+            );
+          }
+        } else if (itemUpdate.product_id || itemUpdate.product_name) {
+          // Add new item
+          let productName = itemUpdate.product_name || 'Custom item';
+          let productSku = itemUpdate.product_sku || null;
+          let unitPrice = itemUpdate.unit_price || 0;
+          let productSnapshot: any = null;
+
+          if (itemUpdate.product_id) {
+            // Validate product exists and is from the same seller
+            const { data: product } = await client
+              .from('products')
+              .select('*')
+              .eq('id', itemUpdate.product_id)
+              .eq('seller_org_id', order.seller_org_id)
+              .single();
+
+            if (!product) {
+              throw new BadRequestException(
+                `Product ${itemUpdate.product_id} not found or not available from this seller`,
+              );
+            }
+
+            if ((product.stock_quantity as number) < itemUpdate.quantity) {
+              throw new BadRequestException(
+                `Insufficient stock for product ${product.name}`,
+              );
+            }
+
+            productName = product.name as string;
+            productSku = (product.sku as string) || null;
+            unitPrice =
+              itemUpdate.unit_price ??
+              ((product.sale_price as number) || (product.base_price as number));
+            productSnapshot = product;
+
+            // Reduce stock
+            await client
+              .from('products')
+              .update({
+                stock_quantity: (product.stock_quantity as number) - itemUpdate.quantity,
+              })
+              .eq('id', itemUpdate.product_id);
+          }
+
+          const totalPrice = unitPrice * itemUpdate.quantity;
+
+          const { error: insertError } = await client.from('order_items').insert({
+            order_id: orderId,
+            product_id: itemUpdate.product_id || null,
+            product_name: productName,
+            product_sku: productSku,
+            unit_price: unitPrice,
+            quantity: itemUpdate.quantity,
+            total_price: totalPrice,
+            product_snapshot: productSnapshot,
+          });
+
+          if (insertError) {
+            throw new BadRequestException(
+              `Failed to add item: ${insertError.message}`,
+            );
+          }
+
+          changes.push(`Added ${productName} (qty: ${itemUpdate.quantity})`);
+        }
+      }
+
+      // Recalculate order totals
+      const { data: updatedItems } = await client
+        .from('order_items')
+        .select('*')
+        .eq('order_id', orderId);
+
+      const newSubtotal = (updatedItems || []).reduce(
+        (sum: number, item: any) => sum + Number(item.total_price || 0),
+        0,
+      );
+
+      const shippingAmount =
+        dto.shipping_amount ?? Number(order.shipping_amount || 0);
+      const discountAmount =
+        dto.discount_amount ?? Number(order.discount_amount || 0);
+      const taxAmount = Number(order.tax_amount || 0);
+      const newTotal =
+        newSubtotal + shippingAmount + taxAmount - discountAmount;
+
+      // Update order totals
+      await client
+        .from('orders')
+        .update({
+          subtotal: newSubtotal,
+          total_amount: newTotal,
+          shipping_amount: shippingAmount,
+          discount_amount: discountAmount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+    }
+
+    // Update notes if provided
+    const notesUpdate: any = {};
+    if (dto.buyer_notes !== undefined) {
+      notesUpdate.buyer_notes = dto.buyer_notes;
+      changes.push('Updated buyer notes');
+    }
+    if (dto.seller_notes !== undefined) {
+      notesUpdate.seller_notes = dto.seller_notes;
+      changes.push('Updated seller notes');
+    }
+    if (dto.internal_notes !== undefined) {
+      notesUpdate.internal_notes = dto.internal_notes;
+      changes.push('Updated internal notes');
+    }
+    if (dto.preferred_delivery_date !== undefined) {
+      notesUpdate.estimated_delivery_date = dto.preferred_delivery_date;
+      changes.push('Updated delivery date');
+    }
+
+    if (Object.keys(notesUpdate).length > 0) {
+      notesUpdate.updated_at = new Date().toISOString();
+      await client.from('orders').update(notesUpdate).eq('id', orderId);
+    }
+
+    // Create timeline entry
+    if (changes.length > 0) {
+      await client.from('order_timeline').insert({
+        order_id: orderId,
+        event_type: 'order_updated_by_admin',
+        title: 'Order updated by admin',
+        description: dto.update_reason || `Changes: ${changes.join('; ')}`,
+        metadata: { changes, updated_by: adminUserId, is_admin_action: true },
+        created_by: adminUserId,
+      });
+
+      // Emit order updated event
+      await this.eventsService.emit({
+        type: EventTypes.Order.UPDATED || 'order.updated',
+        aggregateType: AggregateTypes.ORDER,
+        aggregateId: orderId,
+        actorId: adminUserId,
+        actorType: ActorTypes.ADMIN,
+        organizationId: order.buyer_org_id as string,
+        payload: {
+          orderNumber: order.order_number,
+          changes,
+          updateReason: dto.update_reason,
+          isAdminAction: true,
+        },
+      });
+    }
+
+    // Return updated order detail
+    const updatedOrder = await this.getOrderDetail(orderId);
+
+    return {
+      success: true,
+      order: updatedOrder,
+    };
+  }
+
   async updateOrderStatus(
     orderId: string,
     status: string,

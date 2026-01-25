@@ -386,3 +386,61 @@ export class OrderSummaryDto {
   @ApiProperty({ description: 'Amount spent this month' })
   spent_this_month: number;
 }
+
+// ==================== ORDER UPDATE DTOs ====================
+
+export class UpdateOrderItemDto {
+  @ApiPropertyOptional({ description: 'Existing order item ID (for updates/removals)' })
+  @IsOptional()
+  @IsUUID()
+  id?: string;
+
+  @ApiPropertyOptional({ description: 'Product ID (required for new items)' })
+  @IsOptional()
+  @IsUUID()
+  product_id?: string;
+
+  @ApiPropertyOptional({ description: 'Product name (for offline/custom items)' })
+  @IsOptional()
+  @IsString()
+  product_name?: string;
+
+  @ApiProperty({ description: 'Quantity (set to 0 to remove item)' })
+  @IsNumber()
+  @Min(0)
+  quantity: number;
+
+  @ApiPropertyOptional({ description: 'Unit price override' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  unit_price?: number;
+}
+
+export class UpdateOrderDto {
+  @ApiPropertyOptional({
+    description: 'Updated order items. Include id to update existing, omit id to add new. Set quantity=0 to remove.',
+    type: [UpdateOrderItemDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => UpdateOrderItemDto)
+  items?: UpdateOrderItemDto[];
+
+  @ApiPropertyOptional({ description: 'Updated buyer notes' })
+  @IsOptional()
+  @IsString()
+  buyer_notes?: string;
+
+  @ApiPropertyOptional({ description: 'Updated preferred delivery date (YYYY-MM-DD)' })
+  @IsOptional()
+  @IsString()
+  preferred_delivery_date?: string;
+
+  @ApiPropertyOptional({ description: 'Reason for update (for audit trail)' })
+  @IsOptional()
+  @IsString()
+  @Length(1, 500)
+  update_reason?: string;
+}
