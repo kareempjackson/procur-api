@@ -81,6 +81,9 @@ export interface AdminOrganizationSummary {
   farmersIdVerified: boolean;
   farmVerified: boolean;
   isHiddenFromMarketplace: boolean;
+  currentOrders: number;
+  completedOrders: number;
+  totalOrders: number;
 }
 
 export interface AdminBuyerMemberSummary {
@@ -510,6 +513,37 @@ export class AdminService {
       );
     }
 
+    // Fetch order counts for all organizations in a single query with status
+    const orgIds = data ? data.map((org: any) => org.id) : [];
+    const currentOrdersMap = new Map<string, number>();
+    const completedOrdersMap = new Map<string, number>();
+    
+    // Define which statuses count as "current" (active/in-progress)
+    const currentStatuses = ['pending', 'accepted', 'processing', 'shipped'];
+    // Define which statuses count as "completed"
+    const completedStatuses = ['delivered'];
+    
+    if (orgIds.length > 0) {
+      const orderCountField = accountType === 'buyer' ? 'buyer_org_id' : 'seller_org_id';
+      const { data: orders } = await client
+        .from('orders')
+        .select(`${orderCountField}, status`)
+        .in(orderCountField, orgIds);
+      
+      if (orders) {
+        orders.forEach((order: any) => {
+          const orgId = order[orderCountField];
+          const status = order.status as string;
+          
+          if (currentStatuses.includes(status)) {
+            currentOrdersMap.set(orgId, (currentOrdersMap.get(orgId) || 0) + 1);
+          } else if (completedStatuses.includes(status)) {
+            completedOrdersMap.set(orgId, (completedOrdersMap.get(orgId) || 0) + 1);
+          }
+        });
+      }
+    }
+
     const organizations: AdminOrganizationSummary[] = data
       ? await Promise.all(
           data.map(async (org: any) => {
@@ -560,6 +594,9 @@ export class AdminService {
               isHiddenFromMarketplace: Boolean(
                 (org as any).is_hidden_from_marketplace ?? false,
               ),
+              currentOrders: currentOrdersMap.get(org.id) || 0,
+              completedOrders: completedOrdersMap.get(org.id) || 0,
+              totalOrders: (currentOrdersMap.get(org.id) || 0) + (completedOrdersMap.get(org.id) || 0),
             };
           }),
         )
@@ -1430,6 +1467,30 @@ export class AdminService {
       }
     }
 
+    // Fetch order counts for this organization
+    const orderCountField = accountType === 'buyer' ? 'buyer_org_id' : 'seller_org_id';
+    const currentStatuses = ['pending', 'accepted', 'processing', 'shipped'];
+    const completedStatuses = ['delivered'];
+    
+    const { data: orders } = await client
+      .from('orders')
+      .select('status')
+      .eq(orderCountField, orgId);
+    
+    let currentOrders = 0;
+    let completedOrders = 0;
+    
+    if (orders) {
+      orders.forEach((order: any) => {
+        const status = order.status as string;
+        if (currentStatuses.includes(status)) {
+          currentOrders++;
+        } else if (completedStatuses.includes(status)) {
+          completedOrders++;
+        }
+      });
+    }
+
     return {
       id: data.id,
       name: data.name,
@@ -1452,6 +1513,9 @@ export class AdminService {
       isHiddenFromMarketplace: Boolean(
         (data as any).is_hidden_from_marketplace ?? false,
       ),
+      currentOrders,
+      completedOrders,
+      totalOrders: currentOrders + completedOrders,
     };
   }
 
