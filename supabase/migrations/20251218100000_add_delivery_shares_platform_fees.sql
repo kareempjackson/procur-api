@@ -19,3 +19,6 @@ SET buyer_delivery_share = COALESCE(buyer_delivery_share, 0),
 
 
 
+
+
+

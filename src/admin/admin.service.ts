@@ -2578,7 +2578,42 @@ export class AdminService {
     }
 
     const client = this.supabase.getClient();
-    // First delete any payment links pointing at these orders to satisfy FKs
+
+    // Nullify order references in tables with non-cascading FKs (preserve financial records)
+    const { error: bctError } = await client
+      .from('buyer_credit_transactions')
+      .update({ order_id: null })
+      .in('order_id', orderIds);
+
+    if (bctError) {
+      throw new BadRequestException(
+        `Failed to unlink buyer credit transactions: ${bctError.message}`,
+      );
+    }
+
+    const { error: sctError } = await client
+      .from('seller_credit_transactions')
+      .update({ order_id: null })
+      .in('order_id', orderIds);
+
+    if (sctError) {
+      throw new BadRequestException(
+        `Failed to unlink seller credit transactions: ${sctError.message}`,
+      );
+    }
+
+    const { error: txError } = await client
+      .from('transactions')
+      .update({ order_id: null })
+      .in('order_id', orderIds);
+
+    if (txError) {
+      throw new BadRequestException(
+        `Failed to unlink transactions: ${txError.message}`,
+      );
+    }
+
+    // Delete any payment links pointing at these orders to satisfy FKs
     const { error: plError } = await client
       .from('payment_links')
       .delete()
