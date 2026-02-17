@@ -580,6 +580,24 @@ export class ProductResponseDto {
   @ApiProperty({ description: 'Updated at' })
   updated_at: string;
 
+  @ApiPropertyOptional({ description: 'User ID who created this product' })
+  created_by?: string | null;
+
+  @ApiPropertyOptional({ description: 'Full name of user who created this product' })
+  created_by_name?: string | null;
+
+  @ApiPropertyOptional({ description: 'Role of user who created this product (admin/super_admin = platform admin)' })
+  created_by_role?: string | null;
+
+  @ApiPropertyOptional({ description: 'User ID who last updated this product' })
+  updated_by?: string | null;
+
+  @ApiPropertyOptional({ description: 'Full name of user who last updated this product' })
+  updated_by_name?: string | null;
+
+  @ApiPropertyOptional({ description: 'Role of user who last updated this product (admin/super_admin = platform admin)' })
+  updated_by_role?: string | null;
+
   @ApiPropertyOptional({
     description: 'Product images',
     type: [ProductImageDto],

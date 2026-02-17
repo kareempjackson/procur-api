@@ -383,8 +383,25 @@ export class SellersService {
       );
     }
 
+    // Collect unique user IDs for created_by / updated_by to resolve names/roles
+    const userIds = new Set<string>();
+    for (const p of data ?? []) {
+      if (p.created_by) userIds.add(p.created_by as string);
+      if (p.updated_by) userIds.add(p.updated_by as string);
+    }
+    const userMap: Record<string, { fullname: string; role: string }> = {};
+    if (userIds.size > 0) {
+      const { data: usersData } = await client
+        .from('users')
+        .select('id, fullname, role')
+        .in('id', Array.from(userIds));
+      for (const u of usersData ?? []) {
+        userMap[u.id as string] = { fullname: u.fullname as string, role: u.role as string };
+      }
+    }
+
     const products =
-      data?.map((product) => this.mapProductToResponse(product)) || [];
+      data?.map((product) => this.mapProductToResponse(product, userMap)) || [];
 
     return {
       products,
@@ -2108,7 +2125,12 @@ export class SellersService {
     return slug;
   }
 
-  private mapProductToResponse(product: any): ProductResponseDto {
+  private mapProductToResponse(
+    product: any,
+    userMap?: Record<string, { fullname: string; role: string }>,
+  ): ProductResponseDto {
+    const creator = product.created_by ? userMap?.[product.created_by] : undefined;
+    const updater = product.updated_by ? userMap?.[product.updated_by] : undefined;
     return {
       id: product.id,
       seller_org_id: product.seller_org_id,
@@ -2145,6 +2167,12 @@ export class SellersService {
       slug: product.slug,
       created_at: product.created_at,
       updated_at: product.updated_at,
+      created_by: product.created_by ?? null,
+      created_by_name: creator?.fullname ?? null,
+      created_by_role: creator?.role ?? null,
+      updated_by: product.updated_by ?? null,
+      updated_by_name: updater?.fullname ?? null,
+      updated_by_role: updater?.role ?? null,
       images: product.product_images?.map((img: any) => ({
         id: img.id,
         image_url: img.image_url,

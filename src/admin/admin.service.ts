@@ -1303,14 +1303,19 @@ export class AdminService {
       }
     }
 
-    // Emit organization deleted event
-    await this.eventsService.emit({
-      type: EventTypes.Organization.DELETED,
-      aggregateType: AggregateTypes.ORGANIZATION,
-      aggregateId: id,
-      actorType: ActorTypes.USER,
-      payload: { accountType },
-    });
+    // Emit organization deleted event (best-effort — don't let a failed event
+    // insert block the delete from returning success)
+    try {
+      await this.eventsService.emit({
+        type: EventTypes.Organization.DELETED,
+        aggregateType: AggregateTypes.ORGANIZATION,
+        aggregateId: id,
+        actorType: ActorTypes.USER,
+        payload: { accountType },
+      });
+    } catch (e) {
+      console.warn('Failed to emit organization deleted event', e);
+    }
 
     return { success: true };
   }
