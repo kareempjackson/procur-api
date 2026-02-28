@@ -2344,6 +2344,7 @@ export class BuyersService {
           shipping_address: shippingAddress,
           billing_address: billingAddress,
           buyer_notes: createDto.buyer_notes,
+          payment_method: createDto.payment_method || 'bank_transfer',
           estimated_delivery_date: createDto.preferred_delivery_date,
         })
         .select()

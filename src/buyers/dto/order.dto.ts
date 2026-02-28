@@ -14,6 +14,12 @@ import {
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+export enum PaymentMethod {
+  BANK_TRANSFER = 'bank_transfer',
+  CASH_ON_DELIVERY = 'cash_on_delivery',
+  CHEQUE_ON_DELIVERY = 'cheque_on_delivery',
+}
+
 export enum BuyerOrderStatus {
   PENDING = 'pending',
   ACCEPTED = 'accepted',
@@ -78,6 +84,15 @@ export class CreateOrderDto {
   @IsNumber()
   @Min(0)
   credits_applied_cents?: number;
+
+  @ApiPropertyOptional({
+    description: 'Payment method the buyer intends to use',
+    enum: PaymentMethod,
+    default: PaymentMethod.BANK_TRANSFER,
+  })
+  @IsOptional()
+  @IsEnum(PaymentMethod)
+  payment_method?: PaymentMethod;
 }
 
 export class BuyerOrderQueryDto {
@@ -205,6 +220,12 @@ export class BuyerOrderResponseDto {
 
   @ApiProperty({ description: 'Payment status' })
   payment_status: string;
+
+  @ApiPropertyOptional({
+    description: 'Payment method the buyer selected at checkout',
+    enum: PaymentMethod,
+  })
+  payment_method?: string;
 
   @ApiProperty({ description: 'Order items' })
   @ValidateNested({ each: true })
