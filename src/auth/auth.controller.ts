@@ -289,6 +289,35 @@ export class AuthController {
     return this.authService.impersonateUser(admin, userId);
   }
 
+  @Public()
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Refresh Access Token',
+    description:
+      'Exchange a valid refresh token for a new access token and rotated refresh token.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        refreshToken: { type: 'string', example: 'userId.tokenId' },
+      },
+      required: ['refreshToken'],
+    },
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'New access token issued successfully',
+    type: AuthResponseDto,
+  })
+  @ApiUnauthorizedResponse({ description: 'Refresh token expired or invalid' })
+  async refresh(
+    @Body('refreshToken') refreshToken: string,
+  ): Promise<AuthResponseDto> {
+    return this.authService.refreshAccessToken(refreshToken);
+  }
+
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

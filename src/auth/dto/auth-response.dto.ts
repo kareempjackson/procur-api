@@ -22,6 +22,12 @@ export class AuthResponseDto {
   expiresIn: number;
 
   @ApiProperty({
+    example: 'abc123.uuid-here',
+    description: 'Opaque refresh token for obtaining a new access token',
+  })
+  refreshToken: string;
+
+  @ApiProperty({
     description: 'User information',
   })
   user: {

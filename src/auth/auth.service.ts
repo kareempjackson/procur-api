@@ -1,10 +1,12 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import IORedis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
@@ -97,6 +99,7 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly captchaService: CaptchaService,
     private readonly eventsService: EventsService,
+    @Inject('REDIS') private readonly redis: IORedis,
     // Optional: present if WhatsappModule is loaded
     private readonly waSend?: WaSendService,
     private readonly waTemplates?: WaTemplateService,
@@ -331,6 +334,7 @@ export class AuthService {
     };
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     this.logger.log(`OTP sign-in successful for ${phone}`);
 
@@ -356,6 +360,7 @@ export class AuthService {
       accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      refreshToken,
       user: {
         id: user.id,
         email: user.email,
@@ -479,6 +484,7 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     this.logger.log(`User signed in successfully: ${email}`);
 
@@ -496,6 +502,7 @@ export class AuthService {
       accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      refreshToken,
       user: {
         id: user.id,
         email: user.email,
@@ -608,6 +615,7 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     this.logger.log(`Dev sign-in successful for ${email} as ${accountType}`);
 
@@ -615,6 +623,7 @@ export class AuthService {
       accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      refreshToken,
       user: {
         id: user.id,
         email: user.email,
@@ -683,6 +692,7 @@ export class AuthService {
 
       const accessToken = this.jwtService.sign(payload);
       const expiresIn = this.getTokenExpirationSeconds();
+      const refreshToken = await this.generateRefreshToken(user.id);
 
       this.logger.log(`Email verified successfully: ${user.email}`);
 
@@ -702,6 +712,7 @@ export class AuthService {
           accessToken,
           tokenType: 'Bearer',
           expiresIn,
+          refreshToken,
           user: {
             id: user.id,
             email: user.email,
@@ -759,6 +770,89 @@ export class AuthService {
       message: 'Verification email sent. Please check your inbox.',
     };
   }
+
+  // ==================== Refresh Token Methods ====================
+
+  private async generateRefreshToken(userId: string): Promise<string> {
+    const tokenId = crypto.randomUUID();
+    const ttlDays =
+      this.configService.get<number>('jwt.refreshTokenExpiryDays') ?? 30;
+    const ttlSeconds = ttlDays * 24 * 60 * 60;
+    const key = `auth:refresh:${userId}:${tokenId}`;
+    await this.redis.set(key, JSON.stringify({ userId, tokenId }), 'EX', ttlSeconds);
+    return `${userId}.${tokenId}`;
+  }
+
+  async refreshAccessToken(rawToken: string): Promise<AuthResponseDto> {
+    const dot = (rawToken ?? '').indexOf('.');
+    if (dot < 1) throw new UnauthorizedException('Invalid refresh token');
+    const userId = rawToken.slice(0, dot);
+    const tokenId = rawToken.slice(dot + 1);
+    if (!userId || !tokenId) throw new UnauthorizedException('Invalid refresh token');
+
+    const key = `auth:refresh:${userId}:${tokenId}`;
+    const stored = await this.redis.get(key);
+    if (!stored) throw new UnauthorizedException('Refresh token expired or revoked');
+
+    const user = await this.supabaseService.findUserById(userId);
+    if (!user || !user.is_active) {
+      await this.redis.del(key);
+      throw new UnauthorizedException('User not found or inactive');
+    }
+
+    // Rotate: delete old token, issue new one (prevents replay attacks)
+    await this.redis.del(key);
+    const newRefreshToken = await this.generateRefreshToken(userId);
+
+    const userWithOrg = await this.supabaseService.getUserWithOrganization(userId);
+    const { organizationId, organizationName, organizationRole, accountType } =
+      this.extractOrganizationInfo(user, userWithOrg);
+
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      accountType,
+      organizationId,
+      organizationRole,
+      emailVerified: user.email_verified,
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+
+    this.logger.log(`Token refreshed for user ${user.email}`);
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      refreshToken: newRefreshToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullname: user.fullname,
+        role: user.role,
+        accountType,
+        emailVerified: user.email_verified,
+        organizationId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
+
+  async revokeRefreshToken(rawToken: string): Promise<void> {
+    const dot = (rawToken ?? '').indexOf('.');
+    if (dot < 1) return;
+    const userId = rawToken.slice(0, dot);
+    const tokenId = rawToken.slice(dot + 1);
+    if (userId && tokenId) {
+      await this.redis.del(`auth:refresh:${userId}:${tokenId}`);
+    }
+  }
+
+  // ================================================================
 
   private getTokenExpirationSeconds(): number {
     const expiresIn = this.configService.get<string>('jwt.expiresIn') || '7d';
@@ -954,6 +1048,7 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     // Emit invitation accepted event
     await this.eventsService.emit({
@@ -969,6 +1064,7 @@ export class AuthService {
       accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      refreshToken,
       user: {
         id: user.id,
         email: user.email,
@@ -1018,6 +1114,7 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
     const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(user.id);
 
     this.logger.log(
       `Admin ${admin.email} is impersonating user ${user.email} (${user.id})`,
@@ -1027,6 +1124,7 @@ export class AuthService {
       accessToken,
       tokenType: 'Bearer',
       expiresIn,
+      refreshToken,
       user: {
         id: user.id,
         email: user.email,
