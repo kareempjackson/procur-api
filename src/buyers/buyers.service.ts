@@ -4,8 +4,10 @@ import {
   BadRequestException,
   ForbiddenException,
   Logger,
+  Inject,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import IORedis from 'ioredis';
 import { randomUUID } from 'crypto';
 import { TemplateService } from '../whatsapp/templates/template.service';
 import { EmailService } from '../email/email.service';
@@ -90,9 +92,32 @@ export class BuyersService {
     private readonly config: ConfigService,
     private readonly notifications: NotificationsService,
     private readonly eventsService: EventsService,
+    @Inject('REDIS') private readonly redis: IORedis,
   ) {}
 
+  // ── Cache helpers ──────────────────────────────────────────────────────────
+  private async cacheGet<T>(key: string): Promise<T | null> {
+    try {
+      const raw = await this.redis.get(key);
+      return raw ? (JSON.parse(raw) as T) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async cacheSet(key: string, value: unknown, ttl: number): Promise<void> {
+    try {
+      await this.redis.set(key, JSON.stringify(value), 'EX', ttl);
+    } catch {
+      // Non-fatal — cache failure must never break the API
+    }
+  }
+
   private async getVisibleMarketplaceSellerOrgIds(): Promise<string[]> {
+    const cacheKey = 'mc:visible-sellers';
+    const cached = await this.cacheGet<string[]>(cacheKey);
+    if (cached) return cached;
+
     const client = this.supabase.getClient();
 
     const { data, error } = await client
@@ -108,7 +133,9 @@ export class BuyersService {
       );
     }
 
-    return (data || []).map((r: any) => r.id as string).filter(Boolean);
+    const result = (data || []).map((r: any) => r.id as string).filter(Boolean);
+    await this.cacheSet(cacheKey, result, 300); // 5 min
+    return result;
   }
 
   private async isSellerHiddenFromMarketplace(sellerOrgId: string): Promise<{
@@ -144,6 +171,13 @@ export class BuyersService {
     page: number;
     limit: number;
   }> {
+    // Cache unauthenticated (public) requests only — buyer-specific data (favorites) must not be cached globally
+    const cacheKey = buyerOrgId ? null : `mc:products:${JSON.stringify(query)}`;
+    if (cacheKey) {
+      const cached = await this.cacheGet<{ products: MarketplaceProductDto[]; total: number; page: number; limit: number }>(cacheKey);
+      if (cached) return cached;
+    }
+
     const {
       page = 1,
       limit = 20,
@@ -322,12 +356,14 @@ export class BuyersService {
         }),
       )) || [];
 
-    return {
+    const result = {
       products: transformedProducts,
       total: count || 0,
       page,
       limit,
     };
+    if (cacheKey) await this.cacheSet(cacheKey, result, 120); // 2 min
+    return result;
   }
 
   async getProductDetail(
@@ -725,6 +761,10 @@ export class BuyersService {
     page: number;
     limit: number;
   }> {
+    const cacheKey = `mc:sellers:${JSON.stringify(query || {})}`;
+    const cached = await this.cacheGet<{ sellers: MarketplaceSellerDto[]; total: number; page: number; limit: number }>(cacheKey);
+    if (cached) return cached;
+
     const {
       page = 1,
       limit = 20,
@@ -859,12 +899,14 @@ export class BuyersService {
       });
     }
 
-    return {
+    const result = {
       sellers: mappedSellers,
       total: count || 0,
       page,
       limit,
     };
+    await this.cacheSet(cacheKey, result, 300); // 5 min
+    return result;
   }
 
   async getSellerById(sellerId: string): Promise<MarketplaceSellerDto | null> {
