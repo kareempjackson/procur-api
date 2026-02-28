@@ -758,8 +758,11 @@ export class BuyersController {
     @Param('id', ParseUUIDPipe) orderId: string,
     @Body() cancelDto: CancelOrderDto,
   ): Promise<BuyerOrderResponseDto> {
-    // TODO: Implement cancelOrder in service
-    throw new Error('Not implemented');
+    return this.buyersService.cancelOrder(
+      user.organizationId!,
+      orderId,
+      cancelDto,
+    );
   }
 
   @Patch('orders/:id')
@@ -809,8 +812,7 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) orderId: string,
   ): Promise<OrderTimelineEventDto[]> {
-    // TODO: Implement getOrderTimeline in service
-    throw new Error('Not implemented');
+    return this.buyersService.getOrderTimeline(user.organizationId!, orderId);
   }
 
   @Post('orders/:id/review')
@@ -855,8 +857,7 @@ export class BuyersController {
   async getOrderSummary(
     @CurrentUser() user: UserContext,
   ): Promise<OrderSummaryDto> {
-    // TODO: Implement getOrderSummary in service
-    throw new Error('Not implemented');
+    return this.buyersService.getOrderSummary(user.organizationId!);
   }
 
   // ==================== PROFILE ENDPOINTS ====================
@@ -938,8 +939,11 @@ export class BuyersController {
     @Param('id', ParseUUIDPipe) addressId: string,
     @Body() updateDto: UpdateAddressDto,
   ): Promise<AddressResponseDto> {
-    // TODO: Implement updateAddress in service
-    throw new Error('Not implemented');
+    return this.buyersService.updateAddress(
+      user.organizationId!,
+      addressId,
+      updateDto,
+    );
   }
 
   @Delete('addresses/:id')
@@ -959,8 +963,7 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) addressId: string,
   ): Promise<void> {
-    // TODO: Implement deleteAddress in service
-    throw new Error('Not implemented');
+    return this.buyersService.deleteAddress(user.organizationId!, addressId);
   }
 
   @Get('preferences')
@@ -1176,8 +1179,10 @@ export class BuyersController {
     @CurrentUser() user: UserContext,
     @Param('id', ParseUUIDPipe) transactionId: string,
   ): Promise<BuyerTransactionResponseDto> {
-    // TODO: Implement getTransactionById in service
-    throw new Error('Not implemented');
+    return this.buyersService.getTransactionById(
+      user.organizationId!,
+      transactionId,
+    );
   }
 
   @Get('transactions/summary')
@@ -1194,8 +1199,7 @@ export class BuyersController {
   async getTransactionSummary(
     @CurrentUser() user: UserContext,
   ): Promise<BuyerTransactionSummaryDto> {
-    // TODO: Implement getTransactionSummary in service
-    throw new Error('Not implemented');
+    return this.buyersService.getTransactionSummary(user.organizationId!);
   }
 
   @Post('transactions/:id/dispute')
@@ -1218,8 +1222,11 @@ export class BuyersController {
     @Param('id', ParseUUIDPipe) transactionId: string,
     @Body() createDto: CreateDisputeDto,
   ): Promise<DisputeResponseDto> {
-    // TODO: Implement createDispute in service
-    throw new Error('Not implemented');
+    return this.buyersService.createDispute(
+      user.organizationId!,
+      transactionId,
+      createDto,
+    );
   }
 
   // ==================== HARVEST UPDATES ENDPOINTS ====================

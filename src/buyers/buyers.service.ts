@@ -96,9 +96,20 @@ export class BuyersService {
   ) {}
 
   // ── Cache helpers ──────────────────────────────────────────────────────────
+  // Race every Redis command against a 300ms deadline.
+  // If Redis is unavailable (no REDIS_URL, wrong host, etc.) IORedis queues
+  // commands indefinitely (maxRetriesPerRequest: null) and they never settle.
+  // The timeout ensures cache misses are always fast-path, never blocking.
+  private readonly CACHE_TIMEOUT_MS = 300;
+
   private async cacheGet<T>(key: string): Promise<T | null> {
     try {
-      const raw = await this.redis.get(key);
+      const raw = await Promise.race<string | null>([
+        this.redis.get(key),
+        new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), this.CACHE_TIMEOUT_MS),
+        ),
+      ]);
       return raw ? (JSON.parse(raw) as T) : null;
     } catch {
       return null;
@@ -107,7 +118,12 @@ export class BuyersService {
 
   private async cacheSet(key: string, value: unknown, ttl: number): Promise<void> {
     try {
-      await this.redis.set(key, JSON.stringify(value), 'EX', ttl);
+      await Promise.race<unknown>([
+        this.redis.set(key, JSON.stringify(value), 'EX', ttl),
+        new Promise<void>((resolve) =>
+          setTimeout(() => resolve(), this.CACHE_TIMEOUT_MS),
+        ),
+      ]);
     } catch {
       // Non-fatal — cache failure must never break the API
     }
@@ -2449,9 +2465,8 @@ export class BuyersService {
               category: 'orders',
               priority: 'high',
               cta_url:
-                (this.config.get<string>('frontend.url') ||
-                  process.env.FRONTEND_URL ||
-                  'http://localhost:3001') + `/seller/orders/${order.id}`,
+                this.config.get<string>('app.frontendUrl') +
+                `/seller/orders/${order.id}`,
             },
           });
         },
@@ -2464,10 +2479,7 @@ export class BuyersService {
         async () => {
           const client = this.supabase.getClient();
           // Deep link to manage this order
-          const frontend =
-            this.config.get<string>('frontend.url') ||
-            process.env.FRONTEND_URL ||
-            'http://localhost:3001';
+          const frontend = this.config.get<string>('app.frontendUrl');
           const manageUrl = `${frontend}/seller/orders/${order.id}`;
 
           // Prefer product creator as the target seller user
@@ -2545,10 +2557,7 @@ export class BuyersService {
         `email:seller_new_order seller_org=${sellerOrgId} order=${order.id}`,
         async () => {
           const client = this.supabase.getClient();
-          const frontend =
-            this.config.get<string>('frontend.url') ||
-            process.env.FRONTEND_URL ||
-            'http://localhost:3001';
+          const frontend = this.config.get<string>('app.frontendUrl');
           const manageUrl = `${frontend}/seller/orders/${order.id}`;
           const orderNum = String(order.order_number || order.id);
           const currency = String(order.currency || 'USD');
@@ -2636,10 +2645,7 @@ Manage this order: ${link}`;
           .single();
 
         if (buyer?.email) {
-          const frontendUrl =
-            this.config.get<string>('frontend.url') ||
-            process.env.FRONTEND_URL ||
-            'http://localhost:3001';
+          const frontendUrl = this.config.get<string>('app.frontendUrl');
           const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
           const html = `
               <h2>Thanks for your order</h2>
@@ -4703,7 +4709,11 @@ Manage this order: ${link}`;
     );
   }
 
-  async cancelOrder(buyerOrgId: string, orderId: string): Promise<void> {
+  async cancelOrder(
+    buyerOrgId: string,
+    orderId: string,
+    cancelDto?: CancelOrderDto,
+  ): Promise<BuyerOrderResponseDto> {
     const { data: order } = await this.supabase
       .getClient()
       .from('orders')
@@ -4733,11 +4743,13 @@ Manage this order: ${link}`;
       throw new BadRequestException(`Failed to cancel order: ${error.message}`);
     }
 
+    const reason = cancelDto?.reason || 'Cancelled by buyer';
+
     // Create timeline entry
     await this.supabase.getClient().from('order_timeline').insert({
       order_id: orderId,
       event_type: 'order_cancelled',
-      description: 'Order cancelled by buyer',
+      description: reason,
       created_by: buyerOrgId,
     });
 
@@ -4747,8 +4759,109 @@ Manage this order: ${link}`;
       aggregateType: AggregateTypes.ORDER,
       aggregateId: orderId,
       organizationId: buyerOrgId,
-      payload: { cancelledBy: 'buyer', reason: 'Cancelled by buyer' },
+      payload: { cancelledBy: 'buyer', reason },
     });
+
+    return this.getOrderById(buyerOrgId, orderId);
+  }
+
+  async getOrderTimeline(
+    buyerOrgId: string,
+    orderId: string,
+  ): Promise<OrderTimelineEventDto[]> {
+    const client = this.supabase.getClient();
+
+    // Verify the order belongs to this buyer
+    const { data: order } = await client
+      .from('orders')
+      .select('id')
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const { data: timeline, error } = await client
+      .from('order_timeline')
+      .select('*')
+      .eq('order_id', orderId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch order timeline: ${error.message}`,
+      );
+    }
+
+    return (timeline || []).map((event: any) => ({
+      id: event.id,
+      event_type: event.event_type,
+      description: event.description,
+      metadata: event.metadata || undefined,
+      created_by: event.created_by || undefined,
+      created_at: event.created_at,
+    }));
+  }
+
+  async getOrderSummary(buyerOrgId: string): Promise<OrderSummaryDto> {
+    const { data: orders, error } = await this.supabase
+      .getClient()
+      .from('orders')
+      .select('id, status, total_amount, currency, created_at')
+      .eq('buyer_org_id', buyerOrgId);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch order summary: ${error.message}`,
+      );
+    }
+
+    const allOrders = orders || [];
+    const nonCancelled = allOrders.filter(
+      (o: any) => o.status !== 'cancelled',
+    );
+    const totalSpent = nonCancelled.reduce(
+      (sum: number, o: any) => sum + (o.total_amount || 0),
+      0,
+    );
+
+    const now = new Date();
+    const monthStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      1,
+    ).toISOString();
+    const thisMonthNonCancelled = nonCancelled.filter(
+      (o: any) => o.created_at >= monthStart,
+    );
+
+    const ordersByStatus = allOrders.reduce(
+      (acc: Record<string, number>, o: any) => {
+        acc[o.status] = (acc[o.status] || 0) + 1;
+        return acc;
+      },
+      {},
+    );
+
+    const currency =
+      (allOrders[0] as any)?.currency || 'XCD';
+
+    return {
+      total_orders: allOrders.length,
+      orders_by_status: ordersByStatus,
+      total_spent: totalSpent,
+      average_order_value: nonCancelled.length
+        ? totalSpent / nonCancelled.length
+        : 0,
+      currency,
+      orders_this_month: thisMonthNonCancelled.length,
+      spent_this_month: thisMonthNonCancelled.reduce(
+        (sum: number, o: any) => sum + (o.total_amount || 0),
+        0,
+      ),
+    };
   }
 
   async createOrderReview(
@@ -5020,6 +5133,65 @@ Manage this order: ${link}`;
       created_at: data.created_at,
       updated_at: data.updated_at,
     };
+  }
+
+  async updateAddress(
+    buyerOrgId: string,
+    addressId: string,
+    updateDto: UpdateAddressDto,
+  ): Promise<AddressResponseDto> {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('buyer_addresses')
+      .update({ ...updateDto, updated_at: new Date().toISOString() })
+      .eq('id', addressId)
+      .eq('buyer_org_id', buyerOrgId)
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to update address: ${error.message}`,
+      );
+    }
+    if (!data) {
+      throw new NotFoundException('Address not found');
+    }
+
+    return {
+      id: data.id,
+      label: data.label,
+      street_address: data.street_address,
+      city: data.city,
+      state: data.state,
+      postal_code: data.postal_code,
+      country: data.country,
+      contact_name: data.contact_name,
+      contact_phone: data.contact_phone,
+      is_default: data.is_default,
+      is_billing: data.is_billing,
+      is_shipping: data.is_shipping,
+      created_at: data.created_at,
+      updated_at: data.updated_at,
+    };
+  }
+
+  async deleteAddress(buyerOrgId: string, addressId: string): Promise<void> {
+    const { error, count } = await this.supabase
+      .getClient()
+      .from('buyer_addresses')
+      .delete({ count: 'exact' })
+      .eq('id', addressId)
+      .eq('buyer_org_id', buyerOrgId);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete address: ${error.message}`,
+      );
+    }
+    if (!count) {
+      throw new NotFoundException('Address not found');
+    }
   }
 
   async getPreferences(buyerOrgId: string): Promise<PreferencesResponseDto> {
@@ -5549,6 +5721,208 @@ Manage this order: ${link}`;
       total: count || 0,
       page,
       limit,
+    };
+  }
+
+  async getTransactionById(
+    buyerOrgId: string,
+    transactionId: string,
+  ): Promise<BuyerTransactionResponseDto> {
+    const { data: transaction, error } = await this.supabase
+      .getClient()
+      .from('transactions')
+      .select(
+        `
+        *,
+        order:orders!order_id(order_number, status),
+        seller_organization:organizations!seller_org_id(name)
+      `,
+      )
+      .eq('id', transactionId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (error || !transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    return {
+      id: transaction.id,
+      transaction_number: transaction.transaction_number,
+      order_id: transaction.order_id,
+      order_number: (transaction.order as any)?.order_number,
+      seller_org_id: transaction.seller_org_id,
+      seller_name:
+        (transaction.seller_organization as any)?.name || 'Unknown Seller',
+      type: transaction.transaction_type,
+      status: transaction.status,
+      amount: transaction.amount,
+      currency: transaction.currency,
+      payment_method: transaction.payment_method,
+      payment_reference: transaction.payment_reference,
+      platform_fee: transaction.platform_fee || 0,
+      payment_processing_fee: transaction.payment_processing_fee || 0,
+      net_amount: transaction.net_amount || transaction.amount,
+      description: transaction.description,
+      metadata: transaction.metadata,
+      processed_at: transaction.processed_at,
+      settled_at: transaction.settled_at,
+      created_at: transaction.created_at,
+      updated_at: transaction.updated_at,
+    };
+  }
+
+  async getTransactionSummary(
+    buyerOrgId: string,
+  ): Promise<BuyerTransactionSummaryDto> {
+    const { data: allTransactions, error } = await this.supabase
+      .getClient()
+      .from('transactions')
+      .select('amount, transaction_type, status, created_at')
+      .eq('buyer_org_id', buyerOrgId);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch transaction summary: ${error.message}`,
+      );
+    }
+
+    const txns = allTransactions || [];
+
+    const totalSpent = txns
+      .filter(
+        (t: any) =>
+          t.transaction_type === 'sale' && t.status === 'completed',
+      )
+      .reduce((sum: number, t: any) => sum + t.amount, 0);
+
+    const totalRefunds = txns
+      .filter(
+        (t: any) =>
+          t.transaction_type === 'refund' && t.status === 'completed',
+      )
+      .reduce((sum: number, t: any) => sum + t.amount, 0);
+
+    const totalFees = txns
+      .filter(
+        (t: any) => t.transaction_type === 'fee' && t.status === 'completed',
+      )
+      .reduce((sum: number, t: any) => sum + t.amount, 0);
+
+    const completedSales = txns.filter(
+      (t: any) =>
+        t.transaction_type === 'sale' && t.status === 'completed',
+    );
+
+    const sorted = [...txns].sort(
+      (a: any, b: any) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
+
+    return {
+      total_transactions: txns.length,
+      total_spent: totalSpent,
+      total_refunds: totalRefunds,
+      total_fees: totalFees,
+      net_spent: totalSpent - totalRefunds,
+      currency: 'USD',
+      transactions_by_status: txns.reduce(
+        (acc: Record<string, number>, t: any) => {
+          acc[t.status] = (acc[t.status] || 0) + 1;
+          return acc;
+        },
+        {},
+      ),
+      transactions_by_type: txns.reduce(
+        (acc: Record<string, number>, t: any) => {
+          acc[t.transaction_type] = (acc[t.transaction_type] || 0) + 1;
+          return acc;
+        },
+        {},
+      ),
+      monthly_spending: [],
+      top_sellers: [],
+      average_transaction_amount: completedSales.length
+        ? totalSpent / completedSales.length
+        : 0,
+      largest_transaction: completedSales.reduce(
+        (max: number, t: any) => Math.max(max, t.amount),
+        0,
+      ),
+      last_transaction_date: sorted[0]?.created_at,
+    };
+  }
+
+  async createDispute(
+    buyerOrgId: string,
+    transactionId: string,
+    createDto: CreateDisputeDto,
+  ): Promise<DisputeResponseDto> {
+    const client = this.supabase.getClient();
+
+    // Verify the transaction belongs to this buyer
+    const { data: transaction } = await client
+      .from('transactions')
+      .select('id, order_id, status, amount, currency')
+      .eq('id', transactionId)
+      .eq('buyer_org_id', buyerOrgId)
+      .single();
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    // Prevent duplicate disputes
+    const { data: existing } = await client
+      .from('disputes')
+      .select('id')
+      .eq('transaction_id', transactionId)
+      .maybeSingle();
+
+    if (existing) {
+      throw new BadRequestException(
+        'A dispute already exists for this transaction',
+      );
+    }
+
+    const { data: dispute, error } = await client
+      .from('disputes')
+      .insert({
+        transaction_id: transactionId,
+        order_id: transaction.order_id,
+        buyer_org_id: buyerOrgId,
+        reason: createDto.reason,
+        description: createDto.description,
+        requested_resolution: createDto.requested_resolution,
+        evidence_urls: createDto.evidence_urls,
+        status: 'open',
+        amount: transaction.amount,
+        currency: transaction.currency,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create dispute: ${error.message}`,
+      );
+    }
+
+    return {
+      id: dispute.id,
+      transaction_id: dispute.transaction_id,
+      order_id: dispute.order_id,
+      reason: dispute.reason,
+      description: dispute.description,
+      requested_resolution: dispute.requested_resolution,
+      status: dispute.status,
+      amount: dispute.amount,
+      currency: dispute.currency,
+      evidence_urls: dispute.evidence_urls,
+      resolution: dispute.resolution,
+      resolved_at: dispute.resolved_at,
+      created_at: dispute.created_at,
+      updated_at: dispute.updated_at,
     };
   }
 

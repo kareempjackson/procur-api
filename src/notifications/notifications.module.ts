@@ -1,4 +1,4 @@
-import { Global, Module } from '@nestjs/common';
+import { Global, Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { NotificationsService } from './notifications.service';
@@ -13,6 +13,8 @@ import { PushProvider } from './providers/push.provider';
 import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
 import { startNotificationWorker } from './queue/notification.worker';
+
+const redisLogger = new Logger('Redis');
 
 @Global()
 @Module({
@@ -43,10 +45,35 @@ import { startNotificationWorker } from './queue/notification.worker';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const url = config.get<string>('redis.url');
+
         if (!url) {
-          return new IORedis({ maxRetriesPerRequest: null });
+          redisLogger.warn(
+            'REDIS_URL is not set — cache is disabled. Set REDIS_URL in Railway environment variables.',
+          );
+        } else {
+          // Mask credentials in log output
+          const safeUrl = url.replace(/:\/\/[^@]+@/, '://*****@');
+          redisLogger.log(`Connecting to Redis: ${safeUrl}`);
         }
-        return new IORedis(url, { maxRetriesPerRequest: null });
+
+        const client = url
+          ? new IORedis(url, { maxRetriesPerRequest: null })
+          : new IORedis({ maxRetriesPerRequest: null });
+
+        client.on('ready', () =>
+          redisLogger.log('Redis connection established ✓'),
+        );
+        client.on('error', (err: Error) =>
+          redisLogger.error(`Redis error: ${err.message}`),
+        );
+        client.on('close', () =>
+          redisLogger.warn('Redis connection closed'),
+        );
+        client.on('reconnecting', () =>
+          redisLogger.warn('Redis reconnecting…'),
+        );
+
+        return client;
       },
     },
     {
