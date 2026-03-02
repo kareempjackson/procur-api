@@ -52,6 +52,12 @@ export class SessionStoreRedis {
       data: { ...cur.data, ...(patch.data || {}) },
       updatedAt: Date.now(),
     };
+    // Preserve single-step history for undo (mirrors SessionStore behaviour)
+    const modifies =
+      typeof patch.flow !== 'undefined' || typeof patch.data !== 'undefined';
+    if (modifies) {
+      next.data._prev = { flow: cur.flow, data: { ...cur.data } };
+    }
     await this.redis.set(
       this.key(id),
       JSON.stringify(next),

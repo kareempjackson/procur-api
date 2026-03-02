@@ -6,16 +6,28 @@ import {
   Res,
   Body,
   HttpCode,
+  Logger,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
 import { Headers, Req } from '@nestjs/common';
 import { Public } from '../auth/decorators/public.decorator';
+import { SkipThrottle } from '@nestjs/throttler';
 import { WhatsappService } from './whatsapp.service';
 import * as crypto from 'crypto';
 
 @Controller('whatsapp/webhook')
+@SkipThrottle()
 export class WhatsappController {
-  constructor(private readonly svc: WhatsappService) {}
+  private readonly logger = new Logger(WhatsappController.name);
+
+  constructor(private readonly svc: WhatsappService) {
+    if (!process.env.WHATSAPP_APP_SECRET && process.env.NODE_ENV === 'production') {
+      this.logger.warn(
+        'WHATSAPP_APP_SECRET is not set — webhook signature verification is DISABLED. ' +
+        'Set this to your Meta App Secret to reject forged webhooks.',
+      );
+    }
+  }
 
   @Get()
   @Public()

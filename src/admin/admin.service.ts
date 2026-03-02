@@ -4734,6 +4734,100 @@ export class AdminService {
     return { success: true };
   }
 
+  // ===== WhatsApp admin management =====
+
+  async listWhatsappOptOuts(
+    page = 1,
+    limit = 20,
+  ): Promise<{ items: { phone_e164: string; created_at: string }[]; total: number }> {
+    return this.whatsapp.listOptOuts(page, limit);
+  }
+
+  async clearWhatsappOptOut(phone: string): Promise<{ success: boolean }> {
+    await this.whatsapp.clearOptOutByAdmin(phone);
+    return { success: true };
+  }
+
+  async rotateWhatsappToken(token: string): Promise<{ success: boolean }> {
+    await this.whatsapp.adminSetToken(token);
+    return { success: true };
+  }
+
+  async broadcastWhatsapp(
+    segment: 'all_sellers' | 'all_buyers' | 'all_users',
+    template: string,
+    variables: Record<string, string> = {},
+    dryRun = false,
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    const client = this.supabase.getClient();
+
+    // Query org admin contacts — joins organization_users → users to get phone
+    const accountTypes: string[] =
+      segment === 'all_sellers'
+        ? ['seller']
+        : segment === 'all_buyers'
+          ? ['buyer']
+          : ['seller', 'buyer'];
+
+    const { data: orgUsers, error } = await client
+      .from('organization_users')
+      .select(
+        'users!inner(id, fullname, email, phone_number), organizations!inner(account_type, status)',
+      )
+      .in('organizations.account_type', accountTypes)
+      .eq('organizations.status', 'active')
+      .eq('role', 'admin');
+
+    if (error) {
+      throw new Error(`Broadcast query failed: ${error.message}`);
+    }
+
+    type Row = {
+      users: { id: string; fullname: string | null; email: string | null; phone_number: string | null };
+    };
+
+    const rows = (orgUsers ?? []) as unknown as Row[];
+    const withPhone = rows.filter((r) => r.users?.phone_number);
+
+    let skipped = rows.length - withPhone.length;
+    let queued = 0;
+
+    // Normalize phones and check opt-out
+    const eligible: { phone: string; name: string }[] = [];
+    for (const row of withPhone) {
+      const rawPhone = row.users.phone_number!;
+      let phone: string;
+      try {
+        phone = rawPhone.replace(/^\+/, '').replace(/\D/g, '');
+      } catch {
+        skipped++;
+        continue;
+      }
+      const opted = await this.whatsapp.isOptedOut(phone);
+      if (opted) {
+        skipped++;
+        continue;
+      }
+      const name = row.users.fullname || row.users.email || `+${phone}`;
+      eligible.push({ phone, name });
+    }
+
+    if (dryRun) {
+      return { recipientCount: eligible.length, queued: 0, skipped };
+    }
+
+    for (const { phone, name } of eligible) {
+      try {
+        await this.whatsapp.sendBroadcastTemplate(phone, name, template, variables);
+        queued++;
+      } catch {
+        skipped++;
+      }
+    }
+
+    return { queued, skipped };
+  }
+
   /**
    * Very lightweight normalization for admin-provided phone numbers.
    * Delegates full validation to WhatsappService when sending.

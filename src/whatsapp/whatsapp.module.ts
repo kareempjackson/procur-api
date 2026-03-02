@@ -32,6 +32,7 @@ import { TemplateService } from './templates/template.service';
   providers: [
     WhatsappService,
     SessionStore,
+    SessionStoreRedis,
     WaQueue,
     SendService,
     {

@@ -100,24 +100,37 @@ The Procur WhatsApp bot enables sellers/farmers to sign up, upload products, pos
   - Hybrid search + caching; extractors + moderation; global FAQ seeding
   - Free-text parsing integrated into WhatsApp flows with safe fallbacks
 
-### What’s Missing / Next Phases
+- **Phase 4 (Security, Compliance, Persistence) – Done**
+  - ✅ Migrated `SessionStore` → `SessionStoreRedis`; all ~160 session get/set/clear calls converted to async
+  - ✅ `SessionStoreRedis` now also preserves single-step undo history (`_prev`)
+  - ✅ `WHATSAPP_APP_SECRET` missing in production now logs a loud warning on startup
+  - ✅ Webhook endpoints bypass global rate-limiter (`@SkipThrottle`) — HMAC is the security layer
+  - ✅ `WHATSAPP_ADMIN_TOKEN` added to env validation schema
+  - ✅ Opt-out persisted to Supabase `whatsapp_optouts` table (migration: `20260301100000_whatsapp_optouts.sql`)
+  - ✅ `isOptedOut()` checks Redis first, Supabase as fallback and re-warms Redis on hit
+  - ✅ STOP / START command handlers added to text routing
+  - ⏳ “DELETE MY DATA” workflow — still TODO
+  - ⏳ Signed private media URLs — still TODO
 
-- **Phase 4 (Security, Compliance, Persistence) – Next**
-  - Migrate `SessionStore` to Redis-backed async store; update all session get/set calls
-  - “DELETE MY DATA” workflow: queue job, soft-delete account/org, revoke tokens, purge sensitive storage pointers; audit trail
-  - Persist opt-out in DB and suppress proactive sends across channels
-  - Rate limits/IP allowlist on webhook (edge or API layer)
-  - Signed private media URLs with short TTL + access logging
+- **Phase 5 (Observability & Analytics) – Done**
+  - ✅ Sentry `captureException` added to `wa.worker.ts` for non-token errors and failed jobs
+  - ✅ Structured JSON error logs in worker: `{ level, ctx, code, subcode, meta }`
+  - ⏳ Prometheus metrics — still TODO (use Railway/Render built-in metrics for now)
+  - ⏳ Per-flow funnel events — still TODO
 
-- **Phase 5 (Observability & Analytics) – Next**
-  - Sentry integration (API + worker); structured JSON logs with flow tags
-  - Prometheus metrics: WA send rates/errors, queue latency, RAG cache hit rate, flow step latencies
-  - Funnel events for signup/product/harvest/quote/order/transaction
+- **Phase 6 (Ops, Scale & Tests) – Done**
+  - ✅ `/readyz` endpoint now probes Redis (PING) and Supabase (SELECT) and returns `{ status, checks }`
+  - ✅ `Dockerfile` added (multi-stage Node 20 build; `HEALTHCHECK` uses `/readyz`)
+  - ✅ `.env.production.example` created with all required keys and deployment notes
+  - ⏳ Automated contract/E2E tests — still TODO
+  - ⏳ Horizontal scaling runbook — see Meta IP allowlist note below
 
-- **Phase 6 (Ops, Scale & Tests) – Next**
-  - Health/readiness checks with dependency probes (Redis, Supabase)
-  - Horizontal scaling runbook; disaster recovery and backups
-  - Contract tests for WA payloads; E2E for main flows; record/replay fixtures
+### What’s Still Missing (Phase 7+)
+
+- **”DELETE MY DATA” workflow** — WhatsApp command → soft-delete account, purge Redis keys (`wa:fp:`, `wa:session:`, `wa:locked:`), delete Farmer ID from private storage bucket, audit trail entry
+- **Signed private media URLs** — Farmer ID images should use Supabase signed URLs with short TTL
+- **Automated tests** — Contract tests for webhook payload parsing (mock Meta body → assert flow state); E2E tests for signup/product/order flows
+- **Horizontal scaling** — Sessions are now Redis-backed (safe to scale). Ensure all instances share the same Redis URL. Meta sends webhooks to a single URL so a load balancer is fine.
 
 ### Runbook Highlights
 

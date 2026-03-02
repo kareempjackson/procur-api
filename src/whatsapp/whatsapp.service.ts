@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
-import { SessionStore } from './session.store';
+import { SessionStoreRedis } from './session.store.redis';
 import { AuthService } from '../auth/auth.service';
 import { SellersService } from '../sellers/sellers.service';
 import { BuyersService } from '../buyers/buyers.service';
@@ -39,7 +39,7 @@ export class WhatsappService {
 
   constructor(
     private readonly config: ConfigService,
-    private readonly sessions: SessionStore,
+    private readonly sessions: SessionStoreRedis,
     private readonly auth: AuthService,
     private readonly sellers: SellersService,
     private readonly buyers: BuyersService,
@@ -193,6 +193,19 @@ export class WhatsappService {
         ];
         break;
       }
+      case 'onboarding_start_bot': {
+        templateName =
+          this.config.get<string>(this.adminStartBotTemplateEnvKey) ||
+          this.defaultAdminStartBotTemplate;
+        const nameOrEmail = user.fullname || user.email || phoneE164;
+        components = [
+          {
+            type: 'body',
+            parameters: [{ type: 'text', text: this.truncate(nameOrEmail, 80) }],
+          },
+        ];
+        break;
+      }
       default: {
         throw new BadRequestException(
           `Unsupported WhatsApp admin template: ${template}`,
@@ -213,6 +226,80 @@ export class WhatsappService {
       template,
       variables,
     });
+  }
+
+  /** List opted-out phones (paginated). Used by admin panel. */
+  async listOptOuts(
+    page = 1,
+    limit = 20,
+  ): Promise<{ items: { phone_e164: string; created_at: string }[]; total: number }> {
+    const from = (page - 1) * limit;
+    const client = this.supabase.getClient();
+    const { data, error, count } = await client
+      .from('whatsapp_optouts')
+      .select('phone_e164, created_at', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(from, from + limit - 1);
+    if (error) {
+      this.logger.warn('listOptOuts query failed', error as any);
+      return { items: [], total: 0 };
+    }
+    return { items: (data as any[]) ?? [], total: count ?? 0 };
+  }
+
+  /** Public admin wrapper: clear opt-out for a phone number. */
+  async clearOptOutByAdmin(phone: string): Promise<void> {
+    await this.clearOptOut(phone);
+  }
+
+  /**
+   * Send a broadcast template directly to a phone number + display name.
+   * Used by AdminService.broadcastWhatsapp to avoid per-user Supabase lookups.
+   */
+  async sendBroadcastTemplate(
+    phone: string,
+    displayName: string,
+    template: string,
+    variables: Record<string, string> = {},
+  ): Promise<void> {
+    const locale = 'en';
+    let templateName: string;
+    let components: any[];
+
+    switch (template) {
+      case 'kyc_reminder': {
+        templateName =
+          this.config.get<string>(this.adminKycTemplateEnvKey) ||
+          this.defaultAdminKycTemplate;
+        const deadline = variables.deadline || '';
+        components = [
+          {
+            type: 'body',
+            parameters: [
+              { type: 'text', text: this.truncate(displayName, 80) },
+              { type: 'text', text: this.truncate(deadline, 80) },
+            ],
+          },
+        ];
+        break;
+      }
+      case 'onboarding_start_bot': {
+        templateName =
+          this.config.get<string>(this.adminStartBotTemplateEnvKey) ||
+          this.defaultAdminStartBotTemplate;
+        components = [
+          {
+            type: 'body',
+            parameters: [{ type: 'text', text: this.truncate(displayName, 80) }],
+          },
+        ];
+        break;
+      }
+      default:
+        throw new BadRequestException(`Unsupported broadcast template: ${template}`);
+    }
+
+    await this.sendTemplate(phone, templateName, components, this.getTemplateLang(locale));
   }
 
   async handleWebhook(body: any) {
@@ -246,7 +333,7 @@ export class WhatsappService {
       'EX',
       60 * 60 * 48,
     );
-    const session = this.sessions.get(from);
+    const session = await this.sessions.get(from);
     const userId = session.user?.id;
     if (userId) {
       const idleDays = Number(
@@ -295,7 +382,7 @@ export class WhatsappService {
       (await this.redis.get(`wa:logged_out:${from}`)) === '1';
     if (!session.user && !loggedOutFlag) {
       await this.tryHydrateUserFromPhone(from);
-      const after = this.sessions.get(from);
+      const after = await this.sessions.get(from);
       // If user exists but needs quick OTP, we will have switched to signup_otp
       if (after.flow === 'signup_otp') {
         return;
@@ -312,7 +399,7 @@ export class WhatsappService {
 
     if (buttonId || listId) {
       const choice = buttonId || listId;
-      const sLock = this.sessions.get(from);
+      const sLock = await this.sessions.get(from);
       const uidLock = sLock.user?.id;
       if (uidLock) {
         const isLocked = (await this.redis.get(`wa:locked:${uidLock}`)) === '1';
@@ -350,6 +437,32 @@ export class WhatsappService {
       await this.showMenu(from);
       return;
     }
+    // Opt-out: user texts "STOP" to unsubscribe from proactive messages
+    if (lower === 'stop') {
+      await this.setOptOut(from);
+      await this.audit('wa_optout', { from_e164: `+${from}`, user_id: session.user?.id ?? null });
+      await this.sendText(from, 'You have opted out of Procur WhatsApp notifications. Reply START to re-subscribe.');
+      return;
+    }
+    // Opt-in: user texts "START" to re-subscribe
+    if (lower === 'start') {
+      await this.clearOptOut(from);
+      await this.audit('wa_optin', { from_e164: `+${from}`, user_id: session.user?.id ?? null });
+      await this.sendText(from, 'You\'ve re-subscribed to Procur WhatsApp notifications. Reply "menu" to continue.');
+      return;
+    }
+    if ((lower === 'delete my data' || lower === 'delete account') && session.user?.id) {
+      await this.sessions.set(from, { flow: 'delete_confirm' });
+      await this.sendButtons(
+        from,
+        '⚠️ This will permanently delete your Procur account and all associated data. This cannot be undone.',
+        [
+          { id: 'delete_confirm_yes', title: 'Confirm Delete' },
+          { id: 'delete_confirm_no', title: 'Cancel' },
+        ],
+      );
+      return;
+    }
     if (lower === 'lock' && session.user?.id) {
       await this.redis.set(
         `wa:locked:${session.user.id}`,
@@ -381,7 +494,7 @@ export class WhatsappService {
         user_id: session.user.id,
         from_e164: `+${from}`,
       });
-      this.sessions.set(from, { flow: 'unlock_otp' });
+      await this.sessions.set(from, { flow: 'unlock_otp' });
       await this.sendText(
         from,
         'Enter the 6-digit code to unlock your account.',
@@ -393,7 +506,7 @@ export class WhatsappService {
       return;
     }
     if (lower.startsWith('help') || lower.startsWith('how')) {
-      const s2 = this.sessions.get(from);
+      const s2 = await this.sessions.get(from);
       if (!s2.user?.orgId) {
         await this.sendText(from, 'Sign up to continue. Type "menu" to begin.');
         return;
@@ -433,7 +546,7 @@ export class WhatsappService {
     // Phase 3: AI-assisted free-text parsing (product/harvest/quote/order)
     // Only attempt when not in the middle of a strict interactive step
     try {
-      const sFree = this.sessions.get(from);
+      const sFree = await this.sessions.get(from);
       const inStrictFlow = [
         'signup_name',
         'signup_account_type',
@@ -501,16 +614,16 @@ export class WhatsappService {
           // Require at least 2 strong signals to proceed
           if (best >= 2) {
             // Ensure user/org for operations
-            const su = this.sessions.get(from);
+            const su = await this.sessions.get(from);
             const user = su.user;
             if (!user?.orgId) {
               await this.sendText(from, 'Sign up to continue.');
-              this.sessions.set(from, { flow: 'signup_name' });
+              await this.sessions.set(from, { flow: 'signup_name' });
               return;
             }
             // Product: prefill name+price -> ask for photo
             if (best === scoreProduct && p.name && p.base_price) {
-              this.sessions.set(from, {
+              await this.sessions.set(from, {
                 flow: 'upload_photo',
                 data: {
                   productName: p.name,
@@ -519,7 +632,7 @@ export class WhatsappService {
               });
               await this.sendText(
                 from,
-                this.t(this.getLocale(from), 'ask_photo'),
+                this.t(await this.getLocale(from), 'ask_photo'),
               );
               return;
             }
@@ -547,7 +660,7 @@ export class WhatsappService {
                   from,
                   `Harvest posted: ${h.crop} ${h.quantity} ${h.unit}, window ${h.expected_harvest_window} ✅`,
                 );
-                this.sessions.set(from, { flow: 'menu', data: {} });
+                await this.sessions.set(from, { flow: 'menu', data: {} });
                 await this.showMenu(from);
                 return;
               } catch (e) {
@@ -560,25 +673,25 @@ export class WhatsappService {
                 nextData.expected_harvest_window = h.expected_harvest_window;
               if (h.quantity) nextData.quantity = h.quantity;
               if (h.unit) nextData.unit = h.unit;
-              this.sessions.set(from, { data: nextData });
+              await this.sessions.set(from, { data: nextData });
               if (!h.expected_harvest_window) {
-                this.sessions.set(from, { flow: 'harvest_window' });
+                await this.sessions.set(from, { flow: 'harvest_window' });
                 await this.sendText(
                   from,
-                  this.t(this.getLocale(from), 'ask_harvest_window'),
+                  this.t(await this.getLocale(from), 'ask_harvest_window'),
                 );
                 return;
               }
               if (!h.quantity) {
-                this.sessions.set(from, { flow: 'harvest_qty' });
+                await this.sessions.set(from, { flow: 'harvest_qty' });
                 await this.sendText(
                   from,
-                  this.t(this.getLocale(from), 'ask_quantity'),
+                  this.t(await this.getLocale(from), 'ask_quantity'),
                 );
                 return;
               }
               if (!h.unit) {
-                this.sessions.set(from, { flow: 'harvest_unit' });
+                await this.sessions.set(from, { flow: 'harvest_unit' });
                 await this.sendHarvestUnitsList(from);
                 return;
               }
@@ -608,14 +721,14 @@ export class WhatsappService {
                   from,
                   `Quote submitted for request ${q.request_id} ✅`,
                 );
-                this.sessions.set(from, { flow: 'menu', data: {} });
+                await this.sessions.set(from, { flow: 'menu', data: {} });
                 await this.showMenu(from);
                 return;
               } catch (e) {
                 this.logger.error('AI quote create failed', e as any);
               }
             } else if (best === scoreQuote && q.request_id) {
-              this.sessions.set(from, {
+              await this.sessions.set(from, {
                 flow: 'quote_unit_price',
                 data: { request_id: q.request_id },
               });
@@ -625,8 +738,8 @@ export class WhatsappService {
             // Order: route to accept/reject/update
             if (best === scoreOrder && o.action && o.order_id) {
               if (o.action === 'accept') {
-                this.sessions.set(from, { data: { order_id: o.order_id } });
-                this.sessions.set(from, { flow: 'order_accept_eta' });
+                await this.sessions.set(from, { data: { order_id: o.order_id } });
+                await this.sessions.set(from, { flow: 'order_accept_eta' });
                 await this.sendText(
                   from,
                   'Estimated delivery date? (YYYY-MM-DD, optional)',
@@ -634,17 +747,17 @@ export class WhatsappService {
                 return;
               }
               if (o.action === 'reject') {
-                this.sessions.set(from, { data: { order_id: o.order_id } });
-                this.sessions.set(from, { flow: 'order_reject_reason' });
+                await this.sessions.set(from, { data: { order_id: o.order_id } });
+                await this.sessions.set(from, { flow: 'order_reject_reason' });
                 await this.sendText(from, 'Reason for rejection?');
                 return;
               }
               if (o.action === 'update' && o.status) {
-                this.sessions.set(from, {
+                await this.sessions.set(from, {
                   data: { order_id: o.order_id, status: o.status },
                 });
                 if (o.status.toLowerCase() === 'shipped') {
-                  this.sessions.set(from, { flow: 'order_update_tracking' });
+                  await this.sessions.set(from, { flow: 'order_update_tracking' });
                   await this.sendText(
                     from,
                     'Tracking number? (optional, press Enter to skip)',
@@ -670,7 +783,7 @@ export class WhatsappService {
                     user.id,
                   );
                   await this.sendText(from, `Order updated to ${o.status} ✅`);
-                  this.sessions.set(from, { flow: 'menu', data: {} });
+                  await this.sessions.set(from, { flow: 'menu', data: {} });
                   await this.showMenu(from);
                   return;
                 } catch (e) {
@@ -692,7 +805,7 @@ export class WhatsappService {
           await this.sendText(from, "What's your full name?");
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'signup_account_type',
           data: { name },
         });
@@ -709,10 +822,10 @@ export class WhatsappService {
         if (lowerTxt === 'buyer' || lowerTxt === 'seller') {
           const accountType = lowerTxt === 'buyer' ? 'buyer' : 'seller';
           const businessType = accountType === 'seller' ? 'farmers' : 'general';
-          this.sessions.set(from, {
+          await this.sessions.set(from, {
             flow: 'signup_country',
             data: {
-              ...(this.sessions.get(from).data || {}),
+              ...((await this.sessions.get(from)).data || {}),
               accountType,
               businessType,
             },
@@ -733,7 +846,7 @@ export class WhatsappService {
           await this.sendCountryList(from);
           break;
         }
-        this.sessions.set(from, { data: { country } });
+        await this.sessions.set(from, { data: { country } });
         const randomPwd = this.generateRandomPassword();
         await this.finishWhatsappSignup(from, randomPwd);
         break;
@@ -745,7 +858,7 @@ export class WhatsappService {
       }
       case 'unlock_otp': {
         if (!session.user?.id) {
-          this.sessions.set(from, { flow: 'menu' });
+          await this.sessions.set(from, { flow: 'menu' });
           await this.showMenu(from);
           break;
         }
@@ -762,7 +875,7 @@ export class WhatsappService {
             from,
             'Too many attempts. Please wait 10 minutes and try again.',
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         const expected = await this.redis.get(
@@ -801,7 +914,7 @@ export class WhatsappService {
           from_e164: e164,
         });
         await this.sendText(from, '✅ Account unlocked.');
-        this.sessions.set(from, { flow: 'menu', data: {} });
+        await this.sessions.set(from, { flow: 'menu', data: {} });
         await this.showMenu(from);
         break;
       }
@@ -811,7 +924,7 @@ export class WhatsappService {
           await this.sendText(from, 'Please enter a valid product name.');
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'upload_category',
           data: { productName: name, category_page: 1 },
         });
@@ -825,8 +938,8 @@ export class WhatsappService {
           await this.sendProductCategoryList(from);
           break;
         }
-        const s2 = this.sessions.get(from);
-        this.sessions.set(from, {
+        const s2 = await this.sessions.get(from);
+        await this.sessions.set(from, {
           flow: 'upload_short_desc',
           data: { ...s2.data, category },
         });
@@ -837,11 +950,11 @@ export class WhatsappService {
         break;
       }
       case 'upload_short_desc': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const shortText = (text || '').trim();
         const short_description =
           shortText.toLowerCase() === 'skip' ? undefined : shortText;
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'upload_desc',
           data: { ...s2.data, short_description },
         });
@@ -852,15 +965,15 @@ export class WhatsappService {
         break;
       }
       case 'upload_desc': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const fullText = (text || '').trim();
         const description =
           fullText.toLowerCase() === 'skip' ? undefined : fullText;
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'upload_price',
           data: { ...s2.data, description },
         });
-        await this.sendText(from, this.t(this.getLocale(from), 'ask_price'));
+        await this.sendText(from, this.t(await this.getLocale(from), 'ask_price'));
         break;
       }
       case 'upload_price': {
@@ -869,8 +982,8 @@ export class WhatsappService {
           await this.sendText(from, 'Enter a valid price (e.g., 5.99).');
           break;
         }
-        const s2 = this.sessions.get(from);
-        this.sessions.set(from, {
+        const s2 = await this.sessions.get(from);
+        await this.sessions.set(from, {
           flow: 'upload_qty',
           data: { ...s2.data, price },
         });
@@ -883,8 +996,8 @@ export class WhatsappService {
           await this.sendText(from, 'Enter a whole number (e.g., 0, 10, 250).');
           break;
         }
-        const s2 = this.sessions.get(from);
-        this.sessions.set(from, {
+        const s2 = await this.sessions.get(from);
+        await this.sessions.set(from, {
           flow: 'upload_unit',
           data: { ...s2.data, stock: Math.floor(qty) },
         });
@@ -903,21 +1016,21 @@ export class WhatsappService {
       // removed: upload_price_confirm, upload_stock, upload_condition, upload_organic
       // ===== HARVESTS =====
       case 'harvest_crop':
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'harvest_window',
           data: { crop: text.trim() },
         });
         await this.sendText(
           from,
-          this.t(this.getLocale(from), 'ask_harvest_window'),
+          this.t(await this.getLocale(from), 'ask_harvest_window'),
         );
         break;
       case 'harvest_window':
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'harvest_qty',
           data: { expected_harvest_window: text.trim() },
         });
-        await this.sendText(from, this.t(this.getLocale(from), 'ask_quantity'));
+        await this.sendText(from, this.t(await this.getLocale(from), 'ask_quantity'));
         break;
       case 'harvest_qty': {
         const qty = Number(String(text).replace(/[^0-9.]/g, ''));
@@ -928,7 +1041,7 @@ export class WhatsappService {
           );
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'harvest_unit',
           data: { quantity: qty },
         });
@@ -940,7 +1053,7 @@ export class WhatsappService {
         await this.sendHarvestUnitsList(from);
         break;
       case 'harvest_notes': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const notes =
           (text || '').trim().toLowerCase() === 'skip'
             ? undefined
@@ -955,7 +1068,7 @@ export class WhatsappService {
         const user = s2.user;
         if (!user?.orgId || !user?.id) {
           await this.sendText(from, 'Please sign up first.');
-          this.sessions.set(from, { flow: 'menu' });
+          await this.sessions.set(from, { flow: 'menu' });
           break;
         }
         try {
@@ -981,7 +1094,7 @@ export class WhatsappService {
             from,
             `Harvest posted: ${payload.crop} ${payload.quantity} ${payload.unit}, window ${payload.expected_harvest_window} ✅`,
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Harvest create failed', e as any);
@@ -999,7 +1112,7 @@ export class WhatsappService {
           await this.sendText(from, 'Enter a valid unit price (e.g., 1500).');
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'quote_currency',
           data: { unit_price: price },
         });
@@ -1019,11 +1132,11 @@ export class WhatsappService {
           await this.sendText(from, 'Enter a valid available quantity.');
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'quote_delivery_date',
           data: { available_quantity: qty },
         });
-        await this.sendText(from, this.t(this.getLocale(from), 'ask_delivery'));
+        await this.sendText(from, this.t(await this.getLocale(from), 'ask_delivery'));
         break;
       }
       case 'quote_delivery_date': {
@@ -1032,19 +1145,19 @@ export class WhatsappService {
         if (dd && !/^\d{4}-\d{2}-\d{2}$/.test(dd)) {
           await this.sendText(
             from,
-            this.t(this.getLocale(from), 'ask_delivery'),
+            this.t(await this.getLocale(from), 'ask_delivery'),
           );
           break;
         }
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'quote_notes',
           data: { delivery_date: dd },
         });
-        await this.sendText(from, this.t(this.getLocale(from), 'ask_notes'));
+        await this.sendText(from, this.t(await this.getLocale(from), 'ask_notes'));
         break;
       }
       case 'quote_notes': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const notes =
           (text || '').trim().toLowerCase() === 'skip'
             ? undefined
@@ -1069,7 +1182,7 @@ export class WhatsappService {
             from,
             'Missing details to create quote. Please start again.',
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         try {
@@ -1099,7 +1212,7 @@ export class WhatsappService {
             },
           });
           await this.sendText(from, `Quote submitted for request ${reqId} ✅`);
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Create quote failed', e as any);
@@ -1112,7 +1225,7 @@ export class WhatsappService {
       }
       // ===== HBR ACK =====
       case 'hbr_message': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const msg =
           (text || '').trim().toLowerCase() === 'skip'
             ? undefined
@@ -1128,7 +1241,7 @@ export class WhatsappService {
             from,
             'Missing details to acknowledge. Please try again.',
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         try {
@@ -1139,7 +1252,7 @@ export class WhatsappService {
             { can_fulfill: s2.data.hbr_can_fulfill, seller_message: msg },
           );
           await this.sendText(from, `Acknowledged request ✅`);
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Ack HBR failed', e as any);
@@ -1152,7 +1265,7 @@ export class WhatsappService {
         await this.listPendingOrders(from);
         break;
       case 'order_accept_eta':
-        this.sessions.set(from, {
+        await this.sessions.set(from, {
           flow: 'order_accept_shipping',
           data: { estimated_delivery_date: (text || '').trim() || undefined },
         });
@@ -1162,7 +1275,7 @@ export class WhatsappService {
         );
         break;
       case 'order_accept_shipping': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const shipping =
           (text || '').trim().toLowerCase() === 'skip'
             ? undefined
@@ -1171,7 +1284,7 @@ export class WhatsappService {
         const orderId = s2.data.order_id;
         if (!user?.orgId || !user?.id || !orderId) {
           await this.sendText(from, 'Missing details. Please try again.');
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         try {
@@ -1200,7 +1313,7 @@ export class WhatsappService {
             String(orderId),
             'accepted',
             undefined,
-            this.getLocale(from),
+            await this.getLocale(from),
           );
           // Notify buyer via template if paired
           await this.notifyBuyerOrderUpdate(
@@ -1208,7 +1321,7 @@ export class WhatsappService {
             String(orderId),
             'accepted',
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Accept order failed', e as any);
@@ -1220,13 +1333,13 @@ export class WhatsappService {
         break;
       }
       case 'order_reject_reason': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const reason = (text || '').trim() || 'No reason provided';
         const user = s2.user;
         const orderId = s2.data.order_id;
         if (!user?.orgId || !user?.id || !orderId) {
           await this.sendText(from, 'Missing details. Please try again.');
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         try {
@@ -1250,7 +1363,7 @@ export class WhatsappService {
             String(orderId),
             'rejected',
             undefined,
-            this.getLocale(from),
+            await this.getLocale(from),
           );
           // Notify buyer via template if paired
           await this.notifyBuyerOrderUpdate(
@@ -1258,7 +1371,7 @@ export class WhatsappService {
             String(orderId),
             'rejected',
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Reject order failed', e as any);
@@ -1273,14 +1386,14 @@ export class WhatsappService {
         // handled via routeMenuChoice('ost_*')
         break;
       case 'order_update_tracking': {
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const user = s2.user;
         const orderId = s2.data.order_id;
         const status = s2.data.status as string;
         const tracking = (text || '').trim();
         if (!user?.orgId || !user?.id || !orderId || !status) {
           await this.sendText(from, 'Missing details. Please try again.');
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           break;
         }
         try {
@@ -1317,7 +1430,7 @@ export class WhatsappService {
             String(orderId),
             status,
             tracking || undefined,
-            this.getLocale(from),
+            await this.getLocale(from),
           );
           // Notify buyer via template if paired
           await this.notifyBuyerOrderUpdate(
@@ -1326,7 +1439,7 @@ export class WhatsappService {
             status,
             tracking || undefined,
           );
-          this.sessions.set(from, { flow: 'menu', data: {} });
+          await this.sessions.set(from, { flow: 'menu', data: {} });
           await this.showMenu(from);
         } catch (e) {
           this.logger.error('Update order failed', e as any);
@@ -1340,11 +1453,11 @@ export class WhatsappService {
       // ===== TRANSACTIONS =====
       case 'tx_check_id': {
         const id = (text || '').trim();
-        const s2 = this.sessions.get(from);
+        const s2 = await this.sessions.get(from);
         const user = s2.user;
         if (!user?.orgId) {
           await this.sendText(from, 'Please sign up first.');
-          this.sessions.set(from, { flow: 'menu' });
+          await this.sessions.set(from, { flow: 'menu' });
           break;
         }
         try {
@@ -1356,7 +1469,7 @@ export class WhatsappService {
         } catch {
           await this.sendText(from, 'Transaction not found.');
         }
-        this.sessions.set(from, { flow: 'menu', data: {} });
+        await this.sessions.set(from, { flow: 'menu', data: {} });
         await this.showMenu(from);
         break;
       }
@@ -1375,7 +1488,7 @@ export class WhatsappService {
       const orgId = withOrg?.organization_users?.[0]?.organization_id;
       const accountType =
         withOrg?.organization_users?.[0]?.organizations?.account_type;
-      this.sessions.set(from, {
+      await this.sessions.set(from, {
         user: {
           id: user.id,
           email: user.email,
@@ -1397,7 +1510,7 @@ export class WhatsappService {
           email_verification_token: otp,
           email_verification_expires: expires,
         });
-        this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+        await this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
         await this.sendOtp(from, otp);
         await this.sendText(
           from,
@@ -1411,7 +1524,7 @@ export class WhatsappService {
 
   private async routeMenuChoice(to: string, choice: string) {
     // Locked accounts: only allow explicit unlock
-    const s0 = this.sessions.get(to);
+    const s0 = await this.sessions.get(to);
     const uid0 = s0.user?.id;
     if (uid0) {
       const isLocked = (await this.redis.get(`wa:locked:${uid0}`)) === '1';
@@ -1423,8 +1536,17 @@ export class WhatsappService {
         return;
       }
     }
+    if (choice === 'delete_confirm_yes') {
+      await this.executeDataDeletion(to);
+      return;
+    }
+    if (choice === 'delete_confirm_no') {
+      await this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sendText(to, 'Deletion cancelled. Reply "menu" to continue.');
+      return;
+    }
     if (choice === 'menu_signup') {
-      this.sessions.set(to, { flow: 'signup_name', data: {} });
+      await this.sessions.set(to, { flow: 'signup_name', data: {} });
       await this.sendText(
         to,
         "Let's create your Procur account. What's your full name?",
@@ -1432,7 +1554,7 @@ export class WhatsappService {
       return;
     }
     if (choice === 'menu_lock') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (s.user?.id) {
         await this.redis.set(
           `wa:locked:${s.user.id}`,
@@ -1450,13 +1572,13 @@ export class WhatsappService {
       return;
     }
     if (choice === 'menu_unlock') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (s.user?.id) {
         const otp = this.generateOtp();
         await this.redis.set(`wa:unlock:otp:${s.user.id}`, otp, 'EX', 10 * 60);
         await this.redis.set(`wa:unlock:attempts:${to}`, '0', 'EX', 10 * 60);
         await this.sendOtp(to, otp);
-        this.sessions.set(to, { flow: 'unlock_otp' });
+        await this.sessions.set(to, { flow: 'unlock_otp' });
         await this.sendText(
           to,
           'Enter the 6-digit code to unlock your account.',
@@ -1467,7 +1589,7 @@ export class WhatsappService {
       return;
     }
     if (choice === 'menu_logout') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const uid = s.user?.id;
       if (uid) {
         await this.redis.del(`wa:fp:${uid}`);
@@ -1478,7 +1600,7 @@ export class WhatsappService {
         'EX',
         60 * 60 * 24 * 365,
       );
-      this.sessions.clear(to);
+      await this.sessions.clear(to);
       await this.sendText(
         to,
         'You have been logged out. Type "login" to sign in or "signup" to create an account.',
@@ -1491,16 +1613,16 @@ export class WhatsappService {
     }
     if (choice === 'lang_en' || choice === 'lang_es') {
       const locale = choice === 'lang_es' ? 'es' : 'en';
-      this.sessions.set(to, { data: { locale } });
+      await this.sessions.set(to, { data: { locale } });
       await this.sendText(to, `Language set to ${locale}.`);
       await this.showMenu(to);
       return;
     }
     if (choice === 'menu_undo') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const prev = s.data?._prev;
       if (prev?.flow) {
-        this.sessions.set(to, { flow: prev.flow, data: prev.data || {} });
+        await this.sessions.set(to, { flow: prev.flow, data: prev.data || {} });
         await this.sendText(to, 'Reverted to previous step.');
       } else {
         await this.sendText(to, 'Nothing to undo.');
@@ -1508,49 +1630,49 @@ export class WhatsappService {
       return;
     }
     if (choice === 'menu_faq') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       await this.sendFaqList(to);
       return;
     }
     if (choice === 'menu_harvest') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
-      this.sessions.set(to, { flow: 'harvest_crop', data: {} });
+      await this.sessions.set(to, { flow: 'harvest_crop', data: {} });
       await this.sendText(to, 'Crop?');
       return;
     }
     if (choice === 'menu_requests') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
-      this.sessions.set(to, { data: { requests_page: 1 } });
+      await this.sessions.set(to, { data: { requests_page: 1 } });
       await this.listOpenRequests(to);
       return;
     }
     if (choice === 'menu_orders') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       if (s.user.accountType === 'buyer') {
         await this.listBuyerOrders(to);
         return;
       } else {
-        this.sessions.set(to, {
+        await this.sessions.set(to, {
           flow: 'orders_list',
           data: { orders_page: 1 },
         });
@@ -1559,10 +1681,10 @@ export class WhatsappService {
       }
     }
     if (choice === 'menu_transactions') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       await this.sendButtons(to, 'Transactions:', [
@@ -1572,26 +1694,26 @@ export class WhatsappService {
       return;
     }
     if (choice === 'req_next' || choice === 'req_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const cur = Number(s.data.requests_page || 1);
       const next = choice === 'req_next' ? cur + 1 : Math.max(1, cur - 1);
-      this.sessions.set(to, { data: { requests_page: next } });
+      await this.sessions.set(to, { data: { requests_page: next } });
       await this.listOpenRequests(to);
       return;
     }
     if (choice === 'ords_next' || choice === 'ords_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const cur = Number(s.data.orders_page || 1);
       const next = choice === 'ords_next' ? cur + 1 : Math.max(1, cur - 1);
-      this.sessions.set(to, { data: { orders_page: next } });
+      await this.sessions.set(to, { data: { orders_page: next } });
       await this.listPendingOrders(to);
       return;
     }
     if (choice === 'tx_next' || choice === 'tx_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const cur = Number(s.data.tx_page || 1);
       const next = choice === 'tx_next' ? cur + 1 : Math.max(1, cur - 1);
-      this.sessions.set(to, { data: { tx_page: next } });
+      await this.sessions.set(to, { data: { tx_page: next } });
       await this.listRecentTransactions(to);
       return;
     }
@@ -1609,7 +1731,7 @@ export class WhatsappService {
         country_dm: 'Dominica',
         country_kn: 'St Kitts',
       };
-      this.sessions.set(to, { data: { country: countryMap[choice] } as any });
+      await this.sessions.set(to, { data: { country: countryMap[choice] } as any });
       const randomPwd = this.generateRandomPassword();
       await this.finishWhatsappSignup(to, randomPwd);
       return;
@@ -1617,8 +1739,8 @@ export class WhatsappService {
     if (choice === 'acct_buyer' || choice === 'acct_seller') {
       const accountType = choice === 'acct_buyer' ? 'buyer' : 'seller';
       const businessType = accountType === 'seller' ? 'farmers' : 'general';
-      const s = this.sessions.get(to);
-      this.sessions.set(to, {
+      const s = await this.sessions.get(to);
+      await this.sessions.set(to, {
         flow: 'signup_country',
         data: { ...(s.data || {}), accountType, businessType },
       });
@@ -1627,10 +1749,10 @@ export class WhatsappService {
     }
     if (choice.startsWith('unit_')) {
       const unit = choice.replace('unit_', '').replace('_', ' ');
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (s.flow === 'upload_unit') {
         // Product upload flow: capture unit, then go to photos
-        this.sessions.set(to, {
+        await this.sessions.set(to, {
           flow: 'upload_photo',
           data: { ...s.data, unit },
         });
@@ -1640,16 +1762,16 @@ export class WhatsappService {
         );
       } else {
         // Harvest flow (existing)
-        this.sessions.set(to, { flow: 'harvest_notes', data: { unit } });
+        await this.sessions.set(to, { flow: 'harvest_notes', data: { unit } });
         await this.sendText(to, 'Notes? (optional, type "skip" to continue)');
       }
       return;
     }
     if (choice.startsWith('cat_')) {
       const category = choice.substring(4).replace(/_/g, ' ');
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (s.flow === 'upload_category') {
-        this.sessions.set(to, {
+        await this.sessions.set(to, {
           flow: 'upload_short_desc',
           data: { ...s.data, category },
         });
@@ -1662,32 +1784,32 @@ export class WhatsappService {
     }
     if (choice.startsWith('cur_')) {
       const cur = choice.replace('cur_', '').toUpperCase();
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (s.flow === 'upload_currency') {
         // Upload flow: capture currency, then ask for stock quantity
-        this.sessions.set(to, {
+        await this.sessions.set(to, {
           flow: 'upload_stock',
           data: { ...s.data, currency: cur },
         });
         await this.sendText(to, 'Stock quantity? (e.g., 0, 10, 250)');
       } else {
         // Quote flow (existing)
-        this.sessions.set(to, {
+        await this.sessions.set(to, {
           flow: 'quote_available_qty',
           data: { currency: cur },
         });
         await this.sendText(
           to,
-          this.t(this.getLocale(to), 'ask_available_qty'),
+          this.t(await this.getLocale(to), 'ask_available_qty'),
         );
       }
       return;
     }
     if (choice === 'cat_more' || choice === 'cat_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const page = Number(s.data.category_page || 1);
       const next = choice === 'cat_more' ? page + 1 : Math.max(1, page - 1);
-      this.sessions.set(to, {
+      await this.sessions.set(to, {
         flow: 'upload_category',
         data: { ...s.data, category_page: next },
       });
@@ -1700,11 +1822,11 @@ export class WhatsappService {
       return;
     }
     if (choice === 'photo_done') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || !user?.id) {
         await this.sendText(to, 'Please link your seller account first.');
-        this.sessions.set(to, { flow: 'menu' });
+        await this.sessions.set(to, { flow: 'menu' });
         return;
       }
       const images = (s.data.images as Array<{ image_url: string }>) || [];
@@ -1770,13 +1892,13 @@ export class WhatsappService {
         this.logger.error('Upload finalize failed', e as any);
         await this.sendText(to, 'Failed to create product. Please try again.');
       }
-      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sessions.set(to, { flow: 'menu', data: {} });
       await this.showMenu(to);
       return;
     }
     if (choice.startsWith('req_')) {
       const reqId = choice.substring(4);
-      this.sessions.set(to, {
+      await this.sessions.set(to, {
         flow: 'quote_unit_price',
         data: { request_id: reqId },
       });
@@ -1785,7 +1907,7 @@ export class WhatsappService {
     }
     if (choice.startsWith('hbr_')) {
       const rId = choice.substring(4);
-      this.sessions.set(to, { data: { hbr_id: rId } });
+      await this.sessions.set(to, { data: { hbr_id: rId } });
       await this.sendButtons(to, 'Can you fulfill this request?', [
         { id: 'hbr_yes', title: 'Yes' },
         { id: 'hbr_no', title: 'No' },
@@ -1794,7 +1916,7 @@ export class WhatsappService {
     }
     if (choice === 'hbr_yes' || choice === 'hbr_no') {
       const can = choice === 'hbr_yes';
-      this.sessions.set(to, {
+      await this.sessions.set(to, {
         flow: 'hbr_message',
         data: { hbr_can_fulfill: can },
       });
@@ -1803,7 +1925,7 @@ export class WhatsappService {
     }
     if (choice.startsWith('bord_')) {
       const orderId = choice.substring(5);
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || user.accountType !== 'buyer') {
         await this.sendText(
@@ -1844,7 +1966,7 @@ export class WhatsappService {
     }
     if (choice.startsWith('bord_cancel_')) {
       const orderId = choice.substring('bord_cancel_'.length);
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || user.accountType !== 'buyer') {
         await this.sendText(
@@ -1867,7 +1989,7 @@ export class WhatsappService {
     }
     if (choice.startsWith('ord_')) {
       const orderId = choice.substring(4);
-      this.sessions.set(to, { data: { order_id: orderId } });
+      await this.sessions.set(to, { data: { order_id: orderId } });
       await this.sendButtons(to, 'Order actions:', [
         { id: 'ord_accept', title: 'Accept' },
         { id: 'ord_reject', title: 'Reject' },
@@ -1884,9 +2006,9 @@ export class WhatsappService {
         await this.sendText(to, 'Missing order id. Please try again.');
         return;
       }
-      this.sessions.set(to, { data: { order_id: orderId } });
+      await this.sessions.set(to, { data: { order_id: orderId } });
       if (action === 'accept') {
-        this.sessions.set(to, { flow: 'order_accept_eta' });
+        await this.sessions.set(to, { flow: 'order_accept_eta' });
         await this.sendText(
           to,
           'Estimated delivery date? (YYYY-MM-DD or write a date range)',
@@ -1894,13 +2016,13 @@ export class WhatsappService {
         return;
       }
       if (action === 'reject') {
-        this.sessions.set(to, { flow: 'order_reject_reason' });
+        await this.sessions.set(to, { flow: 'order_reject_reason' });
         await this.sendText(to, 'Reason for rejection?');
         return;
       }
     }
     if (choice.startsWith('faq_')) {
-      const s2 = this.sessions.get(to);
+      const s2 = await this.sessions.get(to);
       if (!s2.user?.orgId) {
         await this.sendText(to, 'Sign up to continue. Type "menu" to begin.');
         return;
@@ -1936,7 +2058,7 @@ export class WhatsappService {
       return;
     }
     if (choice === 'ord_accept') {
-      this.sessions.set(to, { flow: 'order_accept_eta' });
+      await this.sessions.set(to, { flow: 'order_accept_eta' });
       await this.sendText(
         to,
         'Estimated delivery date? (YYYY-MM-DD, optional)',
@@ -1944,7 +2066,7 @@ export class WhatsappService {
       return;
     }
     if (choice === 'ord_reject') {
-      this.sessions.set(to, { flow: 'order_reject_reason' });
+      await this.sessions.set(to, { flow: 'order_reject_reason' });
       await this.sendText(to, 'Reason for rejection?');
       return;
     }
@@ -1958,10 +2080,10 @@ export class WhatsappService {
     }
     if (choice.startsWith('ost_')) {
       const status = choice.replace('ost_', '');
-      this.sessions.set(to, { data: { status } });
-      const s2 = this.sessions.get(to);
+      await this.sessions.set(to, { data: { status } });
+      const s2 = await this.sessions.get(to);
       if (status === 'shipped') {
-        this.sessions.set(to, { flow: 'order_update_tracking' });
+        await this.sessions.set(to, { flow: 'order_update_tracking' });
         await this.sendText(
           to,
           'Tracking number? (optional, press Enter to skip)',
@@ -1971,7 +2093,7 @@ export class WhatsappService {
         const orderId = s2.data.order_id;
         if (!user?.orgId || !user?.id || !orderId) {
           await this.sendText(to, 'Missing details.');
-          this.sessions.set(to, { flow: 'menu', data: {} });
+          await this.sessions.set(to, { flow: 'menu', data: {} });
           return;
         }
         try {
@@ -1996,30 +2118,30 @@ export class WhatsappService {
           this.logger.error('Update status failed', e as any);
           await this.sendText(to, 'Failed to update order.');
         }
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         await this.showMenu(to);
       }
       return;
     }
     if (choice === 'tx_list_recent') {
       await this.listRecentTransactions(to);
-      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sessions.set(to, { flow: 'menu', data: {} });
       await this.showMenu(to);
       return;
     }
     if (choice === 'tx_check') {
-      this.sessions.set(to, { flow: 'tx_check_id' });
+      await this.sessions.set(to, { flow: 'tx_check_id' });
       await this.sendText(to, 'Enter transaction ID:');
       return;
     }
     if (choice === 'menu_upload') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId || s.user?.accountType !== 'seller') {
         await this.sendText(
           to,
           'Link your seller account first. Reply "signup" to create one or provide your registered email.',
         );
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       // Require phone pairing before starting product upload
@@ -2027,21 +2149,21 @@ export class WhatsappService {
         // ensurePairedOrRequestUnlock already sent instructions
         return;
       }
-      this.sessions.set(to, { flow: 'upload_name', data: {} });
+      await this.sessions.set(to, { flow: 'upload_name', data: {} });
       await this.sendText(to, 'Product name?');
       return;
     }
     if (choice === 'menu_inventory') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId || s.user?.accountType !== 'seller') {
         await this.sendText(
           to,
           'Sign up or link your seller account to continue.',
         );
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
-      this.sessions.set(to, {
+      await this.sessions.set(to, {
         flow: 'inventory_browse',
         data: { inv_page: 1 },
       });
@@ -2049,24 +2171,24 @@ export class WhatsappService {
       return;
     }
     if (choice === 'menu_market') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       if (!s.user?.orgId || s.user?.accountType !== 'buyer') {
         await this.sendText(
           to,
           'Sign up or switch to a buyer account to continue.',
         );
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
-      this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
+      await this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
       await this.listMarketplaceProducts(to);
       return;
     }
     if (choice === 'mp_next' || choice === 'mp_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const cur = Number(s.data.mp_page || 1);
       const next = choice === 'mp_next' ? cur + 1 : Math.max(1, cur - 1);
-      this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: next } });
+      await this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: next } });
       await this.listMarketplaceProducts(to);
       return;
     }
@@ -2086,7 +2208,7 @@ export class WhatsappService {
     }
     if (choice.startsWith('cart_add_')) {
       const productId = choice.substring(9);
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || !user?.id) return;
       try {
@@ -2108,11 +2230,11 @@ export class WhatsappService {
       return;
     }
     if (choice === 'cart_checkout_later') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || !user?.id) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       if (user.accountType !== 'buyer') {
@@ -2120,17 +2242,17 @@ export class WhatsappService {
           to,
           'Checkout is only available for buyer accounts. Please sign up or sign in as a buyer.',
         );
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       await this.startCartCheckoutLater(to);
       return;
     }
     if (choice === 'inv_next' || choice === 'inv_prev') {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const cur = Number(s.data.inv_page || 1);
       const next = choice === 'inv_next' ? cur + 1 : Math.max(1, cur - 1);
-      this.sessions.set(to, {
+      await this.sessions.set(to, {
         flow: 'inventory_browse',
         data: { inv_page: next },
       });
@@ -2141,7 +2263,7 @@ export class WhatsappService {
       const productId = choice.substring(5);
       // We only show a quick summary for now; details/edit can be added later
       try {
-        const s = this.sessions.get(to);
+        const s = await this.sessions.get(to);
         const user = s.user;
         if (!user?.orgId) return;
         const p = await this.sellers.getProductById(user.orgId, productId);
@@ -2186,11 +2308,11 @@ export class WhatsappService {
     }
     if (choice.startsWith('addr_')) {
       const addressId = choice.substring(5);
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       if (!user?.orgId || !user?.id) {
         await this.sendText(to, 'Sign up to continue.');
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       if (user.accountType !== 'buyer') {
@@ -2198,7 +2320,7 @@ export class WhatsappService {
           to,
           'Checkout is only available for buyer accounts. Please sign up or sign in as a buyer.',
         );
-        this.sessions.set(to, { flow: 'signup_name' });
+        await this.sessions.set(to, { flow: 'signup_name' });
         return;
       }
       await this.completeCartCheckoutWithAddress(to, addressId);
@@ -2208,7 +2330,7 @@ export class WhatsappService {
   }
 
   private async finishWhatsappSignup(from: string, passwordPlain: string) {
-    const s = this.sessions.get(from);
+    const s = await this.sessions.get(from);
     const name = s.data.name;
     const accountType = (s.data.accountType as string) || 'seller';
     const businessType =
@@ -2247,13 +2369,13 @@ export class WhatsappService {
         status: 'active',
       } as any);
       await this.supabase.ensureCreatorIsOrganizationAdmin(user.id, org.id);
-      this.sessions.set(from, {
+      await this.sessions.set(from, {
         user: { id: user.id, email, orgId: org.id, accountType, name },
       });
 
       // Ask for Farmer's ID for sellers only; buyers go straight to OTP
       if (accountType === 'seller') {
-        this.sessions.set(from, { flow: 'signup_farmers_id' });
+        await this.sessions.set(from, { flow: 'signup_farmers_id' });
         await this.sendText(
           from,
           "Please upload a photo of your Farmer's ID to continue.",
@@ -2266,7 +2388,7 @@ export class WhatsappService {
           email_verification_token: otp,
           email_verification_expires: expires,
         });
-        this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+        await this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
         await this.sendOtp(from, otp);
         await this.sendText(
           from,
@@ -2280,7 +2402,7 @@ export class WhatsappService {
   }
 
   private async verifyWhatsappOtp(from: string, code: string) {
-    const s = this.sessions.get(from);
+    const s = await this.sessions.get(from);
     const expected = (s.data.otp as string) || '';
     // Rate limit attempts per user/phone
     const attemptsKey = `wa:otp:attempts:${from}`;
@@ -2293,7 +2415,7 @@ export class WhatsappService {
         from,
         'Too many attempts. Please wait 10 minutes and try again.',
       );
-      this.sessions.set(from, { flow: 'menu', data: {} });
+      await this.sessions.set(from, { flow: 'menu', data: {} });
       return;
     }
     if (!/^[0-9]{6}$/.test(code)) {
@@ -2311,12 +2433,12 @@ export class WhatsappService {
           from,
           'The code is expired or invalid. Please start signup again.',
         );
-        this.sessions.set(from, { flow: 'menu', data: {} });
+        await this.sessions.set(from, { flow: 'menu', data: {} });
         return;
       }
       await this.redis.del(attemptsKey);
       // Ensure the organization is active for marketplace visibility
-      const current = this.sessions.get(from);
+      const current = await this.sessions.get(from);
       const orgId = current.user?.orgId;
       if (orgId) {
         try {
@@ -2339,7 +2461,7 @@ export class WhatsappService {
         );
       }
       await this.sendText(from, '✅ Verified! Your Procur account is ready.');
-      this.sessions.set(from, { flow: 'menu', data: {} });
+      await this.sessions.set(from, { flow: 'menu', data: {} });
       await this.showMenu(from);
     } catch (e) {
       this.logger.error('OTP verify failed', e as any);
@@ -2348,7 +2470,7 @@ export class WhatsappService {
   }
 
   private async handleImage(from: string, mediaId: string) {
-    const s = this.sessions.get(from);
+    const s = await this.sessions.get(from);
     if (s.user?.id) {
       const isLocked = (await this.redis.get(`wa:locked:${s.user.id}`)) === '1';
       if (isLocked) {
@@ -2374,7 +2496,7 @@ export class WhatsappService {
         const user = s.user;
         if (!user?.orgId || !user?.id) {
           await this.sendText(from, 'Please link your seller account first.');
-          this.sessions.set(from, { flow: 'menu' });
+          await this.sessions.set(from, { flow: 'menu' });
           return;
         }
         const objectPath = `ids/farmers/${user.orgId}/${Date.now()}.jpg`;
@@ -2395,7 +2517,7 @@ export class WhatsappService {
           email_verification_token: otp,
           email_verification_expires: expires,
         });
-        this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+        await this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
         await this.sendOtp(from, otp);
         await this.sendText(
           from,
@@ -2411,7 +2533,7 @@ export class WhatsappService {
       const user = s.user;
       if (!user?.orgId || !user?.id) {
         await this.sendText(from, 'Please link your seller account first.');
-        this.sessions.set(from, { flow: 'menu' });
+        await this.sessions.set(from, { flow: 'menu' });
         return;
       }
       // Skip pairing re-check during image upload; pairing was enforced when starting upload
@@ -2425,7 +2547,7 @@ export class WhatsappService {
         ? (s.data.images as any[])
         : [];
       const updated = [...existing, { image_url: publicUrl }];
-      this.sessions.set(from, {
+      await this.sessions.set(from, {
         flow: 'upload_photo',
         data: { ...s.data, images: updated },
       });
@@ -2495,9 +2617,9 @@ export class WhatsappService {
   }
 
   private async showMenu(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     if (s.user?.id) {
-      const locale = this.getLocale(to);
+      const locale = await this.getLocale(to);
       const name = s.user.name || 'there';
       const welcome = this.t(locale, 'welcome_back').replace('{{name}}', name);
       if (s.user.accountType === 'buyer') {
@@ -2607,7 +2729,7 @@ export class WhatsappService {
       'Seafood',
       'Other',
     ];
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const page = Number(s.data.category_page || 1);
     const pageSize = 9; // keep <=9 so we can add a nav row and stay within 10 rows limit
     const totalPages = Math.max(1, Math.ceil(categories.length / pageSize));
@@ -2638,7 +2760,7 @@ export class WhatsappService {
   }
 
   private async listSellerProducts(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId) {
       await this.sendText(to, 'Sign up to continue. Type "menu" to begin.');
@@ -2678,7 +2800,7 @@ export class WhatsappService {
   }
 
   private async listMarketplaceProducts(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId) {
       await this.sendText(to, 'Sign up to continue. Type "menu" to begin.');
@@ -2729,7 +2851,7 @@ export class WhatsappService {
 
   private async showMarketplaceProductDetail(to: string, productId: string) {
     try {
-      const s = this.sessions.get(to);
+      const s = await this.sessions.get(to);
       const user = s.user;
       const p = await this.buyers.getProductDetail(productId, user?.orgId);
       if (p.image_url) {
@@ -2770,18 +2892,18 @@ export class WhatsappService {
   }
 
   private async showCart(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId || !user?.id) {
       await this.sendText(to, 'Sign up to continue.');
-      this.sessions.set(to, { flow: 'signup_name' });
+      await this.sessions.set(to, { flow: 'signup_name' });
       return;
     }
     try {
       const cart = await this.buyers.getCart(user.orgId, user.id);
       if (!cart.total_items) {
         await this.sendText(to, 'Your cart is empty.');
-        this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
+        await this.sessions.set(to, { flow: 'mp_browse', data: { mp_page: 1 } });
         await this.listMarketplaceProducts(to);
         return;
       }
@@ -2880,7 +3002,7 @@ export class WhatsappService {
   }
 
   private async listOpenRequests(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId) return;
     const page = Number(s.data.requests_page || 1);
@@ -2924,7 +3046,7 @@ export class WhatsappService {
   }
 
   private async listPendingOrders(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId) return;
     const page = Number(s.data.orders_page || 1);
@@ -2970,7 +3092,7 @@ export class WhatsappService {
   }
 
   private async listBuyerOrders(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId || user.accountType !== 'buyer') {
       await this.sendText(
@@ -3022,7 +3144,7 @@ export class WhatsappService {
   }
 
   private async listRecentTransactions(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId) return;
     const page = Number(s.data.tx_page || 1);
@@ -3053,11 +3175,11 @@ export class WhatsappService {
   }
 
   private async startCartCheckoutLater(to: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId || !user?.id) {
       await this.sendText(to, 'Sign up to continue.');
-      this.sessions.set(to, { flow: 'signup_name' });
+      await this.sessions.set(to, { flow: 'signup_name' });
       return;
     }
     try {
@@ -3075,7 +3197,7 @@ export class WhatsappService {
           to,
           'Failed to load your addresses. Please try again or use the buyer web app.',
         );
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         await this.showMenu(to);
         return;
       }
@@ -3085,7 +3207,7 @@ export class WhatsappService {
           to,
           'To place an order, please add a shipping address in the buyer web app, then reply "menu" here.',
         );
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         return;
       }
 
@@ -3094,7 +3216,7 @@ export class WhatsappService {
         return;
       }
 
-      this.sessions.set(to, { flow: 'checkout_select_address' });
+      await this.sessions.set(to, { flow: 'checkout_select_address' });
       const rows = addresses.slice(0, 10).map((a: any) => {
         const title = this.truncate(a.label || a.contact_name || 'Address', 24);
         const parts = [
@@ -3128,17 +3250,17 @@ export class WhatsappService {
         to,
         'Failed to start checkout. Please try again or use the buyer web app.',
       );
-      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sessions.set(to, { flow: 'menu', data: {} });
       await this.showMenu(to);
     }
   }
 
   private async completeCartCheckoutWithAddress(to: string, addressId: string) {
-    const s = this.sessions.get(to);
+    const s = await this.sessions.get(to);
     const user = s.user;
     if (!user?.orgId || !user?.id) {
       await this.sendText(to, 'Sign up to continue.');
-      this.sessions.set(to, { flow: 'signup_name' });
+      await this.sessions.set(to, { flow: 'signup_name' });
       return;
     }
     const lockKey = `wa:checkout_lock:${user.orgId}:${user.id}`;
@@ -3170,7 +3292,7 @@ export class WhatsappService {
       }
       if (!cartId) {
         await this.sendText(to, 'Your cart is empty.');
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         await this.showMenu(to);
         return;
       }
@@ -3191,7 +3313,7 @@ export class WhatsappService {
 
       if (!cartItems || cartItems.length === 0) {
         await this.sendText(to, 'Your cart is empty.');
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         await this.showMenu(to);
         return;
       }
@@ -3204,7 +3326,7 @@ export class WhatsappService {
           to,
           'Your cart has no items with a positive quantity. Please update your cart and try again.',
         );
-        this.sessions.set(to, { flow: 'menu', data: {} });
+        await this.sessions.set(to, { flow: 'menu', data: {} });
         await this.showMenu(to);
         return;
       }
@@ -3229,7 +3351,7 @@ export class WhatsappService {
         to,
         `Order placed ✅\nOrder: ${firstOrder.order_number}\nTotal: ${firstOrder.total_amount} ${firstOrder.currency}\nPayment: pending (offline, will be marked as paid by admin).`,
       );
-      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sessions.set(to, { flow: 'menu', data: {} });
       await this.showMenu(to);
     } catch (e) {
       this.logger.error(
@@ -3246,7 +3368,7 @@ export class WhatsappService {
       } catch {
         // ignore
       }
-      this.sessions.set(to, { flow: 'menu', data: {} });
+      await this.sessions.set(to, { flow: 'menu', data: {} });
       await this.showMenu(to);
     }
   }
@@ -3423,8 +3545,8 @@ export class WhatsappService {
     if (max <= 1) return s.slice(0, max);
     return s.slice(0, max - 1) + '…';
   }
-  private getLocale(to: string): string {
-    const s = this.sessions.get(to);
+  private async getLocale(to: string): Promise<string> {
+    const s = await this.sessions.get(to);
     return (s.data.locale as string) || 'en';
   }
 
@@ -3520,7 +3642,7 @@ export class WhatsappService {
 
   private async sendOtp(to: string, otp: string) {
     const outside = await this.isOutside24h(to);
-    const locale = this.getLocale(to);
+    const locale = await this.getLocale(to);
     if (outside) {
       await this.sendTemplate(
         to,
@@ -3616,13 +3738,150 @@ export class WhatsappService {
     }
   }
 
+  /** Persist opt-out to Redis (fast cache) and Supabase (durable). */
+  private async setOptOut(phone: string) {
+    await this.redis.set(`wa:optout:${phone}`, '1');
+    try {
+      const client = this.supabase.getClient();
+      await client
+        .from('whatsapp_optouts')
+        .upsert({ phone_e164: phone }, { onConflict: 'phone_e164' });
+    } catch (e) {
+      this.logger.warn('Supabase optout persist failed', e as any);
+    }
+  }
+
+  /** Remove opt-out from Redis and Supabase. */
+  private async clearOptOut(phone: string) {
+    await this.redis.del(`wa:optout:${phone}`);
+    try {
+      const client = this.supabase.getClient();
+      await client
+        .from('whatsapp_optouts')
+        .delete()
+        .eq('phone_e164', phone);
+    } catch (e) {
+      this.logger.warn('Supabase optout clear failed', e as any);
+    }
+  }
+
+  /** Check opt-out: Redis first, Supabase as fallback (re-warms Redis on hit). */
+  async isOptedOut(phone: string): Promise<boolean> {
+    const cached = await this.redis.get(`wa:optout:${phone}`);
+    if (cached) return true;
+    try {
+      const client = this.supabase.getClient();
+      const { data } = await client
+        .from('whatsapp_optouts')
+        .select('phone_e164')
+        .eq('phone_e164', phone)
+        .maybeSingle();
+      if (data) {
+        await this.redis.set(`wa:optout:${phone}`, '1');
+        return true;
+      }
+    } catch (e) {
+      this.logger.warn('Supabase optout check failed; relying on Redis', e as any);
+    }
+    return false;
+  }
+
+  /**
+   * Permanently purge a user's Procur account and all associated WhatsApp data.
+   * Called when the user confirms "delete my data".
+   */
+  private async executeDataDeletion(phone: string) {
+    const s = await this.sessions.get(phone);
+    const userId = s.user?.id;
+    const orgId = s.user?.orgId;
+
+    // 1. Purge all WhatsApp Redis keys for this user/phone
+    const keysToDelete: string[] = [
+      `wa:session:${phone}`,
+      `wa:logged_out:${phone}`,
+      `wa:last_inbound:${phone}`,
+      `wa:optout:${phone}`,
+    ];
+    if (userId) {
+      keysToDelete.push(
+        `wa:locked:${userId}`,
+        `wa:fp:${userId}`,
+        `wa:last_active:${userId}`,
+        `wa:unlock:otp:${userId}`,
+      );
+    }
+    try {
+      await (this.redis.del as (...args: string[]) => Promise<number>)(...keysToDelete);
+    } catch (e) {
+      this.logger.warn('Redis key purge failed', e as any);
+    }
+
+    // 2. Delete Farmer ID from private storage bucket
+    if (orgId) {
+      try {
+        const client = this.supabase.getClient();
+        const { data: org } = await client
+          .from('organizations')
+          .select('farmers_id')
+          .eq('id', orgId)
+          .maybeSingle();
+        const farmersIdPath = (org as any)?.farmers_id as string | null;
+        if (farmersIdPath && !/^https?:\/\//i.test(farmersIdPath)) {
+          const privateBucket =
+            this.config.get<string>('storage.privateBucket') || 'private';
+          await client.storage.from(privateBucket).remove([farmersIdPath]);
+        }
+      } catch (e) {
+        this.logger.warn('Farmer ID storage deletion failed', e as any);
+      }
+    }
+
+    // 3. Persist opt-out in Redis + Supabase so no proactive messages are sent
+    await this.setOptOut(phone);
+
+    // 4. Soft-delete account in DB
+    if (userId) {
+      try {
+        const client = this.supabase.getClient();
+        await client.from('users').update({ is_active: false }).eq('id', userId);
+        if (orgId) {
+          await client
+            .from('organizations')
+            .update({ status: 'suspended' })
+            .eq('id', orgId);
+          await client
+            .from('organization_users')
+            .update({ is_active: false })
+            .eq('organization_id', orgId);
+        }
+        // Revoke Supabase Auth credentials
+        await this.supabase.deleteAuthUser(userId);
+      } catch (e) {
+        this.logger.warn('Soft-delete failed', e as any);
+      }
+    }
+
+    // 5. Audit trail
+    await this.audit('delete_my_data', {
+      user_id: userId ?? null,
+      from_e164: `+${phone}`,
+    });
+
+    // 6. Clear session and notify user
+    await this.sessions.clear(phone);
+    await this.sendText(
+      phone,
+      "Your Procur account and all associated data have been permanently deleted. We're sorry to see you go.",
+    );
+  }
+
   private async sendTemplate(
     to: string,
     name: string,
     components: any[],
     languageCode = 'en',
   ) {
-    const opted = await this.redis.get(`wa:optout:${to}`);
+    const opted = await this.isOptedOut(to);
     if (opted) {
       this.logger.warn(`Template suppressed due to opt-out for ${to}`);
       return;
@@ -3703,7 +3962,7 @@ export class WhatsappService {
       const orgId = withOrg?.organization_users?.[0]?.organization_id;
       const accountType =
         withOrg?.organization_users?.[0]?.organizations?.account_type;
-      this.sessions.set(from, {
+      await this.sessions.set(from, {
         user: {
           id: user.id,
           email: user.email,
@@ -3718,7 +3977,7 @@ export class WhatsappService {
         email_verification_token: otp,
         email_verification_expires: expires,
       });
-      this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
+      await this.sessions.set(from, { flow: 'signup_otp', data: { otp } });
       await this.sendOtp(from, otp);
       await this.redis.del(`wa:logged_out:${from}`);
       await this.sendText(

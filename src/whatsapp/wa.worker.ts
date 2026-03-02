@@ -1,6 +1,7 @@
 import { Worker, QueueEvents, Job } from 'bullmq';
 import IORedis from 'ioredis';
 import axios from 'axios';
+import * as Sentry from '@sentry/node';
 
 function getToken(): string {
   return process.env.WHATSAPP_TOKEN || '';
@@ -37,11 +38,15 @@ export function startWaWorker(env: { redisUrl?: string }) {
       } catch (err: any) {
         const code = err?.response?.data?.error?.code;
         const subcode = err?.response?.data?.error?.error_subcode;
+        const errMsg = err?.response?.data?.error?.message;
         if (code || subcode) {
           console.error(
-            'WA send error',
-            JSON.stringify({ code, subcode, meta }, null, 2),
+            JSON.stringify({ level: 'error', ctx: 'wa_worker', code, subcode, message: errMsg, meta }),
           );
+          // Report non-token-expiry errors to Sentry
+          if (!isExpiredTokenError(err)) {
+            Sentry.captureException(err, { extra: { code, subcode, meta } });
+          }
         }
         if (isExpiredTokenError(err)) {
           token = (await connection.get('wa:token')) || getToken();
@@ -57,5 +62,15 @@ export function startWaWorker(env: { redisUrl?: string }) {
 
   const worker = new Worker('wa-send', processor, { connection });
   new QueueEvents('wa-send', { connection });
+
+  // Capture jobs that exhaust all retries
+  worker.on('failed', (job, err) => {
+    const meta = job?.data?.meta || {};
+    console.error(
+      JSON.stringify({ level: 'error', ctx: 'wa_worker_failed', jobId: job?.id, meta, error: String(err) }),
+    );
+    Sentry.captureException(err, { extra: { jobId: job?.id, meta } });
+  });
+
   return worker;
 }

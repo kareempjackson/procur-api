@@ -89,6 +89,7 @@ import { OrderReviewDto } from '../buyers/dto/order.dto';
 import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
 import { AdminUpdateOrderDto } from './dto/admin-order-update.dto';
 import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
+import { BroadcastDto } from './dto/broadcast.dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth('JWT-auth')
@@ -1360,6 +1361,49 @@ export class AdminController {
       body.template,
       body.variables ?? {},
     );
+  }
+
+  // ===== WhatsApp admin management =====
+
+  @Get('whatsapp/optouts')
+  @ApiOperation({ summary: 'List WhatsApp opted-out phone numbers' })
+  listWhatsappOptOuts(
+    @Query('page') page = 1,
+    @Query('limit') limit = 20,
+  ): Promise<{ items: { phone_e164: string; created_at: string }[]; total: number }> {
+    return this.adminService.listWhatsappOptOuts(Number(page), Number(limit));
+  }
+
+  @Delete('whatsapp/optouts/:phone')
+  @ApiOperation({ summary: 'Clear opt-out for a phone number (admin re-subscribe)' })
+  clearWhatsappOptOut(
+    @Param('phone') phone: string,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.clearWhatsappOptOut(phone);
+  }
+
+  @Post('whatsapp/broadcast')
+  @ApiOperation({
+    summary: 'Broadcast a WhatsApp template to a user segment',
+    description: 'Set dryRun=true to preview recipient count without sending.',
+  })
+  broadcastWhatsapp(
+    @Body() dto: BroadcastDto,
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    return this.adminService.broadcastWhatsapp(
+      dto.segment,
+      dto.template,
+      dto.variables ?? {},
+      dto.dryRun ?? false,
+    );
+  }
+
+  @Post('whatsapp/token')
+  @ApiOperation({ summary: 'Rotate the WhatsApp API token at runtime' })
+  rotateWhatsappToken(
+    @Body() body: { token: string },
+  ): Promise<{ success: boolean }> {
+    return this.adminService.rotateWhatsappToken(body.token);
   }
 
   // ===== Onboarding buyers and sellers from admin =====

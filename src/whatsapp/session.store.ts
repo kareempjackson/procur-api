@@ -53,7 +53,9 @@ export type ExtendedFlow =
   // Transactions
   | 'tx_check_id'
   // Security
-  | 'unlock_otp';
+  | 'unlock_otp'
+  // Account management
+  | 'delete_confirm';
 
 export interface Session {
   flow: ExtendedFlow;

@@ -84,6 +84,10 @@ export class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  WHATSAPP_ADMIN_TOKEN?: string;
+
+  @IsString()
+  @IsOptional()
   TURNSTILE_SECRET?: string;
 
   @IsString()
