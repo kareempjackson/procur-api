@@ -4828,6 +4828,120 @@ export class AdminService {
     return { queued, skipped };
   }
 
+  async notifyOrderSeller(orderId: string): Promise<{ sent: boolean; reason?: string }> {
+    const { order, sellerOrganization, buyerOrganization } = await this.getOrderDetail(orderId);
+    const raw = sellerOrganization?.phoneNumber;
+    if (!raw) return { sent: false, reason: 'no_phone' };
+    const phone = raw.replace(/\D/g, '');
+    if (!phone) return { sent: false, reason: 'no_phone' };
+    const optedOut = await this.whatsapp.isOptedOut(phone);
+    if (optedOut) return { sent: false, reason: 'opted_out' };
+    const manageUrl = `${process.env.SELLER_APP_URL ?? 'https://app.procur.io'}/orders/${orderId}`;
+    await this.waTemplates.sendNewOrderToSeller(
+      phone,
+      order.orderNumber,
+      buyerOrganization?.name ?? 'Buyer',
+      order.totalAmount,
+      (order as any).currency ?? 'USD',
+      manageUrl,
+      'en',
+    );
+    return { sent: true };
+  }
+
+  async notifyOrderBuyer(orderId: string, tracking?: string): Promise<{ sent: boolean; reason?: string }> {
+    const { order, buyerOrganization } = await this.getOrderDetail(orderId);
+    const raw = buyerOrganization?.phoneNumber;
+    if (!raw) return { sent: false, reason: 'no_phone' };
+    const phone = raw.replace(/\D/g, '');
+    if (!phone) return { sent: false, reason: 'no_phone' };
+    const optedOut = await this.whatsapp.isOptedOut(phone);
+    if (optedOut) return { sent: false, reason: 'opted_out' };
+    const trackingNum = tracking || (order as any).trackingNumber || undefined;
+    await this.waTemplates.sendOrderUpdate(phone, order.orderNumber, order.status, trackingNum, 'en');
+    return { sent: true };
+  }
+
+  async broadcastMarketplaceUpdate(
+    featuredItem: string,
+    marketplaceUrl: string,
+    dryRun = false,
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    const client = this.supabase.getClient();
+    const { data: rows } = await client
+      .from('organization_users')
+      .select('users(id, fullname, phone_number), organizations(account_type, status)')
+      .eq('organizations.account_type', 'buyer')
+      .eq('organizations.status', 'active')
+      .eq('role', 'admin');
+
+    const candidates: any[] = (rows ?? []).filter(
+      (r: any) => r.organizations && r.users?.phone_number,
+    );
+
+    if (dryRun) {
+      let recipientCount = 0;
+      for (const r of candidates) {
+        const phone = (r.users.phone_number as string).replace(/\D/g, '');
+        if (!phone) continue;
+        if (await this.whatsapp.isOptedOut(phone)) continue;
+        recipientCount++;
+      }
+      return { queued: 0, skipped: 0, recipientCount };
+    }
+
+    let queued = 0;
+    let skipped = 0;
+    for (const r of candidates) {
+      const phone = (r.users.phone_number as string).replace(/\D/g, '');
+      if (!phone) { skipped++; continue; }
+      if (await this.whatsapp.isOptedOut(phone)) { skipped++; continue; }
+      const displayName = (r.users.fullname as string) ?? 'Buyer';
+      await this.waTemplates.sendMarketplaceUpdate(phone, displayName, featuredItem, marketplaceUrl, 'en');
+      queued++;
+    }
+    return { queued, skipped };
+  }
+
+  async broadcastSellerStockInquiry(
+    dryRun = false,
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    const client = this.supabase.getClient();
+    const { data: rows } = await client
+      .from('organization_users')
+      .select('users(id, fullname, phone_number), organizations(account_type, status)')
+      .eq('organizations.account_type', 'seller')
+      .eq('organizations.status', 'active')
+      .eq('role', 'admin');
+
+    const candidates: any[] = (rows ?? []).filter(
+      (r: any) => r.organizations && r.users?.phone_number,
+    );
+
+    if (dryRun) {
+      let recipientCount = 0;
+      for (const r of candidates) {
+        const phone = (r.users.phone_number as string).replace(/\D/g, '');
+        if (!phone) continue;
+        if (await this.whatsapp.isOptedOut(phone)) continue;
+        recipientCount++;
+      }
+      return { queued: 0, skipped: 0, recipientCount };
+    }
+
+    let queued = 0;
+    let skipped = 0;
+    for (const r of candidates) {
+      const phone = (r.users.phone_number as string).replace(/\D/g, '');
+      if (!phone) { skipped++; continue; }
+      if (await this.whatsapp.isOptedOut(phone)) { skipped++; continue; }
+      const displayName = (r.users.fullname as string) ?? 'Seller';
+      await this.waTemplates.sendSellerStockInquiry(phone, displayName);
+      queued++;
+    }
+    return { queued, skipped };
+  }
+
   /**
    * Very lightweight normalization for admin-provided phone numbers.
    * Delegates full validation to WhatsappService when sending.

@@ -1536,6 +1536,19 @@ export class WhatsappService {
         return;
       }
     }
+    // Admin stock inquiry replies
+    if (choice === 'stock_ready') {
+      await this.sendText(to, 'Great! Buyers can now see your available products on Procur. 🌿');
+      return;
+    }
+    if (choice === 'stock_low') {
+      await this.sendText(to, 'Thanks for letting us know. Consider updating your stock quantities in the app.');
+      return;
+    }
+    if (choice === 'stock_update') {
+      await this.sendText(to, "No worries! We'll remind you later. Update your stock any time via the Procur seller app.");
+      return;
+    }
     if (choice === 'delete_confirm_yes') {
       await this.executeDataDeletion(to);
       return;

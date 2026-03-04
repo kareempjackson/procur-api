@@ -4156,14 +4156,19 @@ Manage this order: ${link}`;
       } else {
         totalRow('Subtotal', formatCurrency(subtotalAmount), ty);
         ty += 12;
-        totalRow('Delivery & handling', formatCurrency(delivery), ty);
+        totalRow('Tax', formatCurrency(taxAmount), ty);
         ty += 12;
-        totalRow('Platform fee', formatCurrency(platformFee), ty);
+        totalRow('Buyer Shipping', formatCurrency(delivery), ty);
         ty += 12;
-        if (taxAmount > 0) {
-          totalRow('Tax', formatCurrency(taxAmount), ty);
-          ty += 12;
-        }
+        // Seller shipping: use explicit field if available, otherwise $0.00
+        const sellerShippingAmount = Number(
+          (order as any)?.seller_shipping_amount ?? 0,
+        );
+        totalRow('Seller Shipping', formatCurrency(sellerShippingAmount), ty);
+        ty += 12;
+        totalRow('Transaction Fee', formatCurrency(platformFee), ty);
+        ty += 12;
+        // Discount — always show even if zero
         if (discount > 0) {
           doc
             .fillColor('#059669')
@@ -4181,8 +4186,10 @@ Manage this order: ${link}`;
               width: totalsW,
               align: 'right',
             });
-          ty += 12;
+        } else {
+          totalRow('Discount', formatCurrency(0), ty);
         }
+        ty += 12;
       }
 
       // divider
@@ -4201,7 +4208,7 @@ Manage this order: ${link}`;
         const amountReceived = subtotalAmount - deliveryFeeAmount;
         totalRow('Amount received', formatCurrency(amountReceived), ty, true);
       } else {
-        totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+        totalRow('Total paid by buyer', formatCurrency(totalAmount), ty, true);
       }
 
       // Footer note (match UI ClassicInvoice: note sits BELOW the main card)
@@ -4656,14 +4663,15 @@ Manage this order: ${link}`;
             let ty = totalsTopY;
             totalRow('Subtotal', formatCurrency(subtotal), ty);
             ty += 12;
-            totalRow('Delivery & handling', formatCurrency(delivery), ty);
+            totalRow('Tax', formatCurrency(taxAmount), ty);
             ty += 12;
-            totalRow('Platform fee', formatCurrency(platformFee), ty);
+            totalRow('Buyer Shipping', formatCurrency(delivery), ty);
             ty += 12;
-            if (taxAmount > 0) {
-              totalRow('Tax', formatCurrency(taxAmount), ty);
-              ty += 12;
-            }
+            totalRow('Seller Shipping', formatCurrency(0), ty);
+            ty += 12;
+            totalRow('Transaction Fee', formatCurrency(platformFee), ty);
+            ty += 12;
+            // Discount — always show even if zero
             if (discount > 0) {
               doc
                 .fillColor('#059669')
@@ -4675,8 +4683,10 @@ Manage this order: ${link}`;
                 .font('Helvetica')
                 .fontSize(9)
                 .text(`-${formatCurrency(discount)}`, totalsX, ty, { width: totalsW, align: 'right' });
-              ty += 12;
+            } else {
+              totalRow('Discount', formatCurrency(0), ty);
             }
+            ty += 12;
 
             doc
               .moveTo(totalsX, ty + 6)
@@ -4685,7 +4695,7 @@ Manage this order: ${link}`;
               .lineWidth(1)
               .stroke();
             ty += 14;
-            totalRow('Amount due', formatCurrency(totalAmount), ty, true);
+            totalRow('Total paid by buyer', formatCurrency(totalAmount), ty, true);
 
             // Footer
             const footerNote =

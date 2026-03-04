@@ -1406,6 +1406,53 @@ export class AdminController {
     return this.adminService.rotateWhatsappToken(body.token);
   }
 
+  @Post('whatsapp/marketplace-update')
+  @ApiOperation({
+    summary: 'Broadcast marketplace availability message to buyers',
+    description:
+      'Send a WhatsApp template to all active buyers highlighting a featured item. Set dryRun=true to preview recipient count.',
+  })
+  broadcastMarketplaceUpdate(
+    @Body() body: { featuredItem: string; marketplaceUrl?: string; dryRun?: boolean },
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    return this.adminService.broadcastMarketplaceUpdate(
+      body.featuredItem,
+      body.marketplaceUrl ?? 'https://app.procur.io/marketplace',
+      body.dryRun ?? false,
+    );
+  }
+
+  @Post('whatsapp/stock-inquiry')
+  @ApiOperation({
+    summary: 'Send interactive stock inquiry to all active sellers',
+    description:
+      'Sends an interactive button message (or template if outside 24h window) to active sellers asking about available stock. Set dryRun=true to preview count.',
+  })
+  broadcastSellerStockInquiry(
+    @Body() body: { dryRun?: boolean },
+  ): Promise<{ queued: number; skipped: number; recipientCount?: number }> {
+    return this.adminService.broadcastSellerStockInquiry(body.dryRun ?? false);
+  }
+
+  // ===== Order-specific WhatsApp notifications =====
+
+  @Post('orders/:id/whatsapp/notify-seller')
+  @ApiOperation({ summary: 'Resend new-order WhatsApp alert to the seller' })
+  notifyOrderSeller(
+    @Param('id') id: string,
+  ): Promise<{ sent: boolean; reason?: string }> {
+    return this.adminService.notifyOrderSeller(id);
+  }
+
+  @Post('orders/:id/whatsapp/notify-buyer')
+  @ApiOperation({ summary: 'Resend order-update WhatsApp message to the buyer' })
+  notifyOrderBuyer(
+    @Param('id') id: string,
+    @Body() body: { tracking?: string },
+  ): Promise<{ sent: boolean; reason?: string }> {
+    return this.adminService.notifyOrderBuyer(id, body.tracking);
+  }
+
   // ===== Onboarding buyers and sellers from admin =====
 
   @Post('buyers/onboard')

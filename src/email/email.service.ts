@@ -383,8 +383,16 @@ export class EmailService {
       lineTotal: number;
     }[];
     subtotal: number;
-    delivery: number;
-    platformFee: number;
+    /** Buyer-facing shipping cost. Preferred over legacy `delivery` for buyer mode. */
+    buyerShipping?: number;
+    /** Seller-facing shipping cost (deducted from seller payout). */
+    sellerShipping?: number;
+    /** Platform transaction fee charged to the buyer. Preferred over legacy `platformFee`. */
+    transactionFee?: number;
+    /** @deprecated Use buyerShipping instead. Kept for backward compatibility. */
+    delivery?: number;
+    /** @deprecated Use transactionFee instead. Kept for backward compatibility. */
+    platformFee?: number;
     taxAmount: number;
     discount: number;
     totalPaid: number;
@@ -408,8 +416,6 @@ export class EmailService {
       paymentStatus,
       items,
       subtotal,
-      delivery,
-      platformFee,
       taxAmount,
       discount,
       totalPaid,
@@ -420,6 +426,14 @@ export class EmailService {
       showPlatformFee,
       deliveryIsDeduction,
     } = params;
+
+    // Resolve buyer shipping and transaction fee from new or legacy fields
+    const buyerShipping = Number(params.buyerShipping ?? params.delivery ?? 0);
+    const sellerShipping = Number(params.sellerShipping ?? 0);
+    const transactionFee = Number(params.transactionFee ?? params.platformFee ?? 0);
+    // Legacy `delivery` field — used only for seller-mode deduction logic
+    const delivery = Number(params.delivery ?? params.buyerShipping ?? 0);
+    const platformFee = Number(params.platformFee ?? params.transactionFee ?? 0);
 
     const safeText = (value: unknown): string => {
       if (value === null || value === undefined) return '';
@@ -512,21 +526,45 @@ export class EmailService {
         : totalsMode === 'seller';
 
     const effectiveTotalLabel =
-      totalLabel?.trim() || (totalsMode === 'seller' ? 'Total received' : 'Total paid');
+      totalLabel?.trim() || (totalsMode === 'seller' ? 'Total received' : 'Total paid by buyer');
 
+    // Buyer-mode: discount always shown (green if non-zero, grey if zero)
+    const discountAmountNum = Number(discount || 0);
     const discountRow =
-      totalsMode === 'buyer' && Number(discount || 0) > 0
+      totalsMode === 'buyer'
         ? `
             <tr>
-              <td style="padding:0 0 0 0;color:#6b7280;font-size:12px;line-height:1.4;">Discount</td>
-              <td align="right" style="padding:0 0 0 0;color:#059669;font-size:12px;line-height:1.4;font-weight:700;">-${formatCurrency(
-                discount,
-              )}</td>
+              <td style="padding:0 0 0 0;color:${discountAmountNum > 0 ? '#059669' : '#6b7280'};font-size:12px;line-height:1.4;">Discount</td>
+              <td align="right" style="padding:0 0 0 0;color:${discountAmountNum > 0 ? '#059669' : '#111827'};font-size:12px;line-height:1.4;font-weight:${discountAmountNum > 0 ? '700' : '600'};">${discountAmountNum > 0 ? '-' : ''}${formatCurrency(discountAmountNum)}</td>
             </tr>
           `
         : '';
 
-    const platformFeeRow = effectiveShowPlatformFee
+    // Buyer-mode 7-line breakdown rows (replaces old single delivery + platform fee rows)
+    const buyerBreakdownRows =
+      totalsMode === 'buyer'
+        ? `
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Tax</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(Number(taxAmount || 0))}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Buyer shipping</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(buyerShipping)}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Seller shipping</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(sellerShipping)}</td>
+                </tr>
+                <tr>
+                  <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Transaction fee</td>
+                  <td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;line-height:1.4;font-weight:600;">${formatCurrency(transactionFee)}</td>
+                </tr>
+        `
+        : '';
+
+    // Legacy seller-mode delivery row (deduction from payout)
+    const platformFeeRow = effectiveShowPlatformFee && totalsMode !== 'buyer'
       ? `
                 <tr>
                   <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">Platform fee</td>
@@ -718,6 +756,7 @@ export class EmailService {
                     subtotal,
                   )}</td>
                 </tr>
+                ${totalsMode === 'buyer' ? buyerBreakdownRows : `
                 <tr>
                   <td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;line-height:1.4;">${safeText(
                     effectiveDeliveryLabel,
@@ -727,6 +766,7 @@ export class EmailService {
                   )}</td>
                 </tr>
                 ${platformFeeRow}
+                `}
                 ${discountRow}
                 <tr>
                   <td colspan="2" style="padding:10px 0 0 0;border-top:1px solid #1118271a;">
@@ -773,8 +813,16 @@ export class EmailService {
       lineTotal: number;
     }[];
     subtotal: number;
-    delivery: number;
-    platformFee: number;
+    /** Buyer-facing shipping cost. Preferred; falls back to `delivery`. */
+    buyerShipping?: number;
+    /** Seller-facing shipping cost (shown for accounting transparency). */
+    sellerShipping?: number;
+    /** Platform transaction fee. Preferred; falls back to `platformFee`. */
+    transactionFee?: number;
+    /** @deprecated Use buyerShipping. Still accepted for backward compat. */
+    delivery?: number;
+    /** @deprecated Use transactionFee. Still accepted for backward compat. */
+    platformFee?: number;
     taxAmount: number;
     discount: number;
     totalPaid: number;
@@ -793,6 +841,9 @@ export class EmailService {
       paymentStatus: params.paymentStatus,
       items: params.items,
       subtotal: params.subtotal,
+      buyerShipping: params.buyerShipping,
+      sellerShipping: params.sellerShipping,
+      transactionFee: params.transactionFee,
       delivery: params.delivery,
       platformFee: params.platformFee,
       taxAmount: params.taxAmount,
@@ -818,6 +869,11 @@ export class EmailService {
         ]
       : [];
 
+    const bShipping = Number(params.buyerShipping ?? params.delivery ?? 0);
+    const sShipping = Number(params.sellerShipping ?? 0);
+    const txFee = Number(params.transactionFee ?? params.platformFee ?? 0);
+    const discAmt = Number(params.discount || 0);
+
     const textBody = [
       'Payment receipt',
       '',
@@ -829,12 +885,12 @@ export class EmailService {
       ...itemsText,
       '',
       `Subtotal: ${cur(params.subtotal)}`,
-      `Delivery: ${cur(params.delivery)}`,
-      `Platform fee: ${cur(params.platformFee)}`,
-      ...(Number(params.discount || 0) > 0
-        ? [`Discount: -${cur(params.discount)}`]
-        : []),
-      `Total paid: ${cur(params.totalPaid)}`,
+      `Tax: ${cur(Number(params.taxAmount || 0))}`,
+      `Buyer Shipping: ${cur(bShipping)}`,
+      `Seller Shipping: ${cur(sShipping)}`,
+      `Transaction Fee: ${cur(txFee)}`,
+      `Discount: ${discAmt > 0 ? '-' : ''}${cur(discAmt)}`,
+      `Total paid by buyer: ${cur(params.totalPaid)}`,
       '',
       'This receipt confirms payment received via Procur for the above order.',
       'Keep this for your internal reconciliation and audit records.',

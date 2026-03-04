@@ -15,6 +15,10 @@ export class TemplateService {
   private readonly TPL_UPDATE_NO_TRACKING =
     process.env.WA_TEMPLATE_UPDATE_NO_TRACKING || 'order_update_no_tracking_v1';
   private readonly TPL_OTP = process.env.WA_TEMPLATE_OTP || 'otp_verify';
+  private readonly TPL_MARKETPLACE_UPDATE =
+    process.env.WA_TEMPLATE_MARKETPLACE_UPDATE || 'marketplace_update_v1';
+  private readonly TPL_STOCK_INQUIRY =
+    process.env.WA_TEMPLATE_STOCK_INQUIRY || 'seller_stock_check_v1';
   constructor(
     private readonly send: SendService,
     private readonly redis: IORedis,
@@ -196,6 +200,53 @@ export class TemplateService {
       `Sending WA order_update to user=${userId} to=${to} order=${orderNumber} status=${status}`,
     );
     await this.sendOrderUpdate(to, orderNumber, status, tracking, locale);
+  }
+
+  async sendMarketplaceUpdate(
+    to: string,
+    buyerName: string,
+    featuredItem: string,
+    marketplaceUrl: string,
+    locale: string,
+  ) {
+    await this.sendTemplate(
+      to,
+      this.TPL_MARKETPLACE_UPDATE,
+      [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: buyerName },
+            { type: 'text', text: featuredItem },
+            { type: 'text', text: marketplaceUrl },
+          ],
+        },
+      ],
+      this.getTemplateLang(locale),
+    );
+  }
+
+  async sendSellerStockInquiry(to: string, sellerName: string) {
+    const outside = await this.isOutside24h(to);
+    if (outside) {
+      await this.sendTemplate(
+        to,
+        this.TPL_STOCK_INQUIRY,
+        [{ type: 'body', parameters: [{ type: 'text', text: sellerName }] }],
+        'en_US',
+      );
+    } else {
+      const dest = to.replace(/^\+/, '');
+      await this.send.buttons(
+        dest,
+        `Hi ${sellerName}, the Procur team wants to know — what do you have available right now?`,
+        [
+          { id: 'stock_ready', title: 'I have stock ready' },
+          { id: 'stock_low', title: 'Low on stock' },
+          { id: 'stock_update', title: 'Will update soon' },
+        ],
+      );
+    }
   }
 
   async sendTemplate(
