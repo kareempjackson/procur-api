@@ -5830,6 +5830,8 @@ Login here: ${loginUrl}
       note: row.note,
       admin_note: row.admin_note,
       proof_url: row.proof_url,
+      initiated_by: row.initiated_by ?? 'seller',
+      receipt_sent_at: row.receipt_sent_at ?? null,
     }));
 
     return {
@@ -6023,7 +6025,7 @@ Login here: ${loginUrl}
 
     const { data: request, error: fetchError } = await client
       .from('payout_requests')
-      .select('id, status, seller_org_id, amount_cents, currency')
+      .select('id, status, initiated_by, seller_org_id, amount_cents, currency')
       .eq('id', requestId)
       .single();
 
@@ -6031,8 +6033,15 @@ Login here: ${loginUrl}
       throw new NotFoundException('Payout request not found');
     }
 
-    if (request.status !== 'approved') {
-      throw new BadRequestException('Can only complete approved requests');
+    const isAdminInitiated = (request as any).initiated_by === 'admin';
+    if (request.status === 'approved') {
+      // legacy seller-requested payout — allow as before
+    } else if (request.status === 'pending' && isAdminInitiated) {
+      // admin-created payout — skip the approve step
+    } else {
+      throw new BadRequestException(
+        'Can only complete approved requests or pending admin-created payouts',
+      );
     }
 
     // Verify seller still has sufficient balance
@@ -6089,7 +6098,176 @@ Login here: ${loginUrl}
       payload: { amountCents, currency: request.currency },
     });
 
+    // Send receipt (email primary, WhatsApp secondary) — non-blocking
+    this.sendPayoutReceipt(requestId).catch((err) =>
+      console.error(`Failed to send payout receipt for ${requestId}`, err),
+    );
+
     return { success: true, message: 'Payout completed successfully' };
+  }
+
+  /**
+   * Create an admin-initiated payout for a seller (biweekly flow).
+   * The payout is created in 'pending' state and marked paid via completePayoutRequest().
+   */
+  async createSellerPayout(
+    sellerOrgId: string,
+    dto: { amount_cents: number; note?: string; admin_note?: string },
+    adminUserId: string,
+  ) {
+    if (!dto.amount_cents || dto.amount_cents <= 0) {
+      throw new BadRequestException('amount_cents must be greater than 0');
+    }
+
+    const client = this.supabase.getClient();
+
+    // Validate seller org is an active seller
+    const { data: org, error: orgError } = await client
+      .from('organizations')
+      .select('id, name, business_name, account_type, status')
+      .eq('id', sellerOrgId)
+      .single();
+
+    if (orgError || !org) {
+      throw new NotFoundException('Seller organization not found');
+    }
+    if (org.account_type !== 'seller') {
+      throw new BadRequestException('Organization is not a seller account');
+    }
+    if (org.status !== 'active') {
+      throw new BadRequestException('Seller account is not active');
+    }
+
+    const nowIso = new Date().toISOString();
+    const currency = 'XCD';
+
+    const { data: created, error: insertError } = await client
+      .from('payout_requests')
+      .insert({
+        seller_org_id: sellerOrgId,
+        amount_cents: dto.amount_cents,
+        currency,
+        status: 'pending',
+        initiated_by: 'admin',
+        requested_at: nowIso,
+        processed_by: adminUserId,
+        note: dto.note || null,
+        admin_note: dto.admin_note || null,
+      })
+      .select('id, amount_cents, currency, status, requested_at')
+      .single();
+
+    if (insertError || !created) {
+      throw new BadRequestException(`Failed to create payout: ${insertError?.message}`);
+    }
+
+    return {
+      id: created.id,
+      seller_name: org.business_name || org.name,
+      amount: Number(created.amount_cents) / 100,
+      amount_cents: Number(created.amount_cents),
+      currency: created.currency,
+      status: created.status,
+      requested_at: created.requested_at,
+    };
+  }
+
+  /**
+   * Send a payout receipt to the seller via email (primary) and WhatsApp (secondary).
+   * Safe to call multiple times — updates receipt_sent_at on each call.
+   */
+  async sendPayoutReceipt(requestId: string): Promise<{ emailSent: boolean; whatsappSent: boolean }> {
+    const client = this.supabase.getClient();
+
+    // Fetch payout + seller org + admin user email/phone
+    const { data: request, error } = await client
+      .from('payout_requests')
+      .select(`
+        id, amount_cents, currency, completed_at, note, admin_note,
+        organizations!seller_org_id(
+          id, name, business_name,
+          organization_users!inner(role, users!inner(email, fullname, phone_number))
+        )
+      `)
+      .eq('id', requestId)
+      .single();
+
+    if (error || !request) {
+      throw new NotFoundException('Payout request not found');
+    }
+
+    const org = (request as any).organizations;
+    const adminUsers: any[] = (org?.organization_users ?? []).filter(
+      (ou: any) => ou.role === 'admin',
+    );
+    const adminUser = adminUsers[0]?.users;
+
+    const sellerName: string = org?.business_name || org?.name || 'Seller';
+    const email: string | null = adminUser?.email ?? null;
+    const phone: string | null = adminUser?.phone_number ?? null;
+
+    const amount = Number(request.amount_cents) / 100;
+    const currency: string = request.currency || 'XCD';
+    const payoutReference = requestId.slice(0, 8).toUpperCase();
+    const paidAt: string = (request as any).completed_at || new Date().toISOString();
+    const formattedAmount = `${currency.toUpperCase()} ${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const formattedDate = new Date(paidAt).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
+
+    let emailSent = false;
+    let whatsappSent = false;
+
+    // Email (primary — always attempt)
+    if (email) {
+      try {
+        await this.email.sendPayoutReceiptEmail({
+          email,
+          sellerName,
+          amount,
+          currency,
+          payoutReference,
+          paidAt,
+          note: (request as any).admin_note || (request as any).note || undefined,
+        });
+        emailSent = true;
+      } catch (err) {
+        console.error(`Payout receipt email failed for ${requestId}`, err);
+      }
+    } else {
+      console.warn(`No admin email found for seller org, skipping email receipt (payout ${requestId})`);
+    }
+
+    // WhatsApp (secondary — best-effort)
+    if (phone) {
+      const cleanPhone = phone.replace(/\D/g, '');
+      if (cleanPhone) {
+        try {
+          const optedOut = await this.whatsapp.isOptedOut(cleanPhone);
+          if (!optedOut) {
+            await this.waTemplates.sendPayoutReceipt(
+              cleanPhone,
+              sellerName,
+              formattedAmount,
+              payoutReference,
+              formattedDate,
+            );
+            whatsappSent = true;
+          }
+        } catch (err) {
+          console.warn(`Payout receipt WhatsApp failed for ${requestId}`, err);
+        }
+      }
+    }
+
+    // Update receipt tracking
+    await client
+      .from('payout_requests')
+      .update({
+        receipt_sent_at: new Date().toISOString(),
+        receipt_email: email || null,
+      })
+      .eq('id', requestId);
+
+    return { emailSent, whatsappSent };
   }
 
   // ==================== BUYER CREDITS ====================

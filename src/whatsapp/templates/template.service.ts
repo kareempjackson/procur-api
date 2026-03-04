@@ -19,6 +19,8 @@ export class TemplateService {
     process.env.WA_TEMPLATE_MARKETPLACE_UPDATE || 'marketplace_update_v1';
   private readonly TPL_STOCK_INQUIRY =
     process.env.WA_TEMPLATE_STOCK_INQUIRY || 'seller_stock_check_v1';
+  private readonly TPL_PAYOUT_RECEIPT =
+    process.env.WA_TEMPLATE_PAYOUT_RECEIPT || 'payout_receipt_v1';
   constructor(
     private readonly send: SendService,
     private readonly redis: IORedis,
@@ -247,6 +249,32 @@ export class TemplateService {
         ],
       );
     }
+  }
+
+  async sendPayoutReceipt(
+    to: string,
+    sellerName: string,
+    amount: string,
+    reference: string,
+    paidAt: string,
+    locale = 'en',
+  ) {
+    await this.sendTemplate(
+      to,
+      this.TPL_PAYOUT_RECEIPT,
+      [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: sellerName },
+            { type: 'text', text: amount },
+            { type: 'text', text: reference },
+            { type: 'text', text: paidAt },
+          ],
+        },
+      ],
+      this.getTemplateLang(locale),
+    );
   }
 
   async sendTemplate(

@@ -3879,87 +3879,10 @@ export class SellersService {
     };
   }
 
-  // ==================== PAYOUT REQUESTS ====================
+  // ==================== PAYOUT HISTORY ====================
 
   /**
-   * Request a payout from the available balance
-   */
-  async requestPayout(
-    sellerOrgId: string,
-    dto: { amount?: number; note?: string },
-  ) {
-    const client = this.supabaseService.getClient();
-
-    // Get current balance
-    const balance = await this.getSellerBalance(sellerOrgId);
-
-    if (!balance.can_request_payout) {
-      throw new BadRequestException(
-        `Minimum payout amount is $${balance.minimum_payout_amount}. Your available balance is $${balance.available_amount.toFixed(2)}.`,
-      );
-    }
-
-    // Check for pending payout requests
-    const { data: pendingRequest } = await client
-      .from('payout_requests')
-      .select('id')
-      .eq('seller_org_id', sellerOrgId)
-      .in('status', ['pending', 'approved'])
-      .maybeSingle();
-
-    if (pendingRequest) {
-      throw new BadRequestException(
-        'You already have a pending payout request. Please wait for it to be processed.',
-      );
-    }
-
-    // Use full available balance if no amount specified
-    const requestedAmountCents = dto.amount
-      ? Math.round(dto.amount * 100)
-      : balance.available_amount_cents;
-
-    if (requestedAmountCents > balance.available_amount_cents) {
-      throw new BadRequestException(
-        `Requested amount exceeds available balance of $${balance.available_amount.toFixed(2)}.`,
-      );
-    }
-
-    if (requestedAmountCents < balance.minimum_payout_cents) {
-      throw new BadRequestException(
-        `Minimum payout amount is $${balance.minimum_payout_amount}.`,
-      );
-    }
-
-    // Create payout request
-    const { data: request, error } = await client
-      .from('payout_requests')
-      .insert({
-        seller_org_id: sellerOrgId,
-        amount_cents: requestedAmountCents,
-        currency: balance.currency || 'XCD',
-        status: 'pending',
-        note: dto.note || null,
-      })
-      .select('id, amount_cents, currency, status, requested_at')
-      .single();
-
-    if (error) {
-      throw new BadRequestException(`Failed to create payout request: ${error.message}`);
-    }
-
-    return {
-      id: request.id,
-      amount: requestedAmountCents / 100,
-      amount_cents: requestedAmountCents,
-      currency: request.currency,
-      status: request.status,
-      requested_at: request.requested_at,
-      message: 'Payout request submitted successfully',
-    };
-  }
-
-  /**
-   * Get payout requests for a seller
+   * Get payout history for a seller (admin-issued payouts)
    */
   async getPayoutRequests(
     sellerOrgId: string,
@@ -4007,43 +3930,5 @@ export class SellersService {
       page,
       limit,
     };
-  }
-
-  /**
-   * Cancel a pending payout request
-   */
-  async cancelPayoutRequest(sellerOrgId: string, requestId: string) {
-    const client = this.supabaseService.getClient();
-
-    const { data: request, error: fetchError } = await client
-      .from('payout_requests')
-      .select('id, status')
-      .eq('id', requestId)
-      .eq('seller_org_id', sellerOrgId)
-      .single();
-
-    if (fetchError || !request) {
-      throw new NotFoundException('Payout request not found');
-    }
-
-    if (request.status !== 'pending') {
-      throw new BadRequestException(
-        'Can only cancel pending payout requests',
-      );
-    }
-
-    const { error: updateError } = await client
-      .from('payout_requests')
-      .update({
-        status: 'cancelled',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', requestId);
-
-    if (updateError) {
-      throw new BadRequestException(`Failed to cancel request: ${updateError.message}`);
-    }
-
-    return { success: true, message: 'Payout request cancelled' };
   }
 }

@@ -907,6 +907,108 @@ export class EmailService {
     );
   }
 
+  async sendPayoutReceiptEmail(params: {
+    email: string;
+    sellerName: string;
+    amount: number;
+    currency: string;
+    payoutReference: string;
+    paidAt: string;
+    payoutMethod?: string;
+    note?: string;
+  }): Promise<void> {
+    const fmt = (v: number) =>
+      `${params.currency.toUpperCase()} ${Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    const formatDate = (iso: string) => {
+      const d = new Date(iso);
+      return Number.isFinite(d.getTime())
+        ? d.toLocaleString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })
+        : iso;
+    };
+
+    const methodLine = params.payoutMethod
+      ? `<tr><td style="padding:0 0 6px 0;color:#6b7280;font-size:12px;">Payment method</td><td align="right" style="padding:0 0 6px 0;color:#111827;font-size:12px;font-weight:600;">${params.payoutMethod}</td></tr>`
+      : '';
+
+    const noteLine = params.note
+      ? `<p style="margin:12px 0 0;font-size:12px;color:#6b7280;line-height:1.5;"><strong>Note:</strong> ${params.note}</p>`
+      : '';
+
+    const innerHtml = `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr>
+          <td style="padding:0 0 16px 0;border-bottom:1px dashed #e5e7eb;">
+            <p style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;color:#6b7280;margin:0 0 4px;">Procur</p>
+            <p style="font-size:16px;font-weight:600;color:#111827;margin:0 0 2px;">Payout Receipt</p>
+            <p style="margin:0;font-size:12px;color:#6b7280;">Confirmation of your biweekly payout from Procur.</p>
+          </td>
+          <td valign="top" align="right" style="padding:0 0 16px 0;border-bottom:1px dashed #e5e7eb;">
+            <p style="margin:0 0 2px;font-size:12px;color:#6b7280;">Ref: <span style="font-weight:600;color:#111827;">${params.payoutReference}</span></p>
+            <p style="margin:0;font-size:12px;color:#6b7280;">${formatDate(params.paidAt)}</p>
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:20px 0;">
+        <tr>
+          <td style="padding:0 0 4px 0;color:#6b7280;font-size:11px;text-transform:uppercase;letter-spacing:0.16em;">Paid to</td>
+        </tr>
+        <tr>
+          <td style="padding:0;color:#111827;font-size:14px;font-weight:600;">${params.sellerName}</td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border:1px solid #e5e7eb;border-radius:12px;margin:0 0 16px 0;">
+        <tr>
+          <td style="padding:16px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+              ${methodLine}
+              <tr>
+                <td colspan="2" style="padding:${params.payoutMethod ? '10px 0 0 0' : '0'};border-top:${params.payoutMethod ? '1px solid #1118271a' : 'none'};">
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                    <tr>
+                      <td style="text-transform:uppercase;letter-spacing:0.16em;font-size:11px;font-weight:700;color:#111827;">Amount paid</td>
+                      <td align="right" style="font-size:20px;font-weight:800;color:#111827;">${fmt(params.amount)}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+
+      ${noteLine}
+
+      <p style="font-size:11px;color:#6b7280;line-height:1.5;margin:16px 0 0;">
+        Procur issues payouts biweekly. Please keep this receipt for your records.
+        If you have any questions, contact us at <a href="mailto:support@procur.io" style="color:#6b7280;">support@procur.io</a>.
+      </p>
+    `;
+
+    const textBody = [
+      'Payout Receipt',
+      '',
+      `Ref: ${params.payoutReference}`,
+      `Date: ${formatDate(params.paidAt)}`,
+      `Paid to: ${params.sellerName}`,
+      params.payoutMethod ? `Payment method: ${params.payoutMethod}` : '',
+      `Amount paid: ${fmt(params.amount)}`,
+      params.note ? `Note: ${params.note}` : '',
+      '',
+      'Procur issues payouts biweekly. Please keep this receipt for your records.',
+    ].filter((l) => l !== null && l !== undefined).join('\n');
+
+    await this.sendBrandedEmailStrict(
+      params.email,
+      `Payout receipt – ${fmt(params.amount)}`,
+      'Payout Receipt',
+      innerHtml,
+      textBody,
+    );
+  }
+
   async sendSellerCompletionReceipt(params: {
     email: string;
     sellerName: string;

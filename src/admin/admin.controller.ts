@@ -1580,6 +1580,28 @@ export class AdminController {
     return this.adminService.completePayoutRequest(requestId, body, user.id);
   }
 
+  @Post('payouts')
+  @ApiOperation({
+    summary: 'Create an admin-initiated payout for a seller',
+    description: 'Create a payout directly for a seller (biweekly flow). No seller request needed.',
+  })
+  async createSellerPayout(
+    @Body() body: { seller_org_id: string; amount_cents: number; note?: string; admin_note?: string },
+    @CurrentUser() user: UserContext,
+  ) {
+    return this.adminService.createSellerPayout(body.seller_org_id, body, user.id);
+  }
+
+  @Post('payout-requests/:id/send-receipt')
+  @ApiOperation({
+    summary: 'Send (or resend) a payout receipt to the seller',
+    description: 'Sends the payout receipt via email (primary) and WhatsApp (secondary) for a completed payout.',
+  })
+  @ApiParam({ name: 'id', description: 'Payout request ID' })
+  async sendPayoutReceipt(@Param('id') requestId: string) {
+    return this.adminService.sendPayoutReceipt(requestId);
+  }
+
   // ===== Seller Credits =====
 
   @Post('sellers/:id/credits')

@@ -1286,32 +1286,12 @@ export class SellersController {
     );
   }
 
-  // ==================== PAYOUT REQUESTS ====================
-
-  @Post('payouts/request')
-  @ApiOperation({
-    summary: 'Request a payout',
-    description:
-      'Submit a request to withdraw funds from the available balance. Minimum payout is $100.',
-  })
-  @ApiResponse({
-    status: 201,
-    description: 'Payout request submitted successfully',
-  })
-  @ApiBadRequestResponse({
-    description: 'Insufficient balance or pending request already exists',
-  })
-  async requestPayout(
-    @CurrentUser() user: UserContext,
-    @Body() body: { amount?: number; note?: string },
-  ) {
-    return await this.sellersService.requestPayout(user.organizationId!, body);
-  }
+  // ==================== PAYOUT HISTORY ====================
 
   @Get('payouts/requests')
   @ApiOperation({
-    summary: 'Get payout requests',
-    description: 'Get a paginated list of payout requests for the seller.',
+    summary: 'Get payout history',
+    description: 'Get a paginated list of payouts issued to the seller.',
   })
   @ApiQuery({ name: 'page', required: false, type: Number })
   @ApiQuery({ name: 'limit', required: false, type: Number })
@@ -1327,21 +1307,5 @@ export class SellersController {
       limit: limit ? Number(limit) : undefined,
       status,
     });
-  }
-
-  @Delete('payouts/requests/:id')
-  @ApiOperation({
-    summary: 'Cancel a payout request',
-    description: 'Cancel a pending payout request.',
-  })
-  @ApiParam({ name: 'id', description: 'Payout request ID' })
-  async cancelPayoutRequest(
-    @CurrentUser() user: UserContext,
-    @Param('id', ParseUUIDPipe) requestId: string,
-  ) {
-    return await this.sellersService.cancelPayoutRequest(
-      user.organizationId!,
-      requestId,
-    );
   }
 }
