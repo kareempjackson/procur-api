@@ -582,7 +582,7 @@ export class SellersService {
 
     const { error } = await client
       .from('products')
-      .delete()
+      .update({ status: 'archived' })
       .eq('id', productId)
       .eq('seller_org_id', sellerOrgId);
 
