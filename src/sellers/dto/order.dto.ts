@@ -421,6 +421,13 @@ export class OrderResponseDto {
   @ApiPropertyOptional({ description: 'Buyer user ID' })
   buyer_user_id?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Parent order ID — set on child/fulfillment orders when buyer checked out with multiple sellers. ' +
+      'The parent and all children share the same order_number for buyer-seller communication.',
+  })
+  parent_order_id?: string | null;
+
   @ApiPropertyOptional({ description: 'Buyer organization information' })
   buyer_info?: {
     organization_name?: string;

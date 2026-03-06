@@ -108,8 +108,10 @@ export interface AdminOrderSummary {
   createdAt: string;
   buyerOrgId?: string;
   buyerOrgName?: string | null;
-  sellerOrgId?: string;
+  sellerOrgId?: string | null;
   sellerOrgName?: string | null;
+  /** True when this is a parent aggregate order (multi-seller checkout). seller_org_id will be null. */
+  isAggregate?: boolean;
   driverUserId?: string | null;
   driverName?: string | null;
   assignedDriverAt?: string | null;
@@ -2189,9 +2191,12 @@ export class AdminService {
     let builder = client
       .from('orders')
       .select(
-        'id, order_number, status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, buyer_org_id, seller_org_id, created_at, driver_user_id, assigned_driver_at',
+        'id, order_number, status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, buyer_org_id, seller_org_id, parent_order_id, created_at, driver_user_id, assigned_driver_at',
         { count: 'exact' },
-      );
+      )
+      // Only show top-level orders in the admin list.
+      // Child/fulfillment rows (parent_order_id IS NOT NULL) are visible inside the order detail view.
+      .is('parent_order_id', null);
 
     if (status) {
       builder = builder.eq('status', status);
@@ -2287,8 +2292,10 @@ export class AdminService {
         createdAt: o.created_at as string,
         buyerOrgId: (o.buyer_org_id as string) ?? undefined,
         buyerOrgName: orgById[(o.buyer_org_id as string) ?? '']?.name ?? null,
-        sellerOrgId: (o.seller_org_id as string) ?? undefined,
+        sellerOrgId: (o.seller_org_id as string | null) ?? null,
         sellerOrgName: orgById[(o.seller_org_id as string) ?? '']?.name ?? null,
+        // isAggregate: true when this is a parent order (seller_org_id is null = multi-seller checkout)
+        isAggregate: !o.seller_org_id,
         driverUserId: (o.driver_user_id as string | null) ?? null,
         driverName: null,
         assignedDriverAt: (o.assigned_driver_at as string | null) ?? null,
@@ -2867,11 +2874,26 @@ export class AdminService {
       estimatedDeliveryDate?: string | null;
       trackingNumber?: string | null;
       shippingMethod?: string | null;
+      isAggregate?: boolean;
     };
     buyerOrganization: AdminOrganizationSummary | null;
     sellerOrganization: AdminOrganizationSummary | null;
     items: DatabaseOrderItem[];
     timeline: DatabaseOrderTimeline[];
+    fulfillments?: Array<{
+      id: string;
+      orderNumber: string;
+      sellerOrgId: string;
+      sellerOrgName: string | null;
+      status: string;
+      subtotal: number;
+      totalAmount: number;
+      trackingNumber: string | null;
+      shippingMethod: string | null;
+      estimatedDeliveryDate: string | null;
+      items: DatabaseOrderItem[];
+      timeline: DatabaseOrderTimeline[];
+    }>;
   }> {
     const client = this.supabase.getClient();
 
@@ -2974,7 +2996,72 @@ export class AdminService {
       trackingNumber: (order.tracking_number as string | null) ?? null,
       shippingMethod: (order.shipping_method as string | null) ?? null,
       inspectionStatus: (order.inspection_status as string | null) ?? null,
+      isAggregate: !sellerOrgId,
     };
+
+    // For parent aggregate orders (seller_org_id is null), fetch child fulfillments
+    let fulfillments:
+      | Array<{
+          id: string;
+          orderNumber: string;
+          sellerOrgId: string;
+          sellerOrgName: string | null;
+          status: string;
+          subtotal: number;
+          totalAmount: number;
+          trackingNumber: string | null;
+          shippingMethod: string | null;
+          estimatedDeliveryDate: string | null;
+          items: DatabaseOrderItem[];
+          timeline: DatabaseOrderTimeline[];
+        }>
+      | undefined;
+
+    if (!sellerOrgId) {
+      const { data: children } = await client
+        .from('orders')
+        .select('*, order_items(*), order_timeline(*)')
+        .eq('parent_order_id', orderId)
+        .order('created_at', { ascending: true });
+
+      if (children && children.length > 0) {
+        // Load seller org names for child orders
+        const childSellerIds = Array.from(
+          new Set(
+            (children as any[])
+              .map((c: any) => c.seller_org_id as string | null)
+              .filter(Boolean),
+          ),
+        ) as string[];
+
+        let childOrgById: Record<string, string | null> = {};
+        if (childSellerIds.length > 0) {
+          const { data: childOrgs } = await client
+            .from('organizations')
+            .select('id, name')
+            .in('id', childSellerIds);
+          childOrgById = Object.fromEntries(
+            (childOrgs || []).map((o: any) => [o.id, o.name ?? null]),
+          );
+        }
+
+        fulfillments = (children as any[]).map((child: any) => ({
+          id: child.id as string,
+          orderNumber: String(child.order_number ?? child.id),
+          sellerOrgId: child.seller_org_id as string,
+          sellerOrgName: childOrgById[child.seller_org_id as string] ?? null,
+          status: child.status as string,
+          subtotal: Number(child.subtotal ?? 0),
+          totalAmount: Number(child.total_amount ?? 0),
+          trackingNumber: (child.tracking_number as string | null) ?? null,
+          shippingMethod: (child.shipping_method as string | null) ?? null,
+          estimatedDeliveryDate:
+            (child.estimated_delivery_date as string | null) ?? null,
+          items: (child.order_items || []) as DatabaseOrderItem[],
+          timeline: (child.order_timeline || []) as DatabaseOrderTimeline[],
+        }));
+      }
+    }
 
     return {
       order: orderSummary,
@@ -2982,6 +3069,7 @@ export class AdminService {
       sellerOrganization,
       items: (items || []) as DatabaseOrderItem[],
       timeline: (timeline || []) as DatabaseOrderTimeline[],
+      ...(fulfillments ? { fulfillments } : {}),
     };
   }
 

@@ -2264,7 +2264,10 @@ export class BuyersService {
       });
     }
 
-    // Create separate orders for each seller
+    // ----------------------------------------------------------------
+    // Build the order(s) — parent/child for multi-seller, single row
+    // for single-seller (fully backward compatible).
+    // ----------------------------------------------------------------
     const createdOrders: any[] = [];
     const checkoutGroupId = randomUUID();
 
@@ -2273,55 +2276,158 @@ export class BuyersService {
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
     const configuredFlatDelivery = Number(feesConfig.deliveryFlatFee ?? 0);
-    const totalDeliveryFee =
-      configuredBuyerShare + configuredSellerShare || configuredFlatDelivery;
+    // suppress unused-var warning — kept for potential future use
+    void configuredSellerShare;
+    void configuredFlatDelivery;
     const buyerDeliveryForOrder = Number(configuredBuyerShare.toFixed(2));
 
     const sellerEntries = Array.from(sellerGroups.entries()).sort(([a], [b]) =>
       String(a).localeCompare(String(b)),
     );
 
-    for (const [idx, [sellerOrgId, items]] of sellerEntries.entries()) {
+    const isMultiSeller = sellerEntries.length > 1;
+
+    // ----------------------------------------------------------------
+    // Resolve credits once (used by parent or first seller row)
+    // ----------------------------------------------------------------
+    let creditsAppliedCents = 0;
+    if (createDto.credits_applied_cents && createDto.credits_applied_cents > 0) {
+      const { data: buyerBalance } = await this.supabase
+        .getClient()
+        .from('buyer_balances')
+        .select('credit_amount_cents')
+        .eq('buyer_org_id', buyerOrgId)
+        .maybeSingle();
+
+      const availableCreditsCents = Number(buyerBalance?.credit_amount_cents || 0);
+      const requestedCreditsCents = createDto.credits_applied_cents;
+      // Rough max — exact check happens against aggregate total below
+      creditsAppliedCents = Math.min(requestedCreditsCents, availableCreditsCents);
+    }
+
+    // ----------------------------------------------------------------
+    // Shared order number — used by parent (multi-seller) or single row
+    // ----------------------------------------------------------------
+    const sharedOrderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+
+    // ----------------------------------------------------------------
+    // MULTI-SELLER PATH — create 1 parent + N child orders
+    // ----------------------------------------------------------------
+    let parentOrder: any = null;
+
+    if (isMultiSeller) {
       this.logger.log(
-        `Creating order for seller ${sellerOrgId} with ${items.length} item(s)`,
+        `Multi-seller checkout: ${sellerEntries.length} sellers. Creating parent order.`,
+      );
+
+      const aggregateSubtotal = sellerEntries.reduce((sum, [, items]) => {
+        return sum + items.reduce((s, i) => s + i.total_price, 0);
+      }, 0);
+      const aggregatePlatformFee = Number(
+        ((aggregateSubtotal * platformFeePercent) / 100).toFixed(2),
+      );
+      const aggregateTotalBeforeCredits =
+        aggregateSubtotal + buyerDeliveryForOrder + aggregatePlatformFee;
+
+      // Cap credits to the actual aggregate total
+      const maxCreditsCents = Math.round(aggregateTotalBeforeCredits * 100);
+      creditsAppliedCents = Math.min(creditsAppliedCents, maxCreditsCents);
+      const aggregateTotal =
+        aggregateTotalBeforeCredits - creditsAppliedCents / 100;
+
+      const { data: pOrder, error: pError } = await this.supabase
+        .getClient()
+        .from('orders')
+        .insert({
+          order_number: sharedOrderNumber,
+          buyer_org_id: buyerOrgId,
+          seller_org_id: null, // parent has no single seller
+          buyer_user_id: buyerUserId,
+          checkout_group_id: checkoutGroupId,
+          parent_order_id: null,
+          status: 'pending',
+          payment_status: 'pending',
+          subtotal: aggregateSubtotal,
+          tax_amount: 0,
+          shipping_amount: buyerDeliveryForOrder,
+          discount_amount: 0,
+          credits_applied_cents: creditsAppliedCents,
+          total_amount: aggregateTotal,
+          currency: 'XCD',
+          shipping_address: shippingAddress,
+          billing_address: billingAddress,
+          buyer_notes: createDto.buyer_notes,
+          payment_method: createDto.payment_method || 'bank_transfer',
+          estimated_delivery_date: createDto.preferred_delivery_date,
+        })
+        .select()
+        .single();
+
+      if (pError)
+        throw new BadRequestException(
+          `Failed to create parent order: ${pError.message}`,
+        );
+
+      parentOrder = pOrder;
+
+      // Deduct credits once, linked to parent order
+      if (creditsAppliedCents > 0) {
+        this.logger.debug(
+          `Deducting ${creditsAppliedCents} cents credits from buyer ${buyerOrgId} for parent order ${parentOrder.id}`,
+        );
+        await this.supabase.getClient().rpc('adjust_buyer_credit', {
+          p_buyer_org_id: buyerOrgId,
+          p_amount_cents: -creditsAppliedCents,
+          p_type: 'usage',
+          p_reason: 'order_applied',
+          p_note: `Applied to order ${sharedOrderNumber}`,
+          p_order_id: parentOrder.id,
+          p_admin_user_id: null,
+        });
+      }
+    }
+
+    // ----------------------------------------------------------------
+    // Create per-seller child orders (or the single standalone order)
+    // ----------------------------------------------------------------
+    for (const [sellerOrgId, items] of sellerEntries) {
+      this.logger.log(
+        `Creating ${isMultiSeller ? 'child' : 'standalone'} order for seller ${sellerOrgId} with ${items.length} item(s)`,
       );
       const orderSubtotal = items.reduce(
         (sum, item) => sum + item.total_price,
         0,
       );
-      // Buyer pays delivery ONCE across the cart, even when split into multiple seller orders.
-      // Allocate buyer delivery fee to the first seller order only.
-      const shippingAmount = idx === 0 ? buyerDeliveryForOrder : 0;
-      const taxAmount = 0; // Tax disabled
+      const taxAmount = 0;
       const platformFeeAmount = Number(
         ((orderSubtotal * platformFeePercent) / 100).toFixed(2),
       );
-      const totalAmountBeforeCredits =
-        orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
 
-      // Handle credits - only apply credits to the first seller order in the checkout group
-      let creditsAppliedCents = 0;
-      if (idx === 0 && createDto.credits_applied_cents && createDto.credits_applied_cents > 0) {
-        // Get buyer's current credit balance
-        const { data: buyerBalance } = await this.supabase
-          .getClient()
-          .from('buyer_balances')
-          .select('credit_amount_cents')
-          .eq('buyer_org_id', buyerOrgId)
-          .maybeSingle();
+      // For standalone single-seller orders, include shipping + credits directly
+      let shippingAmount = 0;
+      let orderCreditsAppliedCents = 0;
+      let totalAmountBeforeCredits: number;
 
-        const availableCreditsCents = Number(buyerBalance?.credit_amount_cents || 0);
-        const requestedCreditsCents = createDto.credits_applied_cents;
-        const maxCreditsCents = Math.round(totalAmountBeforeCredits * 100); // Max is the order total
-
-        // Apply the minimum of: requested, available, and order total
-        creditsAppliedCents = Math.min(requestedCreditsCents, availableCreditsCents, maxCreditsCents);
+      if (!isMultiSeller) {
+        shippingAmount = buyerDeliveryForOrder;
+        totalAmountBeforeCredits =
+          orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
+        const maxCreditsCents = Math.round(totalAmountBeforeCredits * 100);
+        orderCreditsAppliedCents = Math.min(creditsAppliedCents, maxCreditsCents);
+      } else {
+        // Child orders carry 0 shipping (buyer pays once on parent) and 0 credits
+        shippingAmount = 0;
+        orderCreditsAppliedCents = 0;
+        totalAmountBeforeCredits =
+          orderSubtotal + taxAmount + platformFeeAmount;
       }
 
-      const totalAmount = totalAmountBeforeCredits - (creditsAppliedCents / 100);
+      const totalAmount =
+        totalAmountBeforeCredits - orderCreditsAppliedCents / 100;
 
-      // Generate order number
-      const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+      const orderNumber = isMultiSeller
+        ? sharedOrderNumber
+        : sharedOrderNumber;
 
       const { data: order, error } = await this.supabase
         .getClient()
@@ -2332,13 +2438,14 @@ export class BuyersService {
           seller_org_id: sellerOrgId,
           buyer_user_id: buyerUserId,
           checkout_group_id: checkoutGroupId,
+          parent_order_id: isMultiSeller ? parentOrder.id : null,
           status: 'pending',
           payment_status: 'pending',
           subtotal: orderSubtotal,
           tax_amount: taxAmount,
           shipping_amount: shippingAmount,
           discount_amount: 0,
-          credits_applied_cents: creditsAppliedCents,
+          credits_applied_cents: orderCreditsAppliedCents,
           total_amount: totalAmount,
           currency: 'XCD',
           shipping_address: shippingAddress,
@@ -2406,14 +2513,14 @@ export class BuyersService {
           created_by: buyerUserId,
         });
 
-      // Deduct credits from buyer balance if credits were applied
-      if (creditsAppliedCents > 0) {
+      // Deduct credits for standalone single-seller orders
+      if (!isMultiSeller && orderCreditsAppliedCents > 0) {
         this.logger.debug(
-          `Deducting ${creditsAppliedCents} cents credits from buyer ${buyerOrgId} for order ${order.id}`,
+          `Deducting ${orderCreditsAppliedCents} cents credits from buyer ${buyerOrgId} for order ${order.id}`,
         );
         await this.supabase.getClient().rpc('adjust_buyer_credit', {
           p_buyer_org_id: buyerOrgId,
-          p_amount_cents: -creditsAppliedCents, // Negative to deduct
+          p_amount_cents: -orderCreditsAppliedCents,
           p_type: 'usage',
           p_reason: 'order_applied',
           p_note: `Applied to order ${orderNumber}`,
@@ -2433,7 +2540,7 @@ export class BuyersService {
             contextId: order.id,
             currentUserId: buyerUserId,
             currentOrgId: buyerOrgId,
-            otherUserId: undefined, // We don't have seller user ID, just org
+            otherUserId: undefined,
             title: `Order ${orderNumber}`,
           });
         },
@@ -2474,23 +2581,20 @@ export class BuyersService {
         2500,
       );
 
-      // Notify the specific seller via WhatsApp if they are paired (signed up using WhatsApp)
+      // Notify the specific seller via WhatsApp
       runSideEffect(
         `wa:new_order seller_org=${sellerOrgId} order=${order.id}`,
         async () => {
           const client = this.supabase.getClient();
-          // Deep link to manage this order
           const frontend = this.config.get<string>('app.frontendUrl');
           const manageUrl = `${frontend}/seller/orders/${order.id}`;
 
-          // Prefer product creator as the target seller user
           const creatorId =
             (items.find((it: any) => it?.product_snapshot?.created_by)
               ?.product_snapshot?.created_by as string | undefined) || undefined;
 
           let targetSellerUserId: string | null = creatorId ?? null;
 
-          // Fallback to an org member (e.g., earliest joined) if creator not available
           if (!targetSellerUserId) {
             const { data: owner } = await client
               .from('organization_users')
@@ -2527,9 +2631,7 @@ export class BuyersService {
               const productName = firstItem?.product_name || 'items';
               const summary =
                 qty && unit
-                  ? `${qty} ${unit} of ${productName} for ${currency} ${totalAmt.toFixed(
-                      2,
-                    )}`
+                  ? `${qty} ${unit} of ${productName} for ${currency} ${totalAmt.toFixed(2)}`
                   : `${items.length} item(s) for ${currency} ${totalAmt.toFixed(2)}`;
 
               await this.waTemplates.sendNewOrderToSeller(
@@ -2541,7 +2643,6 @@ export class BuyersService {
                 manageUrl,
                 'en',
               );
-              // Send interactive Accept/Reject buttons
               await this.waTemplates.sendOrderAcceptButtons(
                 String(sellerUser.phone_number),
                 String(order.id),
@@ -2553,7 +2654,7 @@ export class BuyersService {
         3000,
       );
 
-      // Notify seller users via Email (all available emails in the seller organization)
+      // Notify seller users via Email
       runSideEffect(
         `email:seller_new_order seller_org=${sellerOrgId} order=${order.id}`,
         async () => {
@@ -2570,7 +2671,6 @@ export class BuyersService {
             (billingAddress as any)?.name ||
             'Buyer';
 
-          // Fetch all members of the seller organization
           const { data: orgUsers } = await client
             .from('organization_users')
             .select('user_id')
@@ -2630,13 +2730,14 @@ Manage this order: ${link}`;
     );
     await this.clearCart(buyerOrgId, buyerUserId);
 
-    // Return the first order (or combine if needed)
-    const firstOrder = createdOrders[0];
-    const firstOrderItems = sellerGroups.get(firstOrder.seller_org_id) || [];
+    // The anchor order for buyer receipt and event emission:
+    // - multi-seller: the parent order
+    // - single-seller: the only order
+    const anchorOrder = isMultiSeller ? parentOrder : createdOrders[0];
 
-    // Email receipt to buyer (non-card path)
+    // Email receipt to buyer
     runSideEffect(
-      `email:buyer_receipt order=${firstOrder?.id}`,
+      `email:buyer_receipt order=${anchorOrder?.id}`,
       async () => {
         const { data: buyer } = await this.supabase
           .getClient()
@@ -2647,7 +2748,7 @@ Manage this order: ${link}`;
 
         if (buyer?.email) {
           const frontendUrl = this.config.get<string>('app.frontendUrl');
-          const link = `${frontendUrl}/buyer/order-confirmation/${firstOrder.id}`;
+          const link = `${frontendUrl}/buyer/order-confirmation/${anchorOrder.id}`;
           const html = `
               <h2>Thanks for your order</h2>
               <p>Thanks for your order on Procur.</p>
@@ -2668,8 +2769,12 @@ Manage this order: ${link}`;
       12000,
     );
 
-    // Emit order created events for each order
-    for (const order of createdOrders) {
+    // Emit order created events
+    const ordersForEvents = isMultiSeller
+      ? [parentOrder, ...createdOrders]
+      : createdOrders;
+
+    for (const order of ordersForEvents) {
       await this.eventsService.emit({
         type: EventTypes.Order.CREATED,
         aggregateType: AggregateTypes.ORDER,
@@ -2678,18 +2783,29 @@ Manage this order: ${link}`;
         organizationId: buyerOrgId,
         payload: {
           orderNumber: order.order_number,
-          sellerOrgId: order.seller_org_id,
+          sellerOrgId: order.seller_org_id ?? null,
           totalAmount: order.total_amount,
-          itemCount: sellerGroups.get(order.seller_org_id)?.length || 0,
+          itemCount: order.seller_org_id
+            ? sellerGroups.get(order.seller_org_id)?.length || 0
+            : orderItems.length,
           checkoutGroupId,
           currency: order.currency,
+          isParent: !order.seller_org_id,
         },
       });
     }
 
     this.logger.log(
-      `createOrder complete. first_order=${firstOrder?.id} items=${firstOrderItems?.length || 0}`,
+      `createOrder complete. anchor_order=${anchorOrder?.id} multi_seller=${isMultiSeller}`,
     );
+
+    if (isMultiSeller) {
+      // Return parent order with all items for the confirmation page
+      return this.transformOrderToResponse(parentOrder, orderItems);
+    }
+
+    const firstOrder = createdOrders[0];
+    const firstOrderItems = sellerGroups.get(firstOrder.seller_org_id) || [];
     return this.transformOrderToResponse(firstOrder, firstOrderItems);
   }
 
@@ -2727,7 +2843,11 @@ Manage this order: ${link}`;
       `,
         { count: 'exact' },
       )
-      .eq('buyer_org_id', buyerOrgId);
+      .eq('buyer_org_id', buyerOrgId)
+      // Only return top-level orders (parent orders and legacy standalone orders).
+      // Child/fulfillment orders (parent_order_id IS NOT NULL) are embedded inside
+      // the parent's getOrderById response — they should not appear as separate list items.
+      .is('parent_order_id', null);
 
     if (status) queryBuilder = queryBuilder.eq('status', status);
     if (seller_id) queryBuilder = queryBuilder.eq('seller_org_id', seller_id);
@@ -2903,6 +3023,33 @@ Manage this order: ${link}`;
       const fromMeta = this.mapPaymentLinkMetaToOrderItems(meta);
       if (fromMeta.length > 0) {
         orderItems = fromMeta;
+      }
+    }
+
+    // If this is a parent aggregate order (seller_org_id is null and it has children),
+    // return the aggregate view with per-seller fulfillments embedded.
+    if (!order.seller_org_id) {
+      const { data: children, error: childrenError } = await client
+        .from('orders')
+        .select(
+          `
+          *,
+          seller_org:organizations!seller_org_id(name),
+          order_items(*),
+          order_timeline(*)
+        `,
+        )
+        .eq('parent_order_id', orderId)
+        .order('created_at', { ascending: true });
+
+      if (childrenError) {
+        throw new BadRequestException(
+          `Failed to load order fulfillments: ${childrenError.message}`,
+        );
+      }
+
+      if (children && children.length > 0) {
+        return this.transformParentOrderToResponse(order, children);
       }
     }
 
@@ -4756,6 +4903,30 @@ Manage this order: ${link}`;
 
     const reason = cancelDto?.reason || 'Cancelled by buyer';
 
+    // If this is a parent aggregate order, also cancel all its child orders
+    const { data: children } = await this.supabase
+      .getClient()
+      .from('orders')
+      .select('id, status')
+      .eq('parent_order_id', orderId);
+
+    for (const child of children || []) {
+      if (['pending', 'confirmed', 'accepted'].includes(child.status)) {
+        await this.supabase
+          .getClient()
+          .from('orders')
+          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .eq('id', child.id);
+
+        await this.supabase.getClient().from('order_timeline').insert({
+          order_id: child.id,
+          event_type: 'order_cancelled',
+          description: reason,
+          created_by: buyerOrgId,
+        });
+      }
+    }
+
     // Create timeline entry
     await this.supabase.getClient().from('order_timeline').insert({
       order_id: orderId,
@@ -4955,6 +5126,129 @@ Manage this order: ${link}`;
     });
   }
 
+  private computeAggregateStatus(statuses: string[]): string {
+    const active = statuses.filter(
+      (s) => s !== 'cancelled' && s !== 'rejected',
+    );
+    if (active.length === 0) return 'cancelled';
+    if (active.every((s) => s === 'delivered')) return 'delivered';
+    if (active.every((s) => s === 'shipped' || s === 'delivered'))
+      return 'shipped';
+    if (
+      active.every(
+        (s) => s === 'accepted' || s === 'shipped' || s === 'delivered',
+      )
+    )
+      return 'accepted';
+    return 'pending';
+  }
+
+  private transformParentOrderToResponse(
+    parent: any,
+    children: any[],
+  ): BuyerOrderResponseDto {
+    const fulfillments = children.map((child) => {
+      const childItems: any[] = Array.isArray(child.order_items)
+        ? child.order_items
+        : [];
+      const mappedItems = childItems.map((item: any) => {
+        const productImage =
+          (item.product_snapshot?.product_images || []).find?.(
+            (img: any) => img?.is_primary,
+          )?.image_url ||
+          item.product_snapshot?.image_url ||
+          null;
+        const unit =
+          item.product_snapshot?.unit_of_measurement ||
+          item.unit_of_measurement ||
+          null;
+        return {
+          id: item.id,
+          product_id: item.product_id,
+          product_name: item.product_name,
+          product_sku: item.product_sku,
+          unit_price: item.unit_price,
+          quantity: item.quantity,
+          total_price: item.total_price,
+          product_image: productImage,
+          image_url: productImage,
+          subtotal: typeof item.total_price === 'number' ? item.total_price : Number(item.total_price ?? 0),
+          unit,
+          unit_of_measurement: unit,
+          product_snapshot: item.product_snapshot,
+        };
+      });
+      const childTimeline: any[] = Array.isArray(child.order_timeline)
+        ? child.order_timeline
+        : [];
+      return {
+        id: child.id,
+        order_number: child.order_number,
+        seller_org_id: child.seller_org_id,
+        seller_name:
+          child.seller_org?.name ||
+          child.seller_organization?.name ||
+          'Unknown Seller',
+        status: child.status,
+        subtotal: child.subtotal,
+        total_amount: child.total_amount,
+        tracking_number: child.tracking_number || null,
+        shipping_method: child.shipping_method || null,
+        estimated_delivery_date: child.estimated_delivery_date || null,
+        actual_delivery_date: child.actual_delivery_date || null,
+        accepted_at: child.accepted_at || null,
+        rejected_at: child.rejected_at || null,
+        shipped_at: child.shipped_at || null,
+        delivered_at: child.delivered_at || null,
+        seller_notes: child.seller_notes || null,
+        items: mappedItems,
+        timeline: childTimeline.map((e: any) => ({
+          event_type: e.event_type,
+          description: e.description,
+          created_at: e.created_at,
+          metadata: e.metadata,
+        })),
+      };
+    });
+
+    // Aggregate all items across fulfillments for a flat summary
+    const allItems = fulfillments.flatMap((f) => f.items);
+
+    return {
+      id: parent.id,
+      checkout_group_id: parent.checkout_group_id || null,
+      order_number: parent.order_number,
+      status: parent.status,
+      payment_status: parent.payment_status,
+      seller_org_id: null,
+      seller_name: 'Multiple Sellers',
+      parent_order_id: null,
+      is_aggregate: true,
+      fulfillments,
+      subtotal: parent.subtotal,
+      tax_amount: parent.tax_amount,
+      shipping_amount: parent.shipping_amount,
+      discount_amount: parent.discount_amount,
+      total_amount: parent.total_amount,
+      currency: parent.currency,
+      shipping_address: parent.shipping_address,
+      billing_address: parent.billing_address,
+      buyer_notes: parent.buyer_notes,
+      seller_notes: undefined,
+      tracking_number: undefined,
+      shipping_method: undefined,
+      estimated_delivery_date: parent.estimated_delivery_date,
+      actual_delivery_date: undefined,
+      accepted_at: undefined,
+      rejected_at: undefined,
+      shipped_at: undefined,
+      delivered_at: undefined,
+      items: allItems,
+      created_at: parent.created_at,
+      updated_at: parent.updated_at,
+    };
+  }
+
   private transformOrderToResponse(
     order: any,
     orderItems: any[],
@@ -4973,8 +5267,11 @@ Manage this order: ${link}`;
       order_number: order.order_number,
       status: order.status,
       payment_status: order.payment_status,
-      seller_org_id: order.seller_org_id,
-      seller_name: order.seller_organization?.name || 'Unknown Seller',
+      parent_order_id: order.parent_order_id ?? null,
+      seller_org_id: order.seller_org_id ?? null,
+      seller_name: order.seller_org_id
+        ? order.seller_organization?.name || 'Unknown Seller'
+        : 'Multiple Sellers',
       subtotal: order.subtotal,
       tax_amount: order.tax_amount,
       shipping_amount: order.shipping_amount,

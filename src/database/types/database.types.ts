@@ -202,8 +202,9 @@ export interface DatabaseOrder {
   id: string;
   order_number: string;
   buyer_org_id: string;
-  seller_org_id: string;
+  seller_org_id?: string | null; // nullable on parent aggregate orders (multi-seller checkout)
   buyer_user_id?: string;
+  parent_order_id?: string | null; // set on child/fulfillment orders; null on parent & legacy orders
   status: string;
   payment_status: string;
   subtotal: number;

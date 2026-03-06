@@ -196,6 +196,62 @@ export class OrderItemResponseDto {
   product_snapshot?: any;
 }
 
+export class OrderFulfillmentDto {
+  @ApiProperty({ description: 'Child order (fulfillment) ID' })
+  id: string;
+
+  @ApiProperty({ description: 'Shared order number (same as parent)' })
+  order_number: string;
+
+  @ApiProperty({ description: 'Seller organization ID' })
+  seller_org_id: string;
+
+  @ApiProperty({ description: 'Seller name' })
+  seller_name: string;
+
+  @ApiProperty({ description: 'Per-seller fulfillment status' })
+  status: string;
+
+  @ApiProperty({ description: 'Per-seller subtotal' })
+  subtotal: number;
+
+  @ApiProperty({ description: 'Per-seller total amount' })
+  total_amount: number;
+
+  @ApiPropertyOptional({ description: 'Tracking number for this fulfillment' })
+  tracking_number?: string;
+
+  @ApiPropertyOptional({ description: 'Shipping method for this fulfillment' })
+  shipping_method?: string;
+
+  @ApiPropertyOptional({ description: 'Estimated delivery date' })
+  estimated_delivery_date?: string;
+
+  @ApiPropertyOptional({ description: 'Actual delivery date' })
+  actual_delivery_date?: string;
+
+  @ApiPropertyOptional({ description: 'When this fulfillment was accepted' })
+  accepted_at?: string;
+
+  @ApiPropertyOptional({ description: 'When this fulfillment was rejected' })
+  rejected_at?: string;
+
+  @ApiPropertyOptional({ description: 'When this fulfillment was shipped' })
+  shipped_at?: string;
+
+  @ApiPropertyOptional({ description: 'When this fulfillment was delivered' })
+  delivered_at?: string;
+
+  @ApiPropertyOptional({ description: 'Seller notes for this fulfillment' })
+  seller_notes?: string;
+
+  @ApiProperty({ description: 'Items in this fulfillment' })
+  items: OrderItemResponseDto[];
+
+  @ApiPropertyOptional({ description: 'Timeline events for this fulfillment' })
+  timeline?: any[];
+}
+
 export class BuyerOrderResponseDto {
   @ApiProperty({ description: 'Order ID' })
   id: string;
@@ -209,11 +265,27 @@ export class BuyerOrderResponseDto {
   @ApiProperty({ description: 'Order number' })
   order_number: string;
 
-  @ApiProperty({ description: 'Seller organization ID' })
-  seller_org_id: string;
+  @ApiPropertyOptional({ description: 'Seller organization ID (null for multi-seller parent orders)' })
+  seller_org_id?: string | null;
 
-  @ApiProperty({ description: 'Seller name' })
-  seller_name: string;
+  @ApiPropertyOptional({ description: 'Seller name (null or "Multiple Sellers" for parent orders)' })
+  seller_name?: string;
+
+  @ApiPropertyOptional({
+    description: 'Parent order ID — set on child fulfillment rows; null on parent and legacy orders',
+  })
+  parent_order_id?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'True when this order is an aggregate parent with per-seller fulfillments',
+  })
+  is_aggregate?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Per-seller fulfillments (populated on aggregate parent orders)',
+    type: () => [OrderFulfillmentDto],
+  })
+  fulfillments?: OrderFulfillmentDto[];
 
   @ApiProperty({ description: 'Order status' })
   status: string;

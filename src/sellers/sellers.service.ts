@@ -823,6 +823,11 @@ export class SellersService {
       },
     });
 
+    // Sync aggregate status on the parent order (if this is a child fulfillment)
+    if (data.parent_order_id) {
+      await this.syncParentOrderStatus(data.parent_order_id);
+    }
+
     return this.mapOrderToResponse(data);
   }
 
@@ -880,6 +885,11 @@ export class SellersService {
         reason: rejectOrderDto.reason,
       },
     });
+
+    // Sync aggregate status on the parent order (if this is a child fulfillment)
+    if (data.parent_order_id) {
+      await this.syncParentOrderStatus(data.parent_order_id);
+    }
 
     return this.mapOrderToResponse(data);
   }
@@ -996,6 +1006,11 @@ export class SellersService {
           trackingNumber: updateOrderStatusDto.tracking_number,
         },
       });
+    }
+
+    // Sync aggregate status on the parent order (if this is a child fulfillment)
+    if (data.parent_order_id) {
+      await this.syncParentOrderStatus(data.parent_order_id);
     }
 
     return this.mapOrderToResponse(data);
@@ -2183,6 +2198,48 @@ export class SellersService {
     };
   }
 
+  private computeAggregateStatus(statuses: string[]): string {
+    const active = statuses.filter(
+      (s) => s !== 'cancelled' && s !== 'rejected',
+    );
+    if (active.length === 0) return 'cancelled';
+    if (active.every((s) => s === 'delivered')) return 'delivered';
+    if (active.every((s) => s === 'shipped' || s === 'delivered'))
+      return 'shipped';
+    if (
+      active.every(
+        (s) => s === 'accepted' || s === 'shipped' || s === 'delivered',
+      )
+    )
+      return 'accepted';
+    return 'pending';
+  }
+
+  private async syncParentOrderStatus(parentOrderId: string): Promise<void> {
+    const client = this.supabaseService.getClient();
+    const { data: children } = await client
+      .from('orders')
+      .select('status')
+      .eq('parent_order_id', parentOrderId);
+
+    if (!children || children.length === 0) return;
+
+    const aggregateStatus = this.computeAggregateStatus(
+      children.map((c: any) => c.status),
+    );
+
+    const updatePayload: Record<string, any> = { status: aggregateStatus };
+    if (aggregateStatus === 'delivered') {
+      updatePayload.actual_delivery_date = new Date().toISOString();
+      updatePayload.delivered_at = new Date().toISOString();
+    }
+
+    await client
+      .from('orders')
+      .update(updatePayload)
+      .eq('id', parentOrderId);
+  }
+
   private mapOrderToResponse(order: any): OrderResponseDto {
     return {
       id: order.id,
@@ -2190,6 +2247,7 @@ export class SellersService {
       buyer_org_id: order.buyer_org_id,
       seller_org_id: order.seller_org_id,
       buyer_user_id: order.buyer_user_id,
+      parent_order_id: order.parent_order_id ?? null,
       buyer_info: order.organizations
         ? {
             organization_name: order.organizations.name,
