@@ -93,6 +93,24 @@ export class SignupDto {
   businessType?: string;
 
   @ApiProperty({
+    example: '+14731234567',
+    description: 'WhatsApp number (required for buyer/seller accounts)',
+    required: false,
+  })
+  @ValidateIf(
+    (o) =>
+      o.accountType === AccountType.BUYER ||
+      o.accountType === AccountType.SELLER,
+  )
+  @IsString()
+  @IsNotEmpty({ message: 'WhatsApp number is required for buyer/seller accounts' })
+  @Matches(/^\+?[1-9]\d{7,14}$/, {
+    message:
+      'Please enter a valid international phone number (e.g. +14731234567)',
+  })
+  phoneNumber?: string;
+
+  @ApiProperty({
     description: 'Business website honeypot. Real users must leave this empty.',
     required: false,
   })

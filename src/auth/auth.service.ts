@@ -114,6 +114,7 @@ export class AuthService {
       country,
       businessType,
       businessName,
+      phoneNumber,
       website,
       captchaToken,
     } = signupDto;
@@ -157,6 +158,7 @@ export class AuthService {
         fullname,
         individual_account_type: accountType,
         country,
+        phone_number: phoneNumber,
         email_verification_token: verificationToken,
         email_verification_expires: verificationExpires,
       };
