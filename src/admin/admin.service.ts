@@ -382,6 +382,7 @@ export class AdminService {
   private async getOrganizationAdminContact(orgId: string): Promise<{
     adminEmail: string | null;
     adminFullname: string | null;
+    adminPhoneNumber: string | null;
   }> {
     const client = this.supabase.getClient();
 
@@ -442,13 +443,13 @@ export class AdminService {
     }
 
     if (!orgUserId) {
-      return { adminEmail: null, adminFullname: null };
+      return { adminEmail: null, adminFullname: null, adminPhoneNumber: null };
     }
 
     // Fetch user contact info
     const { data: users, error: userError } = await client
       .from('users')
-      .select('email, fullname')
+      .select('email, fullname, phone_number')
       .eq('id', orgUserId)
       .limit(1);
 
@@ -459,15 +460,16 @@ export class AdminService {
     }
 
     const user = users?.[0] as
-      | { email?: string; fullname?: string }
+      | { email?: string; fullname?: string; phone_number?: string }
       | undefined;
     if (!user) {
-      return { adminEmail: null, adminFullname: null };
+      return { adminEmail: null, adminFullname: null, adminPhoneNumber: null };
     }
 
     return {
       adminEmail: user.email ?? null,
       adminFullname: user.fullname ?? null,
+      adminPhoneNumber: user.phone_number ?? null,
     };
   }
 
@@ -549,7 +551,7 @@ export class AdminService {
     const organizations: AdminOrganizationSummary[] = data
       ? await Promise.all(
           data.map(async (org: any) => {
-            const { adminEmail, adminFullname } =
+            const { adminEmail, adminFullname, adminPhoneNumber } =
               await this.getOrganizationAdminContact(org.id);
             let farmersId: string | null = null;
             const farmersIdPath = (org as any).farmers_id as string | null;
@@ -585,7 +587,7 @@ export class AdminService {
               adminEmail,
               adminFullname,
               address: org.address ?? null,
-              phoneNumber: org.phone_number ?? null,
+              phoneNumber: adminPhoneNumber ?? org.phone_number ?? null,
               logoUrl: org.logo_url ?? null,
               headerImageUrl: (org as any).header_image_url ?? null,
               farmersId,
@@ -1450,7 +1452,7 @@ export class AdminService {
       );
     }
 
-    const { adminEmail, adminFullname } =
+    const { adminEmail, adminFullname, adminPhoneNumber } =
       await this.getOrganizationAdminContact(data.id);
     let farmersId: string | null = null;
     const farmersIdPath = (data as any).farmers_id as string | null;
@@ -1511,7 +1513,7 @@ export class AdminService {
       adminEmail,
       adminFullname,
       address: data.address ?? null,
-      phoneNumber: data.phone_number ?? null,
+      phoneNumber: adminPhoneNumber ?? data.phone_number ?? null,
       logoUrl: data.logo_url ?? null,
       headerImageUrl: (data as any).header_image_url ?? null,
       farmersId,
