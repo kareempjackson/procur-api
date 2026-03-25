@@ -192,6 +192,17 @@ export class UpdateOrderStatusDto {
   actual_delivery_date?: string;
 }
 
+export class LotCodeAssignmentDto {
+  @ApiProperty({ description: 'Order item ID to assign the lot code to' })
+  @IsUUID()
+  order_item_id: string;
+
+  @ApiProperty({ description: 'Traceability Lot Code from a seller harvest log', example: 'TLC-GREE-PLAN-20260315-X7K2' })
+  @IsString()
+  @IsNotEmpty()
+  lot_code: string;
+}
+
 export class AcceptOrderDto {
   @ApiPropertyOptional({ description: 'Notes from seller' })
   @IsOptional()
@@ -208,6 +219,16 @@ export class AcceptOrderDto {
   @IsString()
   @Length(1, 100)
   shipping_method?: string;
+
+  @ApiPropertyOptional({
+    description: 'FSMA 204 lot code assignments per order item. Non-blocking — orders proceed without lot codes.',
+    type: [LotCodeAssignmentDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => LotCodeAssignmentDto)
+  lot_code_assignments?: LotCodeAssignmentDto[];
 }
 
 export class RejectOrderDto {

@@ -675,6 +675,28 @@ export class BuyersService {
       }
     }
 
+    // Non-blocking farm origin fetch — failure here never breaks the product detail response
+    let farmOrigin: MarketplaceProductDetailDto['farm_origin'] | undefined;
+    try {
+      const { data: fp } = await client
+        .from('farm_profiles')
+        .select('parish, country, primary_crops, certifications')
+        .eq('org_id', sellerOrgId)
+        .maybeSingle();
+      if (fp) {
+        farmOrigin = {
+          parish: fp.parish ?? undefined,
+          country: fp.country ?? undefined,
+          is_organic: (fp.certifications ?? []).some(
+            (c: any) => typeof c.type === 'string' && c.type.toLowerCase().includes('organic'),
+          ),
+          certifications: fp.certifications ?? [],
+        };
+      }
+    } catch {
+      // intentionally silent — farm_origin is optional
+    }
+
     const transformedProduct: MarketplaceProductDetailDto = {
       id: product.id,
       name: product.name,
@@ -729,6 +751,7 @@ export class BuyersService {
       recent_reviews: [], // TODO: Get recent reviews
       product_update: productUpdate,
       harvest_update: harvestUpdate,
+      farm_origin: farmOrigin,
       related_products:
         relatedProducts?.map((rp) => ({
           id: rp.id,
@@ -926,13 +949,82 @@ export class BuyersService {
   }
 
   async getSellerById(sellerId: string): Promise<MarketplaceSellerDto | null> {
-    const { sellers } = await this.getSellers({
-      page: 1,
-      limit: 100,
-    });
+    const client = this.supabase.getClient();
 
-    const found = sellers.find((s) => s.id === sellerId);
-    return found ?? null;
+    const { data: seller, error } = await client
+      .from('organizations')
+      .select(
+        `id, name, logo_url, header_image_url, created_at, business_type, country,
+        products:products!seller_org_id(id, status)`,
+      )
+      .eq('id', sellerId)
+      .eq('account_type', 'seller')
+      .eq('status', 'active')
+      .single();
+
+    if (error || !seller) return null;
+
+    const [reviewsRes, completedRes, batchRes] = await Promise.all([
+      client
+        .from('order_reviews')
+        .select('rating')
+        .eq('seller_org_id', sellerId),
+      client
+        .from('orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('seller_org_id', sellerId)
+        .eq('status', 'delivered'),
+      client
+        .from('harvest_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('seller_org_id', sellerId),
+    ]);
+
+    if (reviewsRes.error) this.logger.warn(`getSellerById reviews query failed for ${sellerId}: ${reviewsRes.error.message}`);
+    if (completedRes.error) this.logger.warn(`getSellerById orders query failed for ${sellerId}: ${completedRes.error.message}`);
+    if (batchRes.error) this.logger.warn(`getSellerById harvest_logs query failed for ${sellerId}: ${batchRes.error.message}`);
+
+    const reviews = reviewsRes.data || [];
+    const avgRating =
+      reviews.length > 0
+        ? Number(
+            (
+              reviews.reduce((s: number, r: any) => s + Number(r.rating || 0), 0) /
+              reviews.length
+            ).toFixed(2),
+          )
+        : 0;
+    const completedOrders = completedRes.count || 0;
+    const verifiedBatchCount = batchRes.count || 0;
+
+    const reliabilityBadge =
+      avgRating >= 4.5 && completedOrders >= 20
+        ? 'Platinum'
+        : avgRating >= 4.0 && completedOrders >= 10
+          ? 'Gold'
+          : avgRating >= 3.5 && completedOrders >= 5
+            ? 'Silver'
+            : 'Standard';
+
+    return {
+      id: seller.id,
+      name: seller.name,
+      description: undefined,
+      business_type: seller.business_type,
+      header_image_url: (seller as any).header_image_url ?? undefined,
+      logo_url: seller.logo_url,
+      location: seller.country,
+      average_rating: avgRating,
+      review_count: reviews.length,
+      product_count: (seller.products || []).filter((p: any) => p.status === 'active').length,
+      completed_orders: completedOrders,
+      years_in_business:
+        new Date().getFullYear() - new Date(seller.created_at).getFullYear(),
+      is_verified: true,
+      specialties: [],
+      verified_batch_count: verifiedBatchCount,
+      reliability_badge: reliabilityBadge,
+    };
   }
 
   async getMarketplaceStats(): Promise<MarketplaceStatsDto> {
@@ -6770,5 +6862,133 @@ Manage this order: ${link}`;
     }
     const months = Math.floor(seconds / 2592000);
     return `${months} ${months === 1 ? 'month' : 'months'} ago`;
+  }
+
+  // ─── Receiving Confirmation (FSMA 204 Receiving CTE) ──────────────────────
+
+  async getReceivingForm(
+    buyerOrgId: string,
+    orderId: string,
+  ): Promise<{
+    order: { id: string; order_number: string; seller_name: string };
+    items: Array<{
+      id: string;
+      product_name: string;
+      quantity: number;
+      unit: string | null;
+      lot_code: string | null;
+    }>;
+    existing_confirmation: unknown | null;
+  }> {
+    const client = this.supabase.getClient();
+
+    const { data: order } = await client
+      .from('orders')
+      .select('id, order_number, status, organizations!seller_org_id(name)')
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    const { data: items } = await client
+      .from('order_items')
+      .select('id, product_name, quantity, lot_code, product_snapshot')
+      .eq('order_id', orderId);
+
+    const { data: existing } = await client
+      .from('receiving_confirmations')
+      .select('*')
+      .eq('order_id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    const org = (order as any).organizations as any;
+
+    return {
+      order: {
+        id: order.id,
+        order_number: order.order_number,
+        seller_name: org?.name ?? 'Supplier',
+      },
+      items: (items ?? []).map((item: any) => ({
+        id: item.id,
+        product_name: item.product_name,
+        quantity: item.quantity,
+        unit: item.product_snapshot?.unit_of_measurement ?? item.product_snapshot?.unit ?? null,
+        lot_code: item.lot_code ?? null,
+      })),
+      existing_confirmation: existing ?? null,
+    };
+  }
+
+  async createReceivingConfirmation(
+    buyerOrgId: string,
+    userId: string,
+    orderId: string,
+    dto: {
+      received_date: string;
+      receiving_facility?: string;
+      receiving_country?: string;
+      items: Array<{
+        order_item_id: string;
+        lot_code?: string;
+        quantity_received?: number;
+        condition_score?: number;
+        notes?: string;
+      }>;
+      overall_condition?: number;
+      temperature_on_arrival?: number;
+      temperature_compliant?: boolean;
+      has_rejection?: boolean;
+      rejection_reason?: string;
+      rejected_quantity?: number;
+      rejected_unit?: string;
+      notes?: string;
+    },
+  ): Promise<unknown> {
+    const client = this.supabase.getClient();
+
+    const { data: order } = await client
+      .from('orders')
+      .select('id, seller_org_id, status')
+      .eq('id', orderId)
+      .eq('buyer_org_id', buyerOrgId)
+      .maybeSingle();
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    const payload = {
+      order_id: orderId,
+      buyer_org_id: buyerOrgId,
+      seller_org_id: order.seller_org_id,
+      received_by: userId,
+      receiving_country: dto.receiving_country ?? 'GD',
+      ...dto,
+      items: dto.items ?? [],
+    };
+
+    const { data, error } = await client
+      .from('receiving_confirmations')
+      .upsert(payload, { onConflict: 'order_id,buyer_org_id' })
+      .select()
+      .single();
+
+    if (error) throw new BadRequestException(error.message);
+
+    // Advance shipped → delivered on confirmation
+    if (order.status === 'shipped') {
+      await client
+        .from('orders')
+        .update({
+          status: 'delivered',
+          actual_delivery_date: dto.received_date,
+          delivered_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', orderId);
+    }
+
+    return data;
   }
 }

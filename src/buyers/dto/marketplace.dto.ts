@@ -249,6 +249,12 @@ export class MarketplaceSellerDto {
 
   @ApiProperty({ description: 'Distance from buyer (if location provided)' })
   distance?: number;
+
+  @ApiPropertyOptional({ description: 'Number of FSMA-verified batches shipped' })
+  verified_batch_count?: number;
+
+  @ApiPropertyOptional({ description: 'Reliability badge: Platinum, Gold, Silver, or Standard' })
+  reliability_badge?: string;
 }
 
 export class MarketplaceProductDto {
@@ -445,6 +451,14 @@ export class MarketplaceProductDetailDto extends MarketplaceProductDto {
     type: () => MarketplaceHarvestUpdateDto,
   })
   harvest_update?: MarketplaceHarvestUpdateDto;
+
+  @ApiPropertyOptional({ description: 'Farm origin from seller farm profile' })
+  farm_origin?: {
+    parish?: string;
+    country?: string;
+    is_organic?: boolean;
+    certifications?: any[];
+  };
 }
 
 export class MarketplaceCategoryDto {

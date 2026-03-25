@@ -21,6 +21,7 @@ export enum ProductStatus {
   INACTIVE = 'inactive',
   OUT_OF_STOCK = 'out_of_stock',
   DISCONTINUED = 'discontinued',
+  ARCHIVED = 'archived',
 }
 
 export enum ProductCondition {

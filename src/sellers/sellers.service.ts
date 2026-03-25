@@ -33,7 +33,7 @@ import {
   BuyerReviewDto,
 } from './dto';
 import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
-import { SellerCatalogProductDto } from './dto/product.dto';
+import { SellerCatalogProductDto, ProductStatus } from './dto/product.dto';
 import { SellerHomeResponseDto, BuyerRequestSummaryDto } from './dto/home.dto';
 import {
   CreateFarmVisitRequestDto,
@@ -62,12 +62,14 @@ import {
 } from '../database/types/database.types';
 import { EventsService } from '../events/events.service';
 import { EventTypes, AggregateTypes } from '../events/event-types';
+import { FarmService } from '../farm/farm.service';
 
 @Injectable()
 export class SellersService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly eventsService: EventsService,
+    private readonly farmService: FarmService,
   ) {}
 
   /**
@@ -582,7 +584,7 @@ export class SellersService {
 
     const { error } = await client
       .from('products')
-      .update({ status: 'archived' })
+      .update({ status: ProductStatus.ARCHIVED })
       .eq('id', productId)
       .eq('seller_org_id', sellerOrgId);
 
@@ -822,6 +824,23 @@ export class SellersService {
         estimatedDeliveryDate: acceptOrderDto.estimated_delivery_date,
       },
     });
+
+    // Assign FSMA 204 lot codes to order items (non-blocking — orders proceed without them)
+    if (acceptOrderDto.lot_code_assignments?.length) {
+      const client = this.supabaseService.getClient();
+      for (const assignment of acceptOrderDto.lot_code_assignments) {
+        const harvestLogId = await this.farmService.verifyLotCodeOwnership(
+          sellerOrgId,
+          assignment.lot_code,
+        );
+        if (!harvestLogId) continue; // skip invalid or foreign lot codes silently
+        await client
+          .from('order_items')
+          .update({ lot_code: assignment.lot_code, harvest_log_id: harvestLogId })
+          .eq('id', assignment.order_item_id)
+          .eq('order_id', orderId);
+      }
+    }
 
     // Sync aggregate status on the parent order (if this is a child fulfillment)
     if (data.parent_order_id) {

@@ -31,6 +31,7 @@ import { BankInfoModule } from './bank-info/bank-info.module';
 import { PaymentLinksModule } from './payment-links/payment-links.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
 import { EventsModule } from './events/events.module';
+import { FarmModule } from './farm/farm.module';
 import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.filter';
 
 @Module({
@@ -67,6 +68,7 @@ import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.fil
     PaymentLinksModule,
     MarketplaceModule,
     EventsModule,
+    FarmModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

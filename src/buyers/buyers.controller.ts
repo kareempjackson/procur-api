@@ -1426,4 +1426,47 @@ export class BuyersController {
   ) {
     return this.buyersService.getCreditTransactions(user.organizationId!, query);
   }
+
+  // ==================== RECEIVING CONFIRMATION (FSMA 204) ====================
+
+  @Get('orders/:id/receiving')
+  @RequirePermissions('manage_orders')
+  @ApiOperation({
+    summary: 'Get receiving confirmation form data',
+    description:
+      'Returns order items with lot codes to pre-populate the receiving confirmation form. Returns any existing confirmation if already submitted.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({ status: 200, description: 'Receiving form data' })
+  @ApiNotFoundResponse({ description: 'Order not found' })
+  async getReceivingForm(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+  ) {
+    return this.buyersService.getReceivingForm(user.organizationId!, orderId);
+  }
+
+  @Post('orders/:id/receiving')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions('manage_orders')
+  @ApiOperation({
+    summary: 'Submit receiving confirmation (FSMA 204 Receiving CTE)',
+    description:
+      'Buyer confirms receipt of goods. Records condition per item and advances order to delivered if currently shipped.',
+  })
+  @ApiParam({ name: 'id', description: 'Order ID' })
+  @ApiResponse({ status: 200, description: 'Receiving confirmation saved' })
+  @ApiBadRequestResponse()
+  async createReceivingConfirmation(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Body() dto: any,
+  ) {
+    return this.buyersService.createReceivingConfirmation(
+      user.organizationId!,
+      user.id,
+      orderId,
+      dto,
+    );
+  }
 }
