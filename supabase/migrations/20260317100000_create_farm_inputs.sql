@@ -40,8 +40,8 @@ ALTER TABLE farm_inputs ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "inputs_seller_all" ON farm_inputs
   FOR ALL
-  USING (org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 CREATE POLICY "inputs_admin_all" ON farm_inputs
-  FOR ALL
-  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND account_type = 'admin'));
+  FOR ALL TO authenticated
+  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND role IN ('admin', 'super_admin')));

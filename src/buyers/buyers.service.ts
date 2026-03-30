@@ -37,6 +37,8 @@ import {
 
   // Request DTOs
   CreateProductRequestDto,
+  CreateGuestRequestDto,
+  GuestRequestResponseDto,
   UpdateProductRequestDto,
   ProductRequestQueryDto,
   ProductRequestResponseDto,
@@ -1713,6 +1715,75 @@ export class BuyersService {
       created_at: data.created_at,
       updated_at: data.updated_at,
     };
+  }
+
+  /**
+   * Create a product request from an unauthenticated guest.
+   * Stores guest contact info so admin can follow up.
+   */
+  async createGuestProductRequest(
+    dto: CreateGuestRequestDto,
+  ): Promise<GuestRequestResponseDto> {
+    const insertPayload: any = {
+      product_name: dto.product_name,
+      description: dto.description,
+      quantity: dto.quantity,
+      unit_of_measurement: dto.unit_of_measurement,
+      date_needed: dto.date_needed,
+      guest_name: dto.guest_name,
+      guest_email: dto.guest_email,
+      status: 'draft',
+      is_guest: true,
+    };
+
+    if (dto.budget_range) {
+      insertPayload.budget_min = dto.budget_range.min;
+      insertPayload.budget_max = dto.budget_range.max;
+      insertPayload.currency = dto.budget_range.currency;
+    }
+
+    const { error, data } = await this.supabase
+      .getClient()
+      .from('product_requests')
+      .insert(insertPayload)
+      .select('*')
+      .single();
+
+    if (error)
+      throw new BadRequestException(
+        `Failed to create guest request: ${error.message}`,
+      );
+
+    return {
+      id: data.id,
+      request_number: data.request_number,
+      product_name: data.product_name,
+      quantity: data.quantity,
+      unit_of_measurement: data.unit_of_measurement,
+      status: data.status,
+      created_at: data.created_at,
+    };
+  }
+
+  /**
+   * Record interest in Procur expanding to a specific country.
+   */
+  async recordCountryInterest(
+    country: string,
+    email: string,
+  ): Promise<{ success: boolean }> {
+    const { error } = await this.supabase
+      .getClient()
+      .from('country_interest')
+      .insert({ country, email });
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to record country interest: ${error.message}`,
+      );
+    }
+
+    return { success: true };
   }
 
   async getProductRequests(

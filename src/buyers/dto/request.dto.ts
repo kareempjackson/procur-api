@@ -6,6 +6,7 @@ import {
   IsEnum,
   IsDateString,
   IsPositive,
+  IsEmail,
   Length,
   IsObject,
   ValidateNested,
@@ -398,4 +399,82 @@ export class AcceptQuoteDto {
   @IsOptional()
   @IsString()
   notes?: string;
+}
+
+// ── Guest (unauthenticated) product request ────────────────────────────────
+
+export class CreateGuestRequestDto {
+  @ApiProperty({ description: 'Guest name', example: 'Jane Doe' })
+  @IsString()
+  @Length(2, 150)
+  guest_name: string;
+
+  @ApiProperty({
+    description: 'Guest email for follow-up',
+    example: 'jane@example.com',
+  })
+  @IsEmail()
+  guest_email: string;
+
+  @ApiProperty({
+    description: 'Product name being requested',
+    example: 'Organic Tomatoes',
+  })
+  @IsString()
+  @Length(1, 255)
+  product_name: string;
+
+  @ApiPropertyOptional({ description: 'Detailed description of requirements' })
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @ApiProperty({ description: 'Quantity needed', example: 100 })
+  @IsNumber()
+  @IsPositive()
+  quantity: number;
+
+  @ApiProperty({
+    description: 'Unit of measurement',
+    example: 'kg',
+  })
+  @IsString()
+  @Length(1, 50)
+  unit_of_measurement: string;
+
+  @ApiPropertyOptional({
+    description: 'Date when product is needed',
+  })
+  @IsOptional()
+  @IsString()
+  date_needed?: string;
+
+  @ApiPropertyOptional({ description: 'Budget range for the request' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => BudgetRangeDto)
+  budget_range?: BudgetRangeDto;
+}
+
+export class GuestRequestResponseDto {
+  @ApiProperty({ description: 'Request ID' })
+  id: string;
+
+  @ApiProperty({ description: 'Request number' })
+  request_number: string;
+
+  @ApiProperty({ description: 'Product name' })
+  product_name: string;
+
+  @ApiProperty({ description: 'Quantity requested' })
+  quantity: number;
+
+  @ApiProperty({ description: 'Unit of measurement' })
+  unit_of_measurement: string;
+
+  @ApiProperty({ description: 'Request status' })
+  status: string;
+
+  @ApiProperty({ description: 'Created timestamp' })
+  created_at: string;
 }

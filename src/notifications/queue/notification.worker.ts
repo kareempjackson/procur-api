@@ -2,12 +2,18 @@ import { Worker, QueueEvents, Job, Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import { createClient } from '@supabase/supabase-js';
 import { WebsocketProvider } from '../providers/websocket.provider';
+import { PushProvider } from '../providers/push.provider';
 
 export function startNotificationWorker(env: {
   redisUrl: string;
   supabaseUrl: string;
   supabaseServiceKey: string;
 }) {
+  PushProvider.init({
+    supabaseUrl: env.supabaseUrl,
+    supabaseServiceKey: env.supabaseServiceKey,
+  });
+
   const connection = new IORedis(env.redisUrl, { maxRetriesPerRequest: null });
 
   const deliveryQueue = new Queue('notification-delivery', { connection });
@@ -81,7 +87,12 @@ export function startNotificationWorker(env: {
         } else if (channel === 'email') {
           // integrate email provider in API process or here via Postmark
         } else if (channel === 'push') {
-          // integrate push providers
+          await PushProvider.send(
+            notif.recipient_user_id as string,
+            notif.title as string,
+            notif.body as string,
+            notif.data as Record<string, unknown>,
+          );
         }
 
         await supabase.from('notification_delivery_attempts').insert({

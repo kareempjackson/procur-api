@@ -37,24 +37,24 @@ ALTER TABLE packing_records ENABLE ROW LEVEL SECURITY;
 -- Seller: full access to their own records
 CREATE POLICY "packing_seller_select" ON packing_records
   FOR SELECT
-  USING (seller_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (seller_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 CREATE POLICY "packing_seller_insert" ON packing_records
   FOR INSERT
-  WITH CHECK (seller_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  WITH CHECK (seller_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 CREATE POLICY "packing_seller_update" ON packing_records
   FOR UPDATE
-  USING (seller_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (seller_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 CREATE POLICY "packing_seller_delete" ON packing_records
   FOR DELETE
-  USING (seller_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (seller_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 -- Admin: full access
 CREATE POLICY "packing_admin_all" ON packing_records
-  FOR ALL
-  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND account_type = 'admin'));
+  FOR ALL TO authenticated
+  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND role IN ('admin', 'super_admin')));
 
 -- Public read — needed for chain-of-custody QR lookup (service-role client bypasses RLS)
 -- Expose limited data via API, not directly to anon clients

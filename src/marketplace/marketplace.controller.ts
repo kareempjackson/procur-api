@@ -1,9 +1,13 @@
 import {
   Controller,
   Get,
+  Post,
+  Body,
   Param,
   ParseUUIDPipe,
   Query,
+  HttpCode,
+  HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -15,6 +19,8 @@ import {
   MarketplaceProductQueryDto,
   MarketplaceSellerDto,
   MarketplaceSellerQueryDto,
+  CreateGuestRequestDto,
+  GuestRequestResponseDto,
 } from '../buyers/dto';
 
 @ApiTags('Public Marketplace')
@@ -128,5 +134,40 @@ export class MarketplaceController {
       throw new NotFoundException('Seller not found');
     }
     return seller;
+  }
+
+  @Post('requests')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Create Guest Product Request',
+    description:
+      'Submit a product request without authentication. Requires guest name and email so admin can follow up.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Guest request created successfully',
+    type: GuestRequestResponseDto,
+  })
+  async createGuestRequest(
+    @Body() createDto: CreateGuestRequestDto,
+  ): Promise<GuestRequestResponseDto> {
+    return this.buyersService.createGuestProductRequest(createDto);
+  }
+
+  @Post('country-interest')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary: 'Submit Country Interest',
+    description:
+      'Register interest in having Procur expand to a specific country.',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Country interest recorded',
+  })
+  async submitCountryInterest(
+    @Body() body: { country: string; email: string },
+  ): Promise<{ success: boolean }> {
+    return this.buyersService.recordCountryInterest(body.country, body.email);
   }
 }

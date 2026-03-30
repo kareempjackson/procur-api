@@ -46,14 +46,14 @@ ALTER TABLE receiving_confirmations ENABLE ROW LEVEL SECURITY;
 -- Buyer: full access to their own records
 CREATE POLICY "receiving_buyer_all" ON receiving_confirmations
   FOR ALL
-  USING (buyer_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (buyer_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 -- Seller: read-only access to confirmations for their orders
 CREATE POLICY "receiving_seller_read" ON receiving_confirmations
   FOR SELECT
-  USING (seller_org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (seller_org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 -- Admin: full access
 CREATE POLICY "receiving_admin_all" ON receiving_confirmations
-  FOR ALL
-  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND account_type = 'admin'));
+  FOR ALL TO authenticated
+  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND role IN ('admin', 'super_admin')));

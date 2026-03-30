@@ -23,11 +23,12 @@ CREATE TABLE IF NOT EXISTS crop_seasons (
   notes                     TEXT,
 
   created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-  -- One season record per crop+variety per org
-  UNIQUE (org_id, crop, COALESCE(variety, ''))
+  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- One season record per crop+variety per org (expression-based unique index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_crop_seasons_unique_crop
+  ON crop_seasons (org_id, crop, COALESCE(variety, ''));
 
 CREATE INDEX idx_crop_seasons_org ON crop_seasons(org_id);
 
@@ -36,11 +37,11 @@ ALTER TABLE crop_seasons ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "seasons_seller_all" ON crop_seasons
   FOR ALL
-  USING (org_id = (SELECT organization_id FROM users WHERE id = auth.uid()));
+  USING (org_id IN (SELECT organization_id FROM organization_users WHERE user_id = auth.uid()));
 
 CREATE POLICY "seasons_admin_all" ON crop_seasons
-  FOR ALL
-  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND account_type = 'admin'));
+  FOR ALL TO authenticated
+  USING (EXISTS (SELECT 1 FROM users WHERE id = auth.uid() AND role IN ('admin', 'super_admin')));
 
 -- Public read — buyers can see seasonal availability calendars on marketplace
 CREATE POLICY "seasons_public_read" ON crop_seasons
