@@ -1781,4 +1781,64 @@ export class AdminController {
   async getBuyersWithCredits(@Query() query: { page?: number; limit?: number }) {
     return this.adminService.getBuyersWithCredits(query);
   }
+
+  // ── Product Requests (Bot / Guest + Authenticated) ────────────────────────
+
+  @Get('product-requests')
+  @ApiOperation({
+    summary: 'Get all product requests',
+    description:
+      'Get a paginated list of all product requests, including guest (bot) and authenticated buyer requests.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'status', required: false, type: String })
+  @ApiQuery({ name: 'is_guest', required: false, type: Boolean })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  async getProductRequests(
+    @Query()
+    query: {
+      page?: number;
+      limit?: number;
+      status?: string;
+      is_guest?: string;
+      search?: string;
+    },
+  ) {
+    return this.adminService.getProductRequests(query);
+  }
+
+  @Get('country-interest')
+  @ApiOperation({
+    summary: 'Get all country interest submissions',
+    description: 'List of users who want Procur in their country, submitted via the assistant bot.',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  async getCountryInterest(
+    @Query() query: { page?: number; limit?: number; search?: string },
+  ) {
+    return this.adminService.getCountryInterest(query);
+  }
+
+  @Delete('country-interest/:id')
+  @ApiOperation({ summary: 'Delete a country interest entry' })
+  @ApiParam({ name: 'id', description: 'Country interest ID' })
+  async deleteCountryInterest(@Param('id') id: string) {
+    return this.adminService.deleteCountryInterest(id);
+  }
+
+  @Patch('product-requests/:id/status')
+  @ApiOperation({
+    summary: 'Update product request status',
+    description: 'Update the status of a product request (e.g. open, closed, cancelled).',
+  })
+  @ApiParam({ name: 'id', description: 'Product request ID' })
+  async updateProductRequestStatus(
+    @Param('id') requestId: string,
+    @Body() body: { status: string },
+  ) {
+    return this.adminService.updateProductRequestStatus(requestId, body.status);
+  }
 }

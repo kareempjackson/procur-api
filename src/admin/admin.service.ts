@@ -6599,4 +6599,141 @@ Login here: ${loginUrl}
       limit,
     };
   }
+
+  // ── Product Requests (Bot / Guest + Authenticated) ────────────────────────
+
+  async getProductRequests(query: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    is_guest?: string;
+    search?: string;
+  }) {
+    const page = Number(query.page) || 1;
+    const limit = Math.min(Number(query.limit) || 25, 100);
+    const offset = (page - 1) * limit;
+
+    let builder = this.supabase
+      .getClient()
+      .from('product_requests')
+      .select('*', { count: 'exact' });
+
+    if (query.status) {
+      builder = builder.eq('status', query.status);
+    }
+
+    if (query.is_guest === 'true') {
+      builder = builder.eq('is_guest', true);
+    } else if (query.is_guest === 'false') {
+      builder = builder.eq('is_guest', false);
+    }
+
+    if (query.search) {
+      builder = builder.or(
+        `product_name.ilike.%${query.search}%,guest_name.ilike.%${query.search}%,guest_email.ilike.%${query.search}%,request_number.ilike.%${query.search}%`,
+      );
+    }
+
+    const { data, error, count } = await builder
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch product requests: ${error.message}`,
+      );
+    }
+
+    const requests = (data || []).map((r: any) => ({
+      id: r.id,
+      request_number: r.request_number,
+      product_name: r.product_name,
+      description: r.description,
+      quantity: r.quantity,
+      unit_of_measurement: r.unit_of_measurement,
+      date_needed: r.date_needed,
+      budget_min: r.budget_min,
+      budget_max: r.budget_max,
+      currency: r.currency,
+      status: r.status,
+      is_guest: r.is_guest ?? false,
+      guest_name: r.guest_name,
+      guest_email: r.guest_email,
+      buyer_org_id: r.buyer_org_id,
+      buyer_user_id: r.buyer_user_id,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }));
+
+    return { requests, total: count || 0, page, limit };
+  }
+
+  // ── Country Interest ───────────────────────────────────────────────────────
+
+  async getCountryInterest(query: {
+    page?: number;
+    limit?: number;
+    search?: string;
+  }) {
+    const page = Number(query.page) || 1;
+    const limit = Math.min(Number(query.limit) || 25, 100);
+    const offset = (page - 1) * limit;
+
+    let builder = this.supabase
+      .getClient()
+      .from('country_interest')
+      .select('*', { count: 'exact' });
+
+    if (query.search) {
+      builder = builder.or(
+        `country.ilike.%${query.search}%,email.ilike.%${query.search}%`,
+      );
+    }
+
+    const { data, error, count } = await builder
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to fetch country interest: ${error.message}`,
+      );
+    }
+
+    return { entries: data || [], total: count || 0, page, limit };
+  }
+
+  async deleteCountryInterest(id: string) {
+    const { error } = await this.supabase
+      .getClient()
+      .from('country_interest')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to delete country interest: ${error.message}`,
+      );
+    }
+
+    return { success: true };
+  }
+
+  async updateProductRequestStatus(requestId: string, status: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('product_requests')
+      .update({ status })
+      .eq('id', requestId)
+      .select('*')
+      .single();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to update request status: ${error.message}`,
+      );
+    }
+
+    return data;
+  }
 }
