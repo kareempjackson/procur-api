@@ -28,6 +28,7 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { SellersService } from './sellers.service';
+import { SupabaseService } from '../database/supabase.service';
 import { BankInfoService } from '../bank-info/bank-info.service';
 import { BuyersService } from '../buyers/buyers.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -91,6 +92,7 @@ export class SellersController {
     private readonly sellersService: SellersService,
     private readonly bankInfoService: BankInfoService,
     private readonly buyersService: BuyersService,
+    private readonly supabaseService: SupabaseService,
   ) {}
 
   // ==================== PRODUCT MANAGEMENT ====================
@@ -234,6 +236,52 @@ export class SellersController {
     @Param('id', ParseUUIDPipe) productId: string,
   ): Promise<void> {
     return this.sellersService.deleteProduct(user.organizationId!, productId);
+  }
+
+  @Post('products/:id/image-upload-url')
+  @RequirePermissions('manage_products')
+  @ApiOperation({
+    summary: 'Create signed upload URL for product image',
+    description:
+      'Returns a signed Supabase Storage URL that the client can upload a file to directly.',
+  })
+  @ApiParam({ name: 'id', description: 'Product ID' })
+  @ApiResponse({ status: 200, description: 'Signed upload URL created' })
+  @ApiNotFoundResponse({ description: 'Product not found' })
+  async createProductImageSignedUpload(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) productId: string,
+    @Body() body: { filename: string },
+  ) {
+    // Verify product belongs to seller
+    await this.sellersService.getProductById(
+      user.organizationId!,
+      productId,
+    );
+
+    const safeName = (body.filename || 'image.jpg')
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]/g, '_');
+    const path = `products/${productId}/${Date.now()}_${safeName}`;
+    const bucket = 'procur-img';
+
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .storage.from(bucket)
+      .createSignedUploadUrl(path);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to create signed upload URL: ${error.message}`,
+      );
+    }
+
+    return {
+      signedUrl: data.signedUrl,
+      path: data.path,
+      bucket,
+      token: data.token,
+    };
   }
 
   @Post('products/:id/images')

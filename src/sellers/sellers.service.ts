@@ -357,6 +357,8 @@ export class SellersService {
 
     if (status) {
       queryBuilder = queryBuilder.eq('status', status);
+    } else {
+      queryBuilder = queryBuilder.not('status', 'in', '("archived","discontinued")');
     }
 
     if (is_featured !== undefined) {
