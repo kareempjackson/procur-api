@@ -17,6 +17,7 @@ export interface DatabaseUser {
   user_identification_img?: string;
   personal_address?: string;
   country?: string;
+  default_country_id?: string;
   role: UserRole;
   individual_account_type?: AccountType;
   email_verified: boolean;
@@ -46,6 +47,7 @@ export interface DatabaseOrganization {
    * When true, this seller (and their products) should be hidden from
    * public marketplace and buyer-facing marketplace UIs.
    */
+  country_id?: string;
   is_hidden_from_marketplace?: boolean;
   payment_details?: any;
   logo_url?: string;
@@ -99,6 +101,7 @@ export interface CreateUserData {
   individual_account_type?: string;
   phone_number?: string;
   country?: string;
+  default_country_id?: string;
   email_verification_token: string;
   email_verification_expires: Date;
 }
@@ -117,6 +120,7 @@ export interface CreateOrganizationData {
   business_type?: BusinessType;
   address?: string;
   country?: string;
+  country_id?: string;
   phone_number?: string;
   government_level?: string;
   department?: string;
@@ -149,6 +153,7 @@ export interface DatabaseProduct {
   model?: string;
   color?: string;
   size?: string;
+  country_id?: string;
   status: string;
   is_featured: boolean;
   is_organic: boolean;
@@ -226,6 +231,11 @@ export interface DatabaseOrder {
   rejected_at?: string;
   shipped_at?: string;
   delivered_at?: string;
+  // Cross-island trade
+  origin_country_id?: string;
+  dest_country_id?: string;
+  is_cross_country?: boolean;
+  shipping_route_id?: string;
   // Direct-deposit clearing / inspection workflow
   inspection_status?: string;
   approved_at?: string;
@@ -325,6 +335,7 @@ export interface CreateProductData {
   model?: string;
   color?: string;
   size?: string;
+  country_id?: string;
   status?: string;
   is_featured?: boolean;
   is_organic?: boolean;
@@ -370,23 +381,6 @@ export interface UpdateProductData {
   updated_by?: string;
 }
 
-export interface CreateOrderData {
-  buyer_org_id: string;
-  seller_org_id: string;
-  buyer_user_id?: string;
-  subtotal: number;
-  tax_amount?: number;
-  shipping_amount?: number;
-  discount_amount?: number;
-  total_amount: number;
-  currency?: string;
-  shipping_address: any;
-  billing_address?: any;
-  estimated_delivery_date?: string;
-  shipping_method?: string;
-  buyer_notes?: string;
-}
-
 export interface UpdateOrderData {
   status?: string;
   payment_status?: string;
@@ -410,4 +404,83 @@ export interface CreateScheduledPostData {
   target_audience?: any;
   platforms?: string[];
   created_by?: string;
+}
+
+// Country / multi-country types
+
+export interface DatabaseCountry {
+  code: string;
+  name: string;
+  country_code: string;
+  currency: string;
+  timezone: string;
+  is_active: boolean;
+  config: Record<string, any>;
+  created_at: string;
+}
+
+export interface DatabaseShippingRoute {
+  id: string;
+  seller_org_id: string;
+  origin_country: string;
+  dest_country: string;
+  is_active: boolean;
+  shipping_fee: number;
+  currency: string;
+  est_days_min: number;
+  est_days_max: number;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DatabaseProductCountryAvailability {
+  product_id: string;
+  country_id: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface DatabaseExchangeRate {
+  id: string;
+  from_currency: string;
+  to_currency: string;
+  rate: number;
+  source: string;
+  effective_at: string;
+  created_at: string;
+}
+
+export interface DatabaseTradeRestriction {
+  id: string;
+  product_category: string;
+  origin_country?: string;
+  dest_country: string;
+  restriction: 'blocked' | 'requires_cert' | 'warning';
+  cert_type?: string;
+  description?: string;
+  authority?: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface CreateOrderData {
+  buyer_org_id: string;
+  seller_org_id: string;
+  buyer_user_id?: string;
+  subtotal: number;
+  tax_amount?: number;
+  shipping_amount?: number;
+  discount_amount?: number;
+  total_amount: number;
+  currency?: string;
+  shipping_address: any;
+  billing_address?: any;
+  estimated_delivery_date?: string;
+  shipping_method?: string;
+  buyer_notes?: string;
+  origin_country_id?: string;
+  dest_country_id?: string;
+  is_cross_country?: boolean;
+  shipping_route_id?: string;
 }

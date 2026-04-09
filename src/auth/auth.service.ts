@@ -151,13 +151,25 @@ export class AuthService {
     verificationExpires.setHours(verificationExpires.getHours() + 24); // 24 hours
 
     try {
+      // Resolve country code to country name for display
+      const { data: countryRecord } = await this.supabaseService
+        .getClient()
+        .from('countries')
+        .select('code, name')
+        .eq('code', country)
+        .single();
+
+      const countryName = countryRecord?.name || country;
+      const countryId = countryRecord?.code || country;
+
       // Create user in database
       const userData = {
         email,
         password: hashedPassword,
         fullname,
         individual_account_type: accountType,
-        country,
+        country: countryName,
+        default_country_id: countryId,
         phone_number: phoneNumber,
         email_verification_token: verificationToken,
         email_verification_expires: verificationExpires,
@@ -177,7 +189,8 @@ export class AuthService {
           business_name: businessName || undefined,
           account_type: accountType,
           business_type: (businessType || 'general') as BusinessType,
-          country,
+          country: countryName,
+          country_id: countryId,
         };
 
         const organization =

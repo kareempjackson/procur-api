@@ -124,6 +124,13 @@ export class MarketplaceProductQueryDto {
   max_distance?: number;
 
   @ApiPropertyOptional({
+    description: 'Filter by island code (e.g. gda, tnt, svg)',
+  })
+  @IsOptional()
+  @IsString()
+  country_id?: string;
+
+  @ApiPropertyOptional({
     description: 'Sort by field',
     enum: ProductSortBy,
     default: ProductSortBy.CREATED_AT,
@@ -180,6 +187,13 @@ export class MarketplaceSellerQueryDto {
   @Transform(({ value }) => value === 'true')
   @IsBoolean()
   is_verified?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Filter by island code (e.g. gda, tnt, svg)',
+  })
+  @IsOptional()
+  @IsString()
+  country_id?: string;
 
   @ApiPropertyOptional({
     description: 'Sort by field',

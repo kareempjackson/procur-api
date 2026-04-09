@@ -32,6 +32,11 @@ import { PaymentLinksModule } from './payment-links/payment-links.module';
 import { MarketplaceModule } from './marketplace/marketplace.module';
 import { EventsModule } from './events/events.module';
 import { FarmModule } from './farm/farm.module';
+import { CountriesModule } from './countries/countries.module';
+import { ShippingModule } from './shipping/shipping.module';
+import { CurrencyModule } from './currency/currency.module';
+import { TradeModule } from './trade/trade.module';
+import { CountryMiddleware } from './common/middleware/country.middleware';
 import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.filter';
 
 @Module({
@@ -69,6 +74,10 @@ import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.fil
     MarketplaceModule,
     EventsModule,
     FarmModule,
+    CountriesModule,
+    ShippingModule,
+    CurrencyModule,
+    TradeModule,
   ],
   controllers: [AppController, HealthController],
   providers: [
@@ -102,5 +111,6 @@ import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.fil
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     consumer.apply(AuthMiddleware).forRoutes('*');
+    consumer.apply(CountryMiddleware).forRoutes('*');
   }
 }

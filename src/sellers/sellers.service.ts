@@ -251,12 +251,20 @@ export class SellersService {
 
     const { images, ...productCore } = createProductDto as any;
 
+    // Inherit country_id from seller's organization
+    const { data: sellerOrg } = await client
+      .from('organizations')
+      .select('country_id')
+      .eq('id', sellerOrgId)
+      .single();
+
     const productData: CreateProductData = {
       seller_org_id: sellerOrgId,
       ...productCore,
       created_by: userId,
       slug,
       admin_product_id: createProductDto.admin_product_id,
+      country_id: sellerOrg?.country_id || 'gda',
     };
 
     const { data, error } = await client
@@ -4009,5 +4017,87 @@ export class SellersService {
       page,
       limit,
     };
+  }
+
+  // ── Product country availability ───────────────────────────────────────────
+
+  async getProductAvailability(
+    productId: string,
+    sellerOrgId: string,
+  ): Promise<{ country_id: string; is_active: boolean }[]> {
+    // Verify product belongs to seller
+    const { data: product } = await this.supabaseService
+      .getClient()
+      .from('products')
+      .select('id')
+      .eq('id', productId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (!product) {
+      throw new NotFoundException(`Product ${productId} not found`);
+    }
+
+    const { data } = await this.supabaseService
+      .getClient()
+      .from('product_country_availability')
+      .select('country_id, is_active')
+      .eq('product_id', productId);
+
+    return (data || []) as { country_id: string; is_active: boolean }[];
+  }
+
+  async addProductAvailability(
+    productId: string,
+    sellerOrgId: string,
+    countryId: string,
+  ): Promise<void> {
+    // Verify product belongs to seller
+    const { data: product } = await this.supabaseService
+      .getClient()
+      .from('products')
+      .select('id')
+      .eq('id', productId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (!product) {
+      throw new NotFoundException(`Product ${productId} not found`);
+    }
+
+    const { error } = await this.supabaseService
+      .getClient()
+      .from('product_country_availability')
+      .upsert(
+        { product_id: productId, country_id: countryId, is_active: true },
+        { onConflict: 'product_id,country_id' },
+      );
+
+    if (error) throw new BadRequestException(error.message);
+  }
+
+  async removeProductAvailability(
+    productId: string,
+    sellerOrgId: string,
+    countryId: string,
+  ): Promise<void> {
+    const { data: product } = await this.supabaseService
+      .getClient()
+      .from('products')
+      .select('id')
+      .eq('id', productId)
+      .eq('seller_org_id', sellerOrgId)
+      .single();
+
+    if (!product) {
+      throw new NotFoundException(`Product ${productId} not found`);
+    }
+
+    await this.supabaseService
+      .getClient()
+      .from('product_country_availability')
+      .delete()
+      .eq('product_id', productId)
+      .eq('country_id', countryId);
   }
 }

@@ -1841,4 +1841,105 @@ export class AdminController {
   ) {
     return this.adminService.updateProductRequestStatus(requestId, body.status);
   }
+
+  // ===== Country management =====
+
+  @Get('countries')
+  @ApiOperation({
+    summary: 'List all countries',
+    description: 'Paginated list of all countries (active and inactive).',
+  })
+  async listCountries(
+    @Query()
+    query: {
+      page?: number;
+      limit?: number;
+      search?: string;
+      is_active?: string;
+    },
+  ) {
+    return this.adminService.listCountries(query);
+  }
+
+  @Get('countries/:code')
+  @ApiOperation({
+    summary: 'Get country details',
+    description: 'Get country details including org/product/seller counts.',
+  })
+  @ApiParam({ name: 'code', description: 'Country code (e.g. gda, tnt)' })
+  async getCountry(@Param('code') code: string) {
+    return this.adminService.getCountryByCode(code);
+  }
+
+  @Post('countries')
+  @ApiOperation({
+    summary: 'Create a new country',
+    description:
+      'Create a new country with a unique code (URL path prefix). Code is immutable after creation.',
+  })
+  async createCountry(
+    @Body()
+    body: {
+      code: string;
+      name: string;
+      country_code: string;
+      currency: string;
+      timezone: string;
+      config?: Record<string, any>;
+    },
+  ) {
+    return this.adminService.createCountry(body);
+  }
+
+  @Patch('countries/:code')
+  @ApiOperation({
+    summary: 'Update country',
+    description: 'Update country details. Code cannot be changed.',
+  })
+  @ApiParam({ name: 'code', description: 'Country code' })
+  async updateCountry(
+    @Param('code') code: string,
+    @Body()
+    body: {
+      name?: string;
+      currency?: string;
+      timezone?: string;
+      is_active?: boolean;
+      config?: Record<string, any>;
+    },
+  ) {
+    return this.adminService.updateCountry(code, body);
+  }
+
+  @Delete('countries/:code')
+  @ApiOperation({
+    summary: 'Delete country',
+    description:
+      'Delete a country. Only allowed if no organizations or products reference it.',
+  })
+  @ApiParam({ name: 'code', description: 'Country code' })
+  async deleteCountry(@Param('code') code: string) {
+    return this.adminService.deleteCountry(code);
+  }
+
+  @Post('countries/:code/activate')
+  @ApiOperation({
+    summary: 'Activate country',
+    description: 'Make country accessible at procurapp.co/{code}.',
+  })
+  @ApiParam({ name: 'code', description: 'Country code' })
+  async activateCountry(@Param('code') code: string) {
+    return this.adminService.updateCountry(code, { is_active: true });
+  }
+
+  @Post('countries/:code/deactivate')
+  @ApiOperation({
+    summary: 'Deactivate country',
+    description:
+      'Deactivate country. Users visiting procurapp.co/{code} will be redirected to the default country.',
+  })
+  @ApiParam({ name: 'code', description: 'Country code' })
+  async deactivateCountry(@Param('code') code: string) {
+    return this.adminService.updateCountry(code, { is_active: false });
+  }
 }

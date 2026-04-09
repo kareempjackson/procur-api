@@ -67,13 +67,12 @@ export class SignupDto {
   accountType: AccountType;
 
   @ApiProperty({
-    example: 'United States',
-    description: 'Country (optional)',
-    required: false,
+    example: 'gda',
+    description: 'Country code from the countries table (e.g. gda, tnt, svg)',
   })
-  @IsOptional()
   @IsString()
-  country?: string;
+  @IsNotEmpty({ message: 'Country is required' })
+  country: string;
 
   @ApiProperty({
     description: 'Business type (required for buyer/seller accounts)',

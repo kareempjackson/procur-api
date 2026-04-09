@@ -6,6 +6,8 @@ import { FinanceModule } from '../finance/finance.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
 import { EmailModule } from '../email/email.module';
 import { SellersModule } from '../sellers/sellers.module';
+import { BuyersModule } from '../buyers/buyers.module';
+import { CountriesModule } from '../countries/countries.module';
 
 @Module({
   imports: [
@@ -14,6 +16,8 @@ import { SellersModule } from '../sellers/sellers.module';
     WhatsappModule,
     EmailModule,
     SellersModule,
+    BuyersModule,
+    CountriesModule,
   ],
   controllers: [AdminController],
   providers: [AdminService],

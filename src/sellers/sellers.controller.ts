@@ -1356,4 +1356,40 @@ export class SellersController {
       status,
     });
   }
+
+  // ── Product country availability ───────────────────────────────────────────
+
+  @Get('products/:productId/availability')
+  @RequirePermissions('manage_products')
+  @ApiOperation({ summary: 'List countries a product is available in' })
+  async getProductAvailability(
+    @CurrentUser() user: UserContext,
+    @Param('productId', ParseUUIDPipe) productId: string,
+  ) {
+    return this.sellersService.getProductAvailability(productId, user.organizationId!);
+  }
+
+  @Post('products/:productId/availability')
+  @RequirePermissions('manage_products')
+  @ApiOperation({ summary: 'Make product available in a country' })
+  async addProductAvailability(
+    @CurrentUser() user: UserContext,
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Body() body: { country_id: string },
+  ) {
+    await this.sellersService.addProductAvailability(productId, user.organizationId!, body.country_id);
+    return { success: true };
+  }
+
+  @Delete('products/:productId/availability/:countryId')
+  @RequirePermissions('manage_products')
+  @ApiOperation({ summary: 'Remove product from a country' })
+  async removeProductAvailability(
+    @CurrentUser() user: UserContext,
+    @Param('productId', ParseUUIDPipe) productId: string,
+    @Param('countryId') countryId: string,
+  ) {
+    await this.sellersService.removeProductAvailability(productId, user.organizationId!, countryId);
+    return { success: true };
+  }
 }

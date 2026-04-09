@@ -5,6 +5,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../database/supabase.service';
+import { BuyersService } from '../buyers/buyers.service';
+import { CountriesService } from '../countries/countries.service';
 import { AdminOrgQueryDto } from './dto/admin-org-query.dto';
 import { AdminOrderQueryDto } from './dto/admin-order-query.dto';
 import {
@@ -193,6 +195,8 @@ export class AdminService {
     private readonly email: EmailService,
     private readonly sellersService: SellersService,
     private readonly eventsService: EventsService,
+    private readonly buyersService: BuyersService,
+    private readonly countriesService: CountriesService,
   ) {}
 
   private get privateBucket(): string {
@@ -1204,6 +1208,9 @@ export class AdminService {
         }`,
       );
     }
+
+    // Clear the marketplace cache so the change takes effect immediately
+    await this.buyersService.clearMarketplaceCache();
 
     return {
       success: true,
@@ -6735,5 +6742,245 @@ Login here: ${loginUrl}
     }
 
     return data;
+  }
+
+  // ===== Country management =====
+
+  async listCountries(query: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    is_active?: string;
+  }) {
+    const page = Number(query.page) || 1;
+    const limit = Math.min(Number(query.limit) || 20, 100);
+    const offset = (page - 1) * limit;
+
+    let qb = this.supabase
+      .getClient()
+      .from('countries')
+      .select('*', { count: 'exact' });
+
+    if (query.search) {
+      qb = qb.or(
+        `name.ilike.%${query.search}%,code.ilike.%${query.search}%,country_code.ilike.%${query.search}%`,
+      );
+    }
+
+    if (query.is_active === 'true') {
+      qb = qb.eq('is_active', true);
+    } else if (query.is_active === 'false') {
+      qb = qb.eq('is_active', false);
+    }
+
+    const { data, count, error } = await qb
+      .order('name')
+      .range(offset, offset + limit - 1);
+
+    if (error) throw new BadRequestException(error.message);
+
+    return {
+      countries: data || [],
+      total: count || 0,
+      page,
+      limit,
+    };
+  }
+
+  async getCountryByCode(code: string) {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('countries')
+      .select('*')
+      .eq('code', code)
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException(`Country '${code}' not found`);
+    }
+
+    // Get stats
+    const [orgResult, productResult] = await Promise.all([
+      this.supabase
+        .getClient()
+        .from('organizations')
+        .select('id', { count: 'exact', head: true })
+        .eq('country_id', code),
+      this.supabase
+        .getClient()
+        .from('products')
+        .select('id', { count: 'exact', head: true })
+        .eq('country_id', code),
+    ]);
+
+    return {
+      ...data,
+      org_count: orgResult.count || 0,
+      product_count: productResult.count || 0,
+    };
+  }
+
+  async createCountry(input: {
+    code: string;
+    name: string;
+    country_code: string;
+    currency: string;
+    timezone: string;
+    config?: Record<string, any>;
+  }) {
+    // Validate code format
+    if (!/^[a-z]{2,4}$/.test(input.code)) {
+      throw new BadRequestException(
+        'Country code must be 2-4 lowercase letters',
+      );
+    }
+
+    // Prevent conflicts with existing routes
+    const reserved = [
+      'buyer',
+      'seller',
+      'government',
+      'admin',
+      'api',
+      'auth',
+      'marketplace',
+    ];
+    if (reserved.includes(input.code)) {
+      throw new BadRequestException(
+        `'${input.code}' is a reserved path and cannot be used as an country code`,
+      );
+    }
+
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('countries')
+      .insert({
+        code: input.code,
+        name: input.name,
+        country_code: input.country_code,
+        currency: input.currency,
+        timezone: input.timezone,
+        config: input.config || {},
+        is_active: false,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === '23505') {
+        throw new BadRequestException(
+          `Island with code '${input.code}' already exists`,
+        );
+      }
+      throw new BadRequestException(error.message);
+    }
+
+    this.countriesService.invalidateCache();
+    await this.eventsService.emit({
+      type: 'admin.country.created',
+      aggregateType: 'country',
+      actorType: 'user',
+      payload: { code: input.code, name: input.name },
+    });
+
+    return data;
+  }
+
+  async updateCountry(
+    code: string,
+    input: {
+      name?: string;
+      currency?: string;
+      timezone?: string;
+      is_active?: boolean;
+      config?: Record<string, any>;
+    },
+  ) {
+    const patch: Record<string, any> = {};
+    if (input.name !== undefined) patch.name = input.name;
+    if (input.currency !== undefined) patch.currency = input.currency;
+    if (input.timezone !== undefined) patch.timezone = input.timezone;
+    if (input.is_active !== undefined) patch.is_active = input.is_active;
+    if (input.config !== undefined) patch.config = input.config;
+
+    if (Object.keys(patch).length === 0) {
+      throw new BadRequestException('No fields to update');
+    }
+
+    const { data, error } = await this.supabase
+      .getClient()
+      .from('countries')
+      .update(patch)
+      .eq('code', code)
+      .select()
+      .single();
+
+    if (error || !data) {
+      throw new NotFoundException(`Country '${code}' not found`);
+    }
+
+    const eventType =
+      input.is_active === true
+        ? 'admin.country.activated'
+        : input.is_active === false
+          ? 'admin.country.deactivated'
+          : 'admin.country.updated';
+
+    this.countriesService.invalidateCache();
+    await this.eventsService.emit({
+      type: eventType,
+      aggregateType: 'country',
+      actorType: 'user',
+      payload: { code, changedFields: Object.keys(patch) },
+    });
+
+    return data;
+  }
+
+  async deleteCountry(code: string) {
+    // Check for references
+    const { count: orgCount } = await this.supabase
+      .getClient()
+      .from('organizations')
+      .select('id', { count: 'exact', head: true })
+      .eq('country_id', code);
+
+    if (orgCount && orgCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete country '${code}': ${orgCount} organizations reference it`,
+      );
+    }
+
+    const { count: productCount } = await this.supabase
+      .getClient()
+      .from('products')
+      .select('id', { count: 'exact', head: true })
+      .eq('country_id', code);
+
+    if (productCount && productCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete country '${code}': ${productCount} products reference it`,
+      );
+    }
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('countries')
+      .delete()
+      .eq('code', code);
+
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+
+    this.countriesService.invalidateCache();
+    await this.eventsService.emit({
+      type: 'admin.country.deleted',
+      aggregateType: 'country',
+      actorType: 'user',
+      payload: { code },
+    });
+
+    return { success: true };
   }
 }

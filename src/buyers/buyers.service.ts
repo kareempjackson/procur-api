@@ -118,6 +118,12 @@ export class BuyersService {
     }
   }
 
+  async clearMarketplaceCache(): Promise<void> {
+    try {
+      await this.redis.del('mc:visible-sellers');
+    } catch { /* non-fatal */ }
+  }
+
   private async cacheSet(key: string, value: unknown, ttl: number): Promise<void> {
     try {
       await Promise.race<unknown>([
@@ -262,6 +268,31 @@ export class BuyersService {
       queryBuilder = queryBuilder.eq('is_featured', is_featured);
     if (tags && tags.length > 0)
       queryBuilder = queryBuilder.overlaps('tags', tags);
+
+    // Island filter: show products from this island + cross-island available products
+    const countryCode = query.country_id;
+    if (countryCode) {
+      // Get product IDs available on this island via product_island_availability
+      const { data: crossIslandProducts } = await this.supabase
+        .getClient()
+        .from('product_country_availability')
+        .select('product_id')
+        .eq('country_id', countryCode)
+        .eq('is_active', true);
+
+      const crossIslandIds = (crossIslandProducts || []).map(
+        (p: { product_id: string }) => p.product_id,
+      );
+
+      if (crossIslandIds.length > 0) {
+        // Products from this country OR cross-country available
+        queryBuilder = queryBuilder.or(
+          `country_id.eq.${countryCode},id.in.(${crossIslandIds.join(',')})`,
+        );
+      } else {
+        queryBuilder = queryBuilder.eq('country_id', countryCode);
+      }
+    }
 
     // Apply sorting
     const sortField = sort_by === 'price' ? 'base_price' : sort_by;
@@ -845,8 +876,12 @@ export class BuyersService {
     if (location) {
       queryBuilder = queryBuilder.ilike('country', `%${location}%`);
     }
-    // Note: is_verified filter would need a verification field in the database
-    // For now, we'll skip this filter
+
+    // Island filter
+    const countryCode = query?.country_id;
+    if (countryCode) {
+      queryBuilder = queryBuilder.eq('country_id', countryCode);
+    }
 
     // Apply sorting
     const sortField = sort_by === 'product_count' ? 'created_at' : sort_by; // We'll sort by product count in memory
@@ -1724,12 +1759,27 @@ export class BuyersService {
   async createGuestProductRequest(
     dto: CreateGuestRequestDto,
   ): Promise<GuestRequestResponseDto> {
+    // date_needed is a DATE column — only pass valid date strings, otherwise null.
+    // Preserve free-text timing (e.g. "ASAP") in the description so admin can see it.
+    let dateNeeded: string | null = null;
+    let extraNote = '';
+    if (dto.date_needed) {
+      const parsed = new Date(dto.date_needed);
+      if (!isNaN(parsed.getTime())) {
+        dateNeeded = parsed.toISOString().split('T')[0];
+      } else {
+        extraNote = `Timing: ${dto.date_needed}`;
+      }
+    }
+
+    const description = [dto.description, extraNote].filter(Boolean).join('\n') || null;
+
     const insertPayload: any = {
       product_name: dto.product_name,
-      description: dto.description,
+      description,
       quantity: dto.quantity,
       unit_of_measurement: dto.unit_of_measurement,
-      date_needed: dto.date_needed,
+      date_needed: dateNeeded,
       guest_name: dto.guest_name,
       guest_email: dto.guest_email,
       status: 'draft',
@@ -2566,13 +2616,59 @@ export class BuyersService {
         ((orderSubtotal * platformFeePercent) / 100).toFixed(2),
       );
 
+      // --- Cross-island detection ---
+      const { data: sellerOrg } = await this.supabase
+        .getClient()
+        .from('organizations')
+        .select('country_id')
+        .eq('id', sellerOrgId)
+        .single();
+
+      const { data: buyerOrg } = await this.supabase
+        .getClient()
+        .from('organizations')
+        .select('country_id')
+        .eq('id', buyerOrgId)
+        .single();
+
+      const sellerIsland = sellerOrg?.country_id || 'gda';
+      const buyerIsland = buyerOrg?.country_id || 'gda';
+      const isCrossIsland = sellerIsland !== buyerIsland;
+      let shippingRouteId: string | null = null;
+      let crossIslandShippingFee = 0;
+
+      if (isCrossIsland) {
+        // Look up seller's shipping route to buyer's island
+        const { data: route } = await this.supabase
+          .getClient()
+          .from('shipping_routes')
+          .select('*')
+          .eq('seller_org_id', sellerOrgId)
+          .eq('origin_country', sellerIsland)
+          .eq('dest_country', buyerIsland)
+          .eq('is_active', true)
+          .single();
+
+        if (!route) {
+          throw new BadRequestException(
+            `Seller does not ship to ${buyerIsland}. No shipping route available.`,
+          );
+        }
+
+        crossIslandShippingFee = Number(route.shipping_fee);
+        shippingRouteId = route.id;
+      }
+
       // For standalone single-seller orders, include shipping + credits directly
       let shippingAmount = 0;
       let orderCreditsAppliedCents = 0;
       let totalAmountBeforeCredits: number;
 
       if (!isMultiSeller) {
-        shippingAmount = buyerDeliveryForOrder;
+        // Use cross-island shipping fee if applicable, otherwise flat fee
+        shippingAmount = isCrossIsland
+          ? crossIslandShippingFee
+          : buyerDeliveryForOrder;
         totalAmountBeforeCredits =
           orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
         const maxCreditsCents = Math.round(totalAmountBeforeCredits * 100);
@@ -2616,6 +2712,10 @@ export class BuyersService {
           buyer_notes: createDto.buyer_notes,
           payment_method: createDto.payment_method || 'bank_transfer',
           estimated_delivery_date: createDto.preferred_delivery_date,
+          origin_country_id: sellerIsland,
+          dest_country_id: buyerIsland,
+          is_cross_country: isCrossIsland,
+          shipping_route_id: shippingRouteId,
         })
         .select()
         .single();

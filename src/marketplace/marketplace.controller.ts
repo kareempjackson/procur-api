@@ -6,10 +6,12 @@ import {
   Param,
   ParseUUIDPipe,
   Query,
+  Req,
   HttpCode,
   HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
+import { Request } from 'express';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { BuyersService } from '../buyers/buyers.service';
 import { Public } from '../auth/decorators/public.decorator';
@@ -53,13 +55,17 @@ export class MarketplaceController {
   })
   async browsePublicProducts(
     @Query() query: MarketplaceProductQueryDto,
+    @Req() req: Request,
   ): Promise<{
     products: MarketplaceProductDto[];
     total: number;
     page: number;
     limit: number;
   }> {
-    // Call underlying marketplace browser without a buyer organization context
+    // Use island from X-Country-Code header if not explicitly set in query
+    if (!query.country_id && req.countryCode) {
+      query.country_id = req.countryCode;
+    }
     return this.buyersService.browseProducts(query, undefined);
   }
 
@@ -105,12 +111,16 @@ export class MarketplaceController {
   })
   async browsePublicSellers(
     @Query() query: MarketplaceSellerQueryDto,
+    @Req() req: Request,
   ): Promise<{
     sellers: MarketplaceSellerDto[];
     total: number;
     page: number;
     limit: number;
   }> {
+    if (!query.country_id && req.countryCode) {
+      query.country_id = req.countryCode;
+    }
     return this.buyersService.getSellers(query);
   }
 

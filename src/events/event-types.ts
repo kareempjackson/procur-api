@@ -222,6 +222,11 @@ export const AdminEventTypes = {
   SELLER_CREDIT_ADDED: 'admin.seller.credit.added',
   ORDER_STATUS_UPDATED: 'admin.order.status.updated',
   PAYMENT_STATUS_UPDATED: 'admin.order.payment_status.updated',
+  COUNTRY_CREATED: 'admin.country.created',
+  COUNTRY_UPDATED: 'admin.country.updated',
+  COUNTRY_ACTIVATED: 'admin.country.activated',
+  COUNTRY_DEACTIVATED: 'admin.country.deactivated',
+  COUNTRY_DELETED: 'admin.country.deleted',
 } as const;
 
 // ============================================================================
