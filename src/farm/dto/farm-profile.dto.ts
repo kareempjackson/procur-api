@@ -66,6 +66,11 @@ export class UpsertFarmProfileDto {
   @IsString()
   country?: string;
 
+  @ApiPropertyOptional({ example: '123 Main Road, Basseterre' })
+  @IsOptional()
+  @IsString()
+  address?: string;
+
   @ApiPropertyOptional({ example: 12.5 })
   @IsOptional()
   @IsNumber()
@@ -91,6 +96,7 @@ export class FarmProfileResponseDto {
   gps_lng: number | null;
   parish: string | null;
   country: string;
+  address: string | null;
   total_acreage: number | null;
   primary_crops: string[] | null;
   certifications: CertificationDto[];

@@ -73,6 +73,7 @@ export class UsersService {
           state: (org as any).state ?? null,
           postalCode: (org as any).postal_code ?? null,
           country: (org as any).country ?? null,
+          countryId: (org as any).country_id ?? null,
           taxId: (org as any).tax_id ?? null,
           website: (org as any).website ?? null,
           description: (org as any).description ?? null,
