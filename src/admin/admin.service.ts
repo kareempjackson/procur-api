@@ -5302,6 +5302,7 @@ Login here: ${loginUrl}
     password: string;
     businessName: string;
     country?: string;
+    countryCode?: string;
     businessType?: string;
     phoneNumber?: string;
   }): Promise<{ organizationId: string; userId: string }> {
@@ -5341,6 +5342,7 @@ Login here: ${loginUrl}
         account_type: 'seller',
         business_type: input.businessType || 'farmers',
         country: input.country ?? null,
+        country_id: input.countryCode || 'gda',
         phone_number: input.phoneNumber ?? null,
         status: 'pending_verification',
       })
