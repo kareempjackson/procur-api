@@ -334,7 +334,7 @@ export class BuyersService {
       const { data: reviews } = await this.supabase
         .getClient()
         .from('order_reviews')
-        .select('seller_org_id, rating')
+        .select('seller_org_id, rating:overall_rating')
         .in('seller_org_id', sellerIds);
 
       const agg = new Map<string, { sum: number; count: number }>();
@@ -480,7 +480,7 @@ export class BuyersService {
     {
       const { data: reviews } = await client
         .from('order_reviews')
-        .select('rating')
+        .select('rating:overall_rating')
         .eq('seller_org_id', product.seller_org_id);
       if (reviews && reviews.length > 0) {
         const sum = reviews.reduce(
@@ -862,7 +862,7 @@ export class BuyersService {
       .from('organizations')
       .select(
         `
-        id, name, logo_url, header_image_url, created_at, business_type, country,
+        id, name, slug, logo_url, header_image_url, created_at, business_type, country,
         products:products!seller_org_id(id, status)
       `,
         { count: 'exact' },
@@ -910,6 +910,7 @@ export class BuyersService {
       sellers?.map((seller) => ({
         id: seller.id,
         name: seller.name,
+        slug: (seller as any).slug ?? undefined,
         description: undefined,
         business_type: seller.business_type,
         header_image_url: (seller as any).header_image_url ?? undefined,
@@ -933,7 +934,7 @@ export class BuyersService {
       const { data: reviews } = await this.supabase
         .getClient()
         .from('order_reviews')
-        .select('seller_org_id, rating')
+        .select('seller_org_id, rating:overall_rating')
         .in('seller_org_id', sellerIds);
 
       const agg = new Map<string, { sum: number; count: number }>();
@@ -993,25 +994,44 @@ export class BuyersService {
   }
 
   async getSellerById(sellerId: string): Promise<MarketplaceSellerDto | null> {
+    return this.fetchSellerRow({ id: sellerId });
+  }
+
+  async getSellerBySlug(slug: string): Promise<MarketplaceSellerDto | null> {
+    return this.fetchSellerRow({ slug });
+  }
+
+  private async fetchSellerRow(
+    lookup: { id?: string; slug?: string },
+  ): Promise<MarketplaceSellerDto | null> {
     const client = this.supabase.getClient();
 
-    const { data: seller, error } = await client
+    let query = client
       .from('organizations')
       .select(
-        `id, name, logo_url, header_image_url, created_at, business_type, country,
+        `id, name, slug, logo_url, header_image_url, created_at, business_type, country,
         products:products!seller_org_id(id, status)`,
       )
-      .eq('id', sellerId)
       .eq('account_type', 'seller')
-      .eq('status', 'active')
-      .single();
+      .eq('status', 'active');
 
+    if (lookup.id) {
+      query = query.eq('id', lookup.id);
+    } else if (lookup.slug) {
+      query = query.eq('slug', lookup.slug);
+    } else {
+      return null;
+    }
+
+    const { data: seller, error } = await query.single();
     if (error || !seller) return null;
+
+    const sellerId = seller.id as string;
 
     const [reviewsRes, completedRes, batchRes] = await Promise.all([
       client
         .from('order_reviews')
-        .select('rating')
+        .select('rating:overall_rating')
         .eq('seller_org_id', sellerId),
       client
         .from('orders')
@@ -1024,9 +1044,9 @@ export class BuyersService {
         .eq('seller_org_id', sellerId),
     ]);
 
-    if (reviewsRes.error) this.logger.warn(`getSellerById reviews query failed for ${sellerId}: ${reviewsRes.error.message}`);
-    if (completedRes.error) this.logger.warn(`getSellerById orders query failed for ${sellerId}: ${completedRes.error.message}`);
-    if (batchRes.error) this.logger.warn(`getSellerById harvest_logs query failed for ${sellerId}: ${batchRes.error.message}`);
+    if (reviewsRes.error) this.logger.warn(`fetchSellerRow reviews query failed for ${sellerId}: ${reviewsRes.error.message}`);
+    if (completedRes.error) this.logger.warn(`fetchSellerRow orders query failed for ${sellerId}: ${completedRes.error.message}`);
+    if (batchRes.error) this.logger.warn(`fetchSellerRow harvest_logs query failed for ${sellerId}: ${batchRes.error.message}`);
 
     const reviews = reviewsRes.data || [];
     const avgRating =
@@ -1053,6 +1073,7 @@ export class BuyersService {
     return {
       id: seller.id,
       name: seller.name,
+      slug: (seller as any).slug ?? undefined,
       description: undefined,
       business_type: seller.business_type,
       header_image_url: (seller as any).header_image_url ?? undefined,
@@ -6092,7 +6113,7 @@ Manage this order: ${link}`;
     if (sellerIds.length > 0) {
       const { data: reviews } = await client
         .from('order_reviews')
-        .select('seller_org_id, rating')
+        .select('seller_org_id, rating:overall_rating')
         .in('seller_org_id', sellerIds);
 
       const agg = new Map<string, { sum: number; count: number }>();

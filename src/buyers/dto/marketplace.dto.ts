@@ -221,6 +221,11 @@ export class MarketplaceSellerDto {
   @ApiProperty({ description: 'Seller name' })
   name: string;
 
+  @ApiPropertyOptional({
+    description: 'URL-safe slug for SEO-friendly seller profile pages',
+  })
+  slug?: string;
+
   @ApiProperty({ description: 'Seller description' })
   description?: string;
 

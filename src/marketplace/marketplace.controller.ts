@@ -11,6 +11,9 @@ import {
   HttpStatus,
   NotFoundException,
 } from '@nestjs/common';
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 import { Request } from 'express';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { BuyersService } from '../buyers/buyers.service';
@@ -124,22 +127,27 @@ export class MarketplaceController {
     return this.buyersService.getSellers(query);
   }
 
-  @Get('sellers/:id')
+  @Get('sellers/:idOrSlug')
   @ApiOperation({
     summary: 'Get Public Seller Profile',
     description:
-      'Get public profile information for a marketplace seller that can be shown on a public seller page.',
+      'Get public profile information for a marketplace seller. Accepts either the organization UUID (legacy) or the seller slug (SEO-friendly URLs).',
   })
-  @ApiParam({ name: 'id', description: 'Seller organization ID' })
+  @ApiParam({
+    name: 'idOrSlug',
+    description: 'Seller organization UUID or slug',
+  })
   @ApiResponse({
     status: 200,
     description: 'Seller profile retrieved successfully',
     type: MarketplaceSellerDto,
   })
   async getPublicSellerDetail(
-    @Param('id', ParseUUIDPipe) sellerId: string,
+    @Param('idOrSlug') idOrSlug: string,
   ): Promise<MarketplaceSellerDto> {
-    const seller = await this.buyersService.getSellerById(sellerId);
+    const seller = UUID_REGEX.test(idOrSlug)
+      ? await this.buyersService.getSellerById(idOrSlug)
+      : await this.buyersService.getSellerBySlug(idOrSlug);
     if (!seller) {
       throw new NotFoundException('Seller not found');
     }
