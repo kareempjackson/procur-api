@@ -76,7 +76,14 @@ export interface AdminOrganizationSummary {
   adminEmail: string | null;
   adminFullname: string | null;
   address: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
   phoneNumber: string | null;
+  website: string | null;
+  description: string | null;
+  taxId: string | null;
+  registrationNumber: string | null;
   logoUrl: string | null;
   headerImageUrl: string | null;
   farmersId: string | null;
@@ -635,7 +642,15 @@ export class AdminService {
               adminEmail,
               adminFullname,
               address: org.address ?? null,
+              city: (org as any).city ?? null,
+              state: (org as any).state ?? null,
+              postalCode: (org as any).postal_code ?? null,
               phoneNumber: adminPhoneNumber ?? org.phone_number ?? null,
+              website: (org as any).website ?? null,
+              description: (org as any).description ?? null,
+              taxId: (org as any).tax_id ?? null,
+              registrationNumber:
+                (org as any).business_registration_number ?? null,
               logoUrl: org.logo_url ?? null,
               headerImageUrl: (org as any).header_image_url ?? null,
               farmersId,
@@ -1564,7 +1579,14 @@ export class AdminService {
       adminEmail,
       adminFullname,
       address: data.address ?? null,
+      city: (data as any).city ?? null,
+      state: (data as any).state ?? null,
+      postalCode: (data as any).postal_code ?? null,
       phoneNumber: adminPhoneNumber ?? data.phone_number ?? null,
+      website: (data as any).website ?? null,
+      description: (data as any).description ?? null,
+      taxId: (data as any).tax_id ?? null,
+      registrationNumber: (data as any).business_registration_number ?? null,
       logoUrl: data.logo_url ?? null,
       headerImageUrl: (data as any).header_image_url ?? null,
       farmersId,
