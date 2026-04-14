@@ -1031,6 +1031,8 @@ export class AdminController {
       deliveryFlatFee?: number;
       buyerDeliveryShare?: number;
       sellerDeliveryShare?: number;
+      minOrderPerSeller?: number;
+      minOrderTotal?: number;
       currency?: string;
     },
   ) {
@@ -1039,6 +1041,8 @@ export class AdminController {
       deliveryFlatFee: body.deliveryFlatFee,
       buyerDeliveryShare: body.buyerDeliveryShare,
       sellerDeliveryShare: body.sellerDeliveryShare,
+      minOrderPerSeller: body.minOrderPerSeller,
+      minOrderTotal: body.minOrderTotal,
       currency: body.currency,
     });
   }

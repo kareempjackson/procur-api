@@ -161,6 +161,8 @@ export interface PlatformFeesSettings {
   deliveryFlatFee: number;
   buyerDeliveryShare: number;
   sellerDeliveryShare: number;
+  minOrderPerSeller: number;
+  minOrderTotal: number;
   currency: string;
 }
 
@@ -213,6 +215,8 @@ export class AdminService {
     delivery_flat_fee: number;
     buyer_delivery_share: number | null;
     seller_delivery_share: number | null;
+    min_order_per_seller: number;
+    min_order_total: number;
     currency: string;
   }> {
     const client = this.supabase.getClient();
@@ -220,7 +224,7 @@ export class AdminService {
     const { data, error } = await client
       .from('platform_fees_config')
       .select(
-        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
       )
       .order('updated_at', { ascending: false })
       .limit(1)
@@ -239,6 +243,8 @@ export class AdminService {
         delivery_flat_fee: number | null;
         buyer_delivery_share: number | null;
         seller_delivery_share: number | null;
+        min_order_per_seller: number | null;
+        min_order_total: number | null;
         currency: string | null;
       };
 
@@ -248,6 +254,8 @@ export class AdminService {
         delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
         buyer_delivery_share: row.buyer_delivery_share ?? null,
         seller_delivery_share: row.seller_delivery_share ?? null,
+        min_order_per_seller: Number(row.min_order_per_seller ?? 75),
+        min_order_total: Number(row.min_order_total ?? 100),
         currency: (row.currency as string | null) ?? 'XCD',
       };
     }
@@ -260,10 +268,12 @@ export class AdminService {
         delivery_flat_fee: 20,
         buyer_delivery_share: null,
         seller_delivery_share: null,
+        min_order_per_seller: 75,
+        min_order_total: 100,
         currency: 'XCD',
       })
       .select(
-        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+        'id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
       )
       .single();
 
@@ -281,6 +291,8 @@ export class AdminService {
       delivery_flat_fee: number | null;
       buyer_delivery_share: number | null;
       seller_delivery_share: number | null;
+      min_order_per_seller: number | null;
+      min_order_total: number | null;
       currency: string | null;
     };
 
@@ -290,6 +302,8 @@ export class AdminService {
       delivery_flat_fee: Number(row.delivery_flat_fee ?? 0),
       buyer_delivery_share: row.buyer_delivery_share ?? null,
       seller_delivery_share: row.seller_delivery_share ?? null,
+      min_order_per_seller: Number(row.min_order_per_seller ?? 75),
+      min_order_total: Number(row.min_order_total ?? 100),
       currency: (row.currency as string | null) ?? 'XCD',
     };
   }
@@ -307,6 +321,8 @@ export class AdminService {
       deliveryFlatFee: baseDelivery,
       buyerDeliveryShare: buyerShare,
       sellerDeliveryShare: sellerShare,
+      minOrderPerSeller: Number(row.min_order_per_seller ?? 75),
+      minOrderTotal: Number(row.min_order_total ?? 100),
       currency: row.currency || 'XCD',
     };
   }
@@ -316,6 +332,8 @@ export class AdminService {
     deliveryFlatFee?: number;
     buyerDeliveryShare?: number;
     sellerDeliveryShare?: number;
+    minOrderPerSeller?: number;
+    minOrderTotal?: number;
     currency?: string;
   }): Promise<PlatformFeesSettings> {
     const client = this.supabase.getClient();
@@ -353,6 +371,32 @@ export class AdminService {
         );
       }
       patch.seller_delivery_share = input.sellerDeliveryShare;
+    }
+
+    if (typeof input.minOrderPerSeller === 'number') {
+      if (input.minOrderPerSeller < 0) {
+        throw new BadRequestException(
+          'Minimum order per seller must be greater than or equal to zero',
+        );
+      }
+      patch.min_order_per_seller = input.minOrderPerSeller;
+    }
+
+    if (typeof input.minOrderTotal === 'number') {
+      if (input.minOrderTotal < 0) {
+        throw new BadRequestException(
+          'Minimum order total must be greater than or equal to zero',
+        );
+      }
+      if (
+        typeof input.minOrderPerSeller === 'number' &&
+        input.minOrderTotal < input.minOrderPerSeller
+      ) {
+        throw new BadRequestException(
+          'Minimum order total cannot be less than the per-seller minimum',
+        );
+      }
+      patch.min_order_total = input.minOrderTotal;
     }
 
     if (typeof input.currency === 'string' && input.currency.trim()) {

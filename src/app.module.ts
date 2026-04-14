@@ -33,6 +33,7 @@ import { MarketplaceModule } from './marketplace/marketplace.module';
 import { EventsModule } from './events/events.module';
 import { FarmModule } from './farm/farm.module';
 import { CountriesModule } from './countries/countries.module';
+import { CountryPulseModule } from './country-pulse/country-pulse.module';
 import { ShippingModule } from './shipping/shipping.module';
 import { CurrencyModule } from './currency/currency.module';
 import { TradeModule } from './trade/trade.module';
@@ -75,6 +76,7 @@ import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.fil
     EventsModule,
     FarmModule,
     CountriesModule,
+    CountryPulseModule,
     ShippingModule,
     CurrencyModule,
     TradeModule,

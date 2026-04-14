@@ -484,3 +484,42 @@ export interface CreateOrderData {
   is_cross_country?: boolean;
   shipping_route_id?: string;
 }
+
+// ==================== Country Pulse ====================
+
+export type CountryPulseSignal =
+  | 'in_demand'
+  | 'scarce'
+  | 'trending'
+  | 'surplus';
+
+export interface DatabaseCountryPulseSnapshot {
+  id: string;
+  country_id: string;
+  signal_type: CountryPulseSignal;
+  product_id?: string | null;
+  category?: string | null;
+  label: string;
+  rank: number;
+  score: number;
+  metrics: Record<string, unknown>;
+  computed_at: string;
+}
+
+export interface DatabaseCountryPulseOverride {
+  id: string;
+  country_id: string;
+  signal_type: CountryPulseSignal;
+  product_id?: string | null;
+  category?: string | null;
+  label: string;
+  note?: string | null;
+  rank: number;
+  is_pinned: boolean;
+  is_hidden: boolean;
+  valid_from?: string | null;
+  valid_until?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}

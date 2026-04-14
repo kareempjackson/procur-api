@@ -86,6 +86,13 @@ import {
 @Injectable()
 export class BuyersService {
   private readonly logger = new Logger(BuyersService.name);
+
+  // Fallback minimum order thresholds (XCD). The live values are read from
+  // platform_fees_config (admin-configurable). These constants are only used
+  // when the config row is missing or a column is null.
+  private static readonly DEFAULT_MIN_ORDER_PER_SELLER = 75;
+  private static readonly DEFAULT_MIN_ORDER_TOTAL = 100;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly conversationsService: ConversationsService,
@@ -1157,13 +1164,15 @@ export class BuyersService {
     deliveryFlatFee: number;
     buyerDeliveryShare: number;
     sellerDeliveryShare: number;
+    minOrderPerSeller: number;
+    minOrderTotal: number;
     currency: string;
   }> {
     const client = this.supabase.getClient();
     const { data, error } = await client
       .from('platform_fees_config')
       .select(
-        'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+        'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
       )
       .order('updated_at', { ascending: false })
       .limit(1)
@@ -1176,6 +1185,8 @@ export class BuyersService {
         deliveryFlatFee: 20,
         buyerDeliveryShare: 0,
         sellerDeliveryShare: 0,
+        minOrderPerSeller: BuyersService.DEFAULT_MIN_ORDER_PER_SELLER,
+        minOrderTotal: BuyersService.DEFAULT_MIN_ORDER_TOTAL,
         currency: 'XCD',
       };
     }
@@ -1185,6 +1196,8 @@ export class BuyersService {
       delivery_flat_fee: number | string | null;
       buyer_delivery_share: number | string | null;
       seller_delivery_share: number | string | null;
+      min_order_per_seller: number | string | null;
+      min_order_total: number | string | null;
       currency: string | null;
     };
 
@@ -1193,6 +1206,12 @@ export class BuyersService {
       deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
       buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
       sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
+      minOrderPerSeller:
+        Number(row.min_order_per_seller ?? BuyersService.DEFAULT_MIN_ORDER_PER_SELLER) ||
+        BuyersService.DEFAULT_MIN_ORDER_PER_SELLER,
+      minOrderTotal:
+        Number(row.min_order_total ?? BuyersService.DEFAULT_MIN_ORDER_TOTAL) ||
+        BuyersService.DEFAULT_MIN_ORDER_TOTAL,
       currency: (row.currency as string | null) ?? 'XCD',
     };
   }
@@ -1244,6 +1263,8 @@ export class BuyersService {
         estimated_tax: 0,
         total: 0,
         currency: 'USD',
+        min_order_per_seller: BuyersService.DEFAULT_MIN_ORDER_PER_SELLER,
+        min_order_total: BuyersService.DEFAULT_MIN_ORDER_TOTAL,
         updated_at: new Date().toISOString(),
       };
     }
@@ -1269,6 +1290,8 @@ export class BuyersService {
         estimated_tax: 0,
         total: 0,
         currency: 'USD',
+        min_order_per_seller: BuyersService.DEFAULT_MIN_ORDER_PER_SELLER,
+        min_order_total: BuyersService.DEFAULT_MIN_ORDER_TOTAL,
         updated_at: new Date().toISOString(),
       };
     }
@@ -1357,6 +1380,8 @@ export class BuyersService {
       estimated_tax: estimatedTax,
       total: subtotal + estimatedShipping + platformFeeAmount,
       currency: 'USD',
+      min_order_per_seller: feesConfig.minOrderPerSeller,
+      min_order_total: feesConfig.minOrderTotal,
       updated_at: new Date().toISOString(),
     };
   }
@@ -2478,13 +2503,53 @@ export class BuyersService {
     }
 
     // ----------------------------------------------------------------
+    // Enforce minimum order thresholds (per seller + overall).
+    // Values come from platform_fees_config (admin-configurable).
+    // Mirrors the cart UI guards in procur-ui/src/app/(shop)/cart.
+    // ----------------------------------------------------------------
+    const feesConfigForMins = await this.getPlatformFeesConfig();
+    {
+      const minPerSeller = feesConfigForMins.minOrderPerSeller;
+      const minTotal = feesConfigForMins.minOrderTotal;
+
+      const underMinSellers: Array<{ sellerOrgId: string; subtotal: number }> = [];
+      for (const [sellerOrgId, items] of sellerGroups.entries()) {
+        const sellerSubtotal = items.reduce(
+          (sum, item) => sum + item.total_price,
+          0,
+        );
+        if (sellerSubtotal < minPerSeller) {
+          underMinSellers.push({ sellerOrgId, subtotal: sellerSubtotal });
+        }
+      }
+
+      if (underMinSellers.length > 0) {
+        const details = underMinSellers
+          .map(
+            (s) =>
+              `seller ${s.sellerOrgId} subtotal XCD ${s.subtotal.toFixed(2)} (min XCD ${minPerSeller.toFixed(2)})`,
+          )
+          .join('; ');
+        throw new BadRequestException(
+          `Per-seller minimum order not met: ${details}`,
+        );
+      }
+
+      if (subtotal < minTotal) {
+        throw new BadRequestException(
+          `Order subtotal XCD ${subtotal.toFixed(2)} is below the minimum checkout amount of XCD ${minTotal.toFixed(2)}`,
+        );
+      }
+    }
+
+    // ----------------------------------------------------------------
     // Build the order(s) — parent/child for multi-seller, single row
     // for single-seller (fully backward compatible).
     // ----------------------------------------------------------------
     const createdOrders: any[] = [];
     const checkoutGroupId = randomUUID();
 
-    const feesConfig = await this.getPlatformFeesConfig();
+    const feesConfig = feesConfigForMins;
     const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);

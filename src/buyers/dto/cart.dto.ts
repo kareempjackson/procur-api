@@ -140,6 +140,18 @@ export class CartResponseDto {
   @ApiProperty({ description: 'Currency' })
   currency: string;
 
+  @ApiProperty({
+    description: 'Minimum subtotal required per seller (admin-configurable)',
+    example: 75,
+  })
+  min_order_per_seller: number;
+
+  @ApiProperty({
+    description: 'Minimum overall cart subtotal required to checkout (admin-configurable)',
+    example: 100,
+  })
+  min_order_total: number;
+
   @ApiProperty({ description: 'Last updated timestamp' })
   updated_at: string;
 }
