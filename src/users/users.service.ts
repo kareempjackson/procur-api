@@ -75,6 +75,8 @@ export class UsersService {
           country: (org as any).country ?? null,
           countryId: (org as any).country_id ?? null,
           taxId: (org as any).tax_id ?? null,
+          registrationNumber:
+            (org as any).business_registration_number ?? null,
           website: (org as any).website ?? null,
           description: (org as any).description ?? null,
           logoUrl: (org as any).logo_url ?? null,
