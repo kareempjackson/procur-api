@@ -1499,6 +1499,252 @@ export class AdminService {
     return { deleted: affectedIds.length };
   }
 
+  /**
+   * Hard-delete a seller organization. Removes the org row and lets PG
+   * cascade through every dependent table — products, orders, transactions,
+   * payouts, payment_links, seller_balances, bank_info, conversations, etc.
+   *
+   * Requires the cascade FKs added in 20260427100000_cascade_seller_deletion_fks.sql.
+   * Without that migration applied, this throws on the orders/transactions
+   * FK constraint.
+   *
+   * Buyer order history that referenced this seller WILL be deleted along
+   * with their orders. Use `wipeOrganization` if you need to preserve that.
+   *
+   * Irreversible.
+   */
+  async hardDeleteOrganization(
+    id: string,
+    accountType: 'seller' | 'agroprocessor' = 'seller',
+  ): Promise<{ success: boolean }> {
+    const client = this.supabase.getClient();
+
+    // Verify the org exists and is the right type before nuking.
+    const { data: org, error: lookupError } = await client
+      .from('organizations')
+      .select('id, account_type')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (lookupError || !org) {
+      throw new BadRequestException('Organization not found.');
+    }
+    if (
+      org.account_type !== accountType &&
+      org.account_type !== 'agroprocessor'
+    ) {
+      throw new BadRequestException(
+        `Cannot hard-delete account_type='${org.account_type}' through this endpoint.`,
+      );
+    }
+
+    // Collect the user ids that hang off this org so we can clean up Auth
+    // accounts after the cascade. The cascade removes organization_users
+    // rows; we read them first.
+    const { data: orgUsers } = await client
+      .from('organization_users')
+      .select('user_id')
+      .eq('organization_id', id);
+
+    const memberUserIds = Array.from(
+      new Set(
+        (orgUsers || [])
+          .map((ou: any) => ou.user_id as string | null) // eslint-disable-line @typescript-eslint/no-explicit-any
+          .filter((uid): uid is string => Boolean(uid)),
+      ),
+    );
+
+    // The single DELETE that triggers all the cascades.
+    const { error: deleteError } = await client
+      .from('organizations')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      throw new BadRequestException(
+        `Failed to hard-delete organization: ${deleteError.message}`,
+      );
+    }
+
+    // Clean up Supabase Auth accounts for users whose individual_account_type
+    // matches. We only target seller/agroprocessor users — buyers in another
+    // org should keep their Auth account. Best-effort.
+    if (memberUserIds.length > 0) {
+      const { data: users } = await client
+        .from('users')
+        .select('id, individual_account_type')
+        .in('id', memberUserIds);
+
+      const targetUserIds =
+        users
+          ?.filter(
+            (u: any) => // eslint-disable-line @typescript-eslint/no-explicit-any
+              u.individual_account_type === accountType ||
+              u.individual_account_type === 'agroprocessor',
+          )
+          .map((u: any) => u.id as string) ?? []; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+      if (targetUserIds.length > 0) {
+        // Mark user rows inactive (FKs from users to organization_users are
+        // already gone via cascade) then drop their Auth accounts.
+        await client
+          .from('users')
+          .update({ is_active: false })
+          .in('id', targetUserIds);
+        await Promise.all(
+          targetUserIds.map((uid) => this.supabase.deleteAuthUser(uid)),
+        );
+      }
+    }
+
+    try {
+      await this.eventsService.emit({
+        type: EventTypes.Organization.DELETED,
+        aggregateType: AggregateTypes.ORGANIZATION,
+        aggregateId: id,
+        actorType: ActorTypes.USER,
+        payload: { accountType, mode: 'hard' },
+      });
+    } catch (e) {
+      console.warn('Failed to emit organization hard-deleted event', e);
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * Smart-wipe a seller organization. Hard-deletes everything the seller
+   * owns or that's PII (products, batches, variants, images, bank info,
+   * scheduled posts, storefront, farm profiles, harvest requests, product
+   * requests, favorites, shipping docs/routes) but KEEPS the organization
+   * row plus orders + transactions + payouts so buyers retain their order
+   * history and audit/finance trails stay intact.
+   *
+   * The org row itself is anonymized (name → "Deleted Seller", PII columns
+   * nulled, status → 'archived', is_hidden_from_marketplace → true) so it
+   * disappears from every public surface without breaking FK references.
+   *
+   * Reversible only by re-creating the seller from scratch — anonymized
+   * fields can't be recovered.
+   */
+  async wipeOrganization(
+    id: string,
+    accountType: 'seller' | 'agroprocessor' = 'seller',
+  ): Promise<{ success: boolean; products_deleted: number }> {
+    const client = this.supabase.getClient();
+
+    const { data: org, error: lookupError } = await client
+      .from('organizations')
+      .select('id, account_type, name')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (lookupError || !org) {
+      throw new BadRequestException('Organization not found.');
+    }
+    if (
+      org.account_type !== accountType &&
+      org.account_type !== 'agroprocessor'
+    ) {
+      throw new BadRequestException(
+        `Cannot wipe account_type='${org.account_type}' through this endpoint.`,
+      );
+    }
+
+    // 1) Hard-delete products. Cascades handle product_images, variants,
+    //    batches, country_availability, cart_items, and order_items rows
+    //    that point at these products.
+    const { data: deletedProducts, error: productsError } = await client
+      .from('products')
+      .delete()
+      .eq('seller_org_id', id)
+      .select('id');
+    if (productsError) {
+      throw new BadRequestException(
+        `Failed to delete seller products: ${productsError.message}`,
+      );
+    }
+    const productsDeleted = deletedProducts?.length ?? 0;
+
+    // 2) Sweep the additional seller-owned tables. Each delete is best-effort:
+    //    if a table doesn't exist in this environment we log and continue
+    //    rather than abort the wipe.
+    const sweepTargets: Array<{ table: string; column: string }> = [
+      { table: 'farmer_bank_info', column: 'farmer_org_id' },
+      { table: 'scheduled_posts', column: 'seller_org_id' },
+      { table: 'organization_storefronts', column: 'organization_id' },
+      { table: 'farm_profiles', column: 'seller_org_id' },
+      { table: 'harvest_requests', column: 'seller_org_id' },
+      { table: 'product_requests', column: 'seller_org_id' },
+      { table: 'buyer_favorite_sellers', column: 'seller_org_id' },
+      { table: 'shipping_documents', column: 'seller_org_id' },
+      { table: 'shipping_routes', column: 'seller_org_id' },
+    ];
+
+    for (const { table, column } of sweepTargets) {
+      const { error } = await client.from(table).delete().eq(column, id);
+      if (error) {
+        // 42P01 = undefined_table; PGRST205 = relation not in schema cache.
+        // Both mean the table isn't in this environment — keep going.
+        const code = (error as { code?: string }).code;
+        if (code === '42P01' || code === 'PGRST205') {
+          console.warn(`wipe: skipping ${table} (not present)`);
+          continue;
+        }
+        throw new BadRequestException(
+          `Failed to wipe ${table}: ${error.message}`,
+        );
+      }
+    }
+
+    // 3) Deactivate org memberships (preserves user accounts; user can
+    //    keep using the platform under another org).
+    await client
+      .from('organization_users')
+      .update({ is_active: false })
+      .eq('organization_id', id);
+
+    // 4) Anonymize the org row. Status → archived; PII fields nulled; name
+    //    overwritten so historical buyer order rows show "Deleted Seller"
+    //    rather than the real business name.
+    const { error: anonError } = await client
+      .from('organizations')
+      .update({
+        status: OrganizationStatus.ARCHIVED,
+        name: 'Deleted Seller',
+        business_name: null,
+        address: null,
+        phone_number: null,
+        business_registration_number: null,
+        tax_id: null,
+        logo_url: null,
+        header_image_url: null,
+        is_hidden_from_marketplace: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+
+    if (anonError) {
+      throw new BadRequestException(
+        `Failed to anonymize organization: ${anonError.message}`,
+      );
+    }
+
+    try {
+      await this.eventsService.emit({
+        type: EventTypes.Organization.DELETED,
+        aggregateType: AggregateTypes.ORGANIZATION,
+        aggregateId: id,
+        actorType: ActorTypes.USER,
+        payload: { accountType, mode: 'wipe', products_deleted: productsDeleted },
+      });
+    } catch (e) {
+      console.warn('Failed to emit organization wipe event', e);
+    }
+
+    return { success: true, products_deleted: productsDeleted };
+  }
+
   async getOrganizationById(
     accountType: 'buyer' | 'seller',
     orgId: string,

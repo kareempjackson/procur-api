@@ -286,6 +286,38 @@ export class AdminController {
     return { success: true, deleted };
   }
 
+  @Delete('sellers/:id/wipe')
+  @ApiOperation({
+    summary: 'Smart-wipe a seller organization',
+    description:
+      'Hard-deletes products, bank info, scheduled posts, storefront, farm/harvest data and anonymizes the org row. Buyer order history + financial audit (orders, transactions, payouts) is preserved with a "Deleted Seller" label.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller wiped successfully',
+  })
+  async wipeSeller(
+    @Param('id') id: string,
+  ): Promise<{ success: boolean; products_deleted: number }> {
+    return this.adminService.wipeOrganization(id, 'seller');
+  }
+
+  @Delete('sellers/:id/hard')
+  @ApiOperation({
+    summary: 'Hard-delete a seller organization',
+    description:
+      'Permanently deletes the seller and EVERY dependent row including orders, transactions, payouts, payment_links, bank_info, conversations, and all buyer-side history of those orders. Irreversible. Requires the cascade-FK migration (20260427100000) to have been applied.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Seller hard-deleted successfully',
+  })
+  async hardDeleteSeller(
+    @Param('id') id: string,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.hardDeleteOrganization(id, 'seller');
+  }
+
   // ===== Seller products (admin-managed) =====
 
   @Get('sellers/:id/products')
