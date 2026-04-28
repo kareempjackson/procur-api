@@ -347,47 +347,50 @@ export class SellersService {
       sort_order = 'desc',
     } = query;
 
-    let queryBuilder = client
-      .from('products')
-      .select('*, product_images(*)', { count: 'exact' })
-      .eq('seller_org_id', sellerOrgId);
+    // Embedding product_images(*) here breaks count: 'exact' and range() —
+    // PostgREST counts joined rows, not parents, so products without images
+    // (or the join distortion) caused some products to be silently dropped.
+    // Fetch products and images in two queries instead.
+    const buildBaseQuery = (selectExpr: string, opts?: { count?: 'exact' | 'planned' | 'estimated'; head?: boolean }) => {
+      let qb = client
+        .from('products')
+        .select(selectExpr, opts as any)
+        .eq('seller_org_id', sellerOrgId);
 
-    // Apply filters
-    if (search) {
-      queryBuilder = queryBuilder.or(
-        `name.ilike.%${search}%,description.ilike.%${search}%`,
+      if (search) {
+        qb = qb.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+      }
+      if (category) qb = qb.eq('category', category);
+      if (status) {
+        qb = qb.eq('status', status);
+      } else {
+        qb = qb.not('status', 'in', '("archived","discontinued")');
+      }
+      if (is_featured !== undefined) qb = qb.eq('is_featured', is_featured);
+      if (is_organic !== undefined) qb = qb.eq('is_organic', is_organic);
+      return qb;
+    };
+
+    const { count, error: countError } = await buildBaseQuery('id', {
+      count: 'exact',
+      head: true,
+    });
+
+    if (countError) {
+      throw new BadRequestException(
+        `Failed to count products: ${countError.message}`,
       );
     }
 
-    if (category) {
-      queryBuilder = queryBuilder.eq('category', category);
-    }
-
-    if (status) {
-      queryBuilder = queryBuilder.eq('status', status);
-    } else {
-      queryBuilder = queryBuilder.not('status', 'in', '("archived","discontinued")');
-    }
-
-    if (is_featured !== undefined) {
-      queryBuilder = queryBuilder.eq('is_featured', is_featured);
-    }
-
-    if (is_organic !== undefined) {
-      queryBuilder = queryBuilder.eq('is_organic', is_organic);
-    }
-
-    // Apply sorting
-    queryBuilder = queryBuilder.order(sort_by, {
-      ascending: sort_order === 'asc',
-    });
-
-    // Apply pagination
     const from = (page - 1) * limit;
     const to = from + limit - 1;
-    queryBuilder = queryBuilder.range(from, to);
-
-    const { data, error, count } = await queryBuilder;
+    // Secondary sort by id keeps pagination stable when the primary
+    // sort field has duplicate values (e.g. identical created_at from
+    // bulk imports), otherwise pages can overlap.
+    const { data, error } = await buildBaseQuery('*')
+      .order(sort_by, { ascending: sort_order === 'asc' })
+      .order('id', { ascending: true })
+      .range(from, to);
 
     if (error) {
       throw new BadRequestException(
@@ -395,9 +398,28 @@ export class SellersService {
       );
     }
 
-    // Collect unique user IDs for created_by / updated_by to resolve names/roles
+    const productRows = (data ?? []) as any[];
+    const productIds = productRows.map((p) => p.id as string);
+
+    let imagesByProduct: Record<string, any[]> = {};
+    if (productIds.length > 0) {
+      const { data: imagesData, error: imagesError } = await client
+        .from('product_images')
+        .select('*')
+        .in('product_id', productIds);
+      if (imagesError) {
+        throw new BadRequestException(
+          `Failed to fetch product images: ${imagesError.message}`,
+        );
+      }
+      for (const img of imagesData ?? []) {
+        const pid = (img as any).product_id as string;
+        (imagesByProduct[pid] ||= []).push(img);
+      }
+    }
+
     const userIds = new Set<string>();
-    for (const p of data ?? []) {
+    for (const p of productRows) {
       if (p.created_by) userIds.add(p.created_by as string);
       if (p.updated_by) userIds.add(p.updated_by as string);
     }
@@ -412,8 +434,12 @@ export class SellersService {
       }
     }
 
-    const products =
-      data?.map((product) => this.mapProductToResponse(product, userMap)) || [];
+    const products = productRows.map((product) =>
+      this.mapProductToResponse(
+        { ...product, product_images: imagesByProduct[product.id] ?? [] },
+        userMap,
+      ),
+    );
 
     return {
       products,

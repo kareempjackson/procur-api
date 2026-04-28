@@ -1,22 +1,31 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional, IsString, Length } from 'class-validator';
+import {
+  IsIn,
+  IsOptional,
+  IsString,
+  Length,
+  MaxLength,
+} from 'class-validator';
 import { Transform } from 'class-transformer';
+
+// Trim a string field without coercing empty strings into undefined.
+// Empty string → empty string (the user explicitly cleared the field).
+// Non-string → passed through (lets @IsOptional handle null/undefined).
+const trimPreserveEmpty = ({ value }: { value: unknown }) =>
+  typeof value === 'string' ? value.trim() : value;
 
 export class UpdateUserProfileDto {
   @ApiPropertyOptional({
     description: 'User full name',
     example: 'Kevin Durant',
   })
+  // Required-when-present: if the caller sends fullname at all, it can't be
+  // an empty string. Omitting the field entirely (typical save paths that
+  // only send changed sections) is still allowed.
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 200)
+  @Length(1, 200, { message: 'Full name cannot be empty.' })
   fullname?: string;
 
   @ApiPropertyOptional({
@@ -24,41 +33,23 @@ export class UpdateUserProfileDto {
     example: '+1-555-123-4567',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 50)
+  @MaxLength(50)
   phone?: string;
 
   @ApiPropertyOptional({ description: 'User first name', example: 'Jane' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   firstName?: string;
 
   @ApiPropertyOptional({ description: 'User last name', example: 'Doe' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   lastName?: string;
 
   @ApiPropertyOptional({
@@ -66,47 +57,31 @@ export class UpdateUserProfileDto {
     example: 'Acme Foods LLC',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 255)
+  @MaxLength(255)
   businessName?: string;
 
   @ApiPropertyOptional({
     description: 'Organization display name',
     example: 'Acme',
   })
+  // Required-when-present: org display name can't be cleared.
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 255)
+  @Length(1, 255, { message: 'Organization name cannot be empty.' })
   name?: string;
 
   @ApiPropertyOptional({
     description: 'Organization business type',
     example: 'farmers',
   })
+  // Required-when-present: business type drives discovery and access rules.
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @Length(1, 100, { message: 'Business type cannot be empty.' })
   businessType?: string;
 
   @ApiPropertyOptional({
@@ -114,67 +89,37 @@ export class UpdateUserProfileDto {
     example: '123 Market St',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 255)
+  @MaxLength(255)
   address?: string;
 
   @ApiPropertyOptional({ description: 'City', example: 'San Francisco' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   city?: string;
 
   @ApiPropertyOptional({ description: 'State or province', example: 'CA' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   state?: string;
 
   @ApiPropertyOptional({ description: 'Postal code', example: '94103' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 20)
+  @MaxLength(20)
   postalCode?: string;
 
   @ApiPropertyOptional({ description: 'Country', example: 'United States' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   country?: string;
 
   @ApiPropertyOptional({
@@ -182,28 +127,16 @@ export class UpdateUserProfileDto {
     example: 'https://acmefoods.example',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 255)
+  @MaxLength(255)
   website?: string;
 
   @ApiPropertyOptional({ description: 'Organization description' })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 2000)
+  @MaxLength(2000)
   description?: string;
 
   @ApiPropertyOptional({
@@ -229,13 +162,7 @@ export class UpdateUserProfileDto {
       'https://xyz.supabase.co/storage/v1/object/public/ids/farmers/abc123.jpg',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
   @Length(1, 2048)
   farmersIdUrl?: string;
@@ -245,13 +172,7 @@ export class UpdateUserProfileDto {
     example: 'ids/private/farmers/<organizationId>/<uuid>.jpg',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
   @Length(1, 2048)
   farmersIdPath?: string;
@@ -261,15 +182,9 @@ export class UpdateUserProfileDto {
     example: '123-456-789',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   taxId?: string;
 
   @ApiPropertyOptional({
@@ -277,15 +192,9 @@ export class UpdateUserProfileDto {
     example: 'BRN-987654',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
-  @Length(1, 100)
+  @MaxLength(100)
   registrationNumber?: string;
 
   @ApiPropertyOptional({
@@ -294,13 +203,7 @@ export class UpdateUserProfileDto {
     example: 'logos/organizations/<orgId>/<uuid>.jpg',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
   @Length(1, 2048)
   logoPath?: string;
@@ -311,13 +214,7 @@ export class UpdateUserProfileDto {
     example: 'headers/organizations/<orgId>/<uuid>.jpg',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
   @Length(1, 2048)
   headerImagePath?: string;
@@ -327,13 +224,7 @@ export class UpdateUserProfileDto {
     example: 'avatars/users/<userId>/<uuid>.jpg',
   })
   @IsOptional()
-  @Transform(({ value }) => {
-    if (typeof value === 'string') {
-      const v = value.trim();
-      return v === '' ? undefined : v;
-    }
-    return value;
-  })
+  @Transform(trimPreserveEmpty)
   @IsString()
   @Length(1, 2048)
   avatarPath?: string;
