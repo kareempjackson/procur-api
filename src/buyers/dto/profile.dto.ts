@@ -29,6 +29,15 @@ export class CreateAddressDto {
   @IsString()
   street_address: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Optional second address line: apt/unit/floor for delivery, "información adicional" for Colombia.',
+    example: 'Local 3, Barrio El Poblado',
+  })
+  @IsOptional()
+  @IsString()
+  address_line2?: string;
+
   @ApiProperty({ description: 'City', example: 'New York' })
   @IsString()
   @Length(1, 100)
@@ -94,6 +103,14 @@ export class UpdateAddressDto {
   @IsString()
   street_address?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Optional second address line: apt/unit/floor for delivery, "información adicional" for Colombia.',
+  })
+  @IsOptional()
+  @IsString()
+  address_line2?: string;
+
   @ApiPropertyOptional({ description: 'City' })
   @IsOptional()
   @IsString()
@@ -155,6 +172,12 @@ export class AddressResponseDto {
 
   @ApiProperty({ description: 'Street address' })
   street_address: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Optional second address line: apt/unit/floor for delivery, "información adicional" for Colombia.',
+  })
+  address_line2?: string;
 
   @ApiProperty({ description: 'City' })
   city: string;
