@@ -8,6 +8,8 @@ import { EmailModule } from '../email/email.module';
 import { SellersModule } from '../sellers/sellers.module';
 import { BuyersModule } from '../buyers/buyers.module';
 import { CountriesModule } from '../countries/countries.module';
+import { RefundsModule } from '../refunds/refunds.module';
+import { DisputesModule } from '../disputes/disputes.module';
 
 @Module({
   imports: [
@@ -18,6 +20,8 @@ import { CountriesModule } from '../countries/countries.module';
     SellersModule,
     BuyersModule,
     CountriesModule,
+    RefundsModule,
+    DisputesModule,
   ],
   controllers: [AdminController],
   providers: [AdminService],

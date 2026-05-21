@@ -22,3 +22,5 @@ export * from './farm-visit.dto';
 export * from './product-request.dto';
 // Insights DTOs
 export * from './insight.dto';
+// Pickup address
+export * from './pickup-address.dto';

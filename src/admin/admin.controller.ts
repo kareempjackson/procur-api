@@ -1,12 +1,15 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -90,6 +93,15 @@ import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
 import { AdminUpdateOrderDto } from './dto/admin-order-update.dto';
 import { LogoUploadUrlResponseDto } from '../users/dto/logo-upload.dto';
 import { BroadcastDto } from './dto/broadcast.dto';
+import { Response } from 'express';
+import { RequirePermissions } from '../auth/decorators/permissions.decorator';
+import { SystemPermission } from '../common/enums/system-permission.enum';
+import {
+  IssueRefundDto,
+  RefundResponse,
+  ResendRefundEmailDto,
+} from '../refunds/dto/refund.dto';
+import { DisputeResponse } from '../disputes/dto/dispute.dto';
 
 @ApiTags('Admin')
 @ApiBearerAuth('JWT-auth')
@@ -650,6 +662,147 @@ export class AdminController {
     return this.adminService.updateOrderPaymentStatus(id, dto, user.id);
   }
 
+  // ==================== REFUNDS ====================
+
+  @Get('orders/:id/refunds')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'List refunds for an order (admin)',
+    description:
+      'Returns all refunds (including failed, pending, succeeded) for the given parent or child order id.',
+  })
+  @ApiResponse({ status: 200, type: [RefundResponse] })
+  async listOrderRefunds(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<RefundResponse[]> {
+    return this.adminService.listOrderRefunds(id);
+  }
+
+  @Post('orders/:id/refund')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'Issue a refund against an order (admin)',
+    description:
+      'Triggers a Stripe card refund or a Procur-credit issuance against the order. For multi-seller carts, refund is partial against the parent PaymentIntent.',
+  })
+  @ApiResponse({ status: 201, type: RefundResponse })
+  async issueOrderRefund(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: IssueRefundDto,
+    @CurrentUser() user: UserContext,
+  ): Promise<RefundResponse> {
+    return this.adminService.issueOrderRefund(id, dto, user.id);
+  }
+
+  @Post('orders/:id/refunds/:refundId/retry')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'Retry a failed card refund (admin)',
+    description:
+      'Issues a new Stripe refund attempt with a fresh idempotency key. Only valid when the refund is in failed status.',
+  })
+  @ApiResponse({ status: 200, type: RefundResponse })
+  async retryOrderRefund(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('refundId', ParseUUIDPipe) refundId: string,
+  ): Promise<RefundResponse> {
+    return this.adminService.retryOrderRefund(id, refundId);
+  }
+
+  @Post('orders/:id/refunds/:refundId/resend-email')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'Resend the refund confirmation email to the buyer',
+  })
+  @ApiResponse({ status: 200 })
+  async resendRefundEmail(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('refundId', ParseUUIDPipe) refundId: string,
+    @Body() dto: ResendRefundEmailDto,
+  ): Promise<{ success: boolean }> {
+    return this.adminService.resendRefundEmail(id, refundId, dto.email);
+  }
+
+  @Get('orders/:id/refunds/:refundId/credit-note')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'Download the credit-note PDF for a refund (admin)',
+  })
+  @ApiResponse({ status: 200, description: 'application/pdf stream' })
+  async streamCreditNotePdf(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('refundId', ParseUUIDPipe) refundId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { buffer, filename } = await this.adminService.streamCreditNotePdf(
+      id,
+      refundId,
+    );
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`,
+    );
+    res.send(buffer);
+  }
+
+  // ==================== DISPUTES (read-only) ====================
+
+  @Get('orders/:id/disputes')
+  @ApiOperation({
+    summary: 'List Stripe disputes/chargebacks on an order (admin)',
+  })
+  @ApiResponse({ status: 200, type: [DisputeResponse] })
+  async listOrderDisputes(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<DisputeResponse[]> {
+    return this.adminService.listOrderDisputes(id);
+  }
+
+  @Get('orders/:id/disputes/:disputeId')
+  @ApiOperation({
+    summary: 'Get a specific dispute on an order (admin)',
+  })
+  @ApiResponse({ status: 200, type: DisputeResponse })
+  async getOrderDispute(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('disputeId', ParseUUIDPipe) disputeId: string,
+  ): Promise<DisputeResponse> {
+    return this.adminService.getOrderDispute(id, disputeId);
+  }
+
+  // ==================== GLOBAL REFUNDS LIST ====================
+
+  @Get('refunds')
+  @RequirePermissions(SystemPermission.PROCESS_REFUNDS)
+  @ApiOperation({
+    summary: 'List refunds across all orders (admin, paginated)',
+    description:
+      'Powers the global Refunds tab on the admin payments page. Supports filtering by status, method, initiator role, date range, and free-text search on refund/credit-note numbers.',
+  })
+  @ApiResponse({ status: 200 })
+  async listRefundsGlobal(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('status') status?: string,
+    @Query('method') method?: 'card' | 'buyer_credit',
+    @Query('initiated_by') initiatedBy?: 'admin' | 'buyer' | 'system',
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.listRefundsGlobal({
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+      status,
+      method,
+      initiated_by: initiatedBy,
+      from,
+      to,
+      search,
+    });
+  }
+
   @Patch('orders/:id/inspection-approval')
   @ApiOperation({
     summary: 'Record post-inspection approval or rejection (admin)',
@@ -1036,21 +1189,41 @@ export class AdminController {
   @ApiOperation({
     summary: 'Get platform fees configuration',
     description:
-      'Returns the current platform fee percentage and flat delivery fee used across the app for offline orders and payment links.',
+      'Returns the platform fees configuration. When `countryId` is provided, returns the resolved settings for that country (per-country overrides merged over the global default). Otherwise returns the global default row.',
+  })
+  @ApiQuery({
+    name: 'countryId',
+    required: false,
+    description:
+      'Optional country code (e.g. `gda`, `tnt`). When present, returns resolved settings for that country including an `inheritedFields` array.',
   })
   @ApiResponse({
     status: 200,
     description: 'Platform fees configuration retrieved successfully',
   })
-  async getPlatformFeesSettings() {
-    return this.adminService.getPlatformFeesSettings();
+  async getPlatformFeesSettings(@Query('countryId') countryId?: string) {
+    return this.adminService.getPlatformFeesSettings(countryId ?? null);
+  }
+
+  @Get('settings/fees/summary')
+  @ApiOperation({
+    summary: 'List resolved platform fees for every active country',
+    description:
+      'Returns the global default plus, for each active country, the resolved settings and the list of overridden fields. Useful for a compare-at-a-glance view.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Platform fees summary retrieved successfully',
+  })
+  async getPlatformFeesSummary() {
+    return this.adminService.getPlatformFeesSummary();
   }
 
   @Patch('settings/fees')
   @ApiOperation({
     summary: 'Update platform fees configuration',
     description:
-      'Update the platform fee percentage and flat delivery fee used across the app. Only SUPER_ADMINs should call this endpoint.',
+      'Update the global default fees, or, when `countryId` is provided, the per-country override. Pass `null` for any field to clear that country override and inherit from the default. Only SUPER_ADMINs should call this endpoint.',
   })
   @ApiResponse({
     status: 200,
@@ -1059,24 +1232,50 @@ export class AdminController {
   async updatePlatformFeesSettings(
     @Body()
     body: {
-      platformFeePercent?: number;
-      deliveryFlatFee?: number;
-      buyerDeliveryShare?: number;
-      sellerDeliveryShare?: number;
-      minOrderPerSeller?: number;
-      minOrderTotal?: number;
-      currency?: string;
+      countryId?: string | null;
+      platformFeePercent?: number | null;
+      deliveryFlatFee?: number | null;
+      buyerDeliveryShare?: number | null;
+      sellerDeliveryShare?: number | null;
+      minOrderPerSeller?: number | null;
+      minOrderTotal?: number | null;
+      currency?: string | null;
     },
   ) {
-    return this.adminService.updatePlatformFeesSettings({
-      platformFeePercent: body.platformFeePercent,
-      deliveryFlatFee: body.deliveryFlatFee,
-      buyerDeliveryShare: body.buyerDeliveryShare,
-      sellerDeliveryShare: body.sellerDeliveryShare,
-      minOrderPerSeller: body.minOrderPerSeller,
-      minOrderTotal: body.minOrderTotal,
-      currency: body.currency,
-    });
+    return this.adminService.updatePlatformFeesSettings(
+      {
+        platformFeePercent: body.platformFeePercent,
+        deliveryFlatFee: body.deliveryFlatFee,
+        buyerDeliveryShare: body.buyerDeliveryShare,
+        sellerDeliveryShare: body.sellerDeliveryShare,
+        minOrderPerSeller: body.minOrderPerSeller,
+        minOrderTotal: body.minOrderTotal,
+        currency: body.currency,
+      },
+      body.countryId ?? null,
+    );
+  }
+
+  @Delete('settings/fees')
+  @ApiOperation({
+    summary: 'Clear all per-country fee overrides for a country',
+    description:
+      'Resets the given country to inherit every field from the global default. Requires a `countryId` query param.',
+  })
+  @ApiQuery({
+    name: 'countryId',
+    required: true,
+    description: 'Country code (e.g. `gda`, `tnt`) whose overrides to clear.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Country overrides cleared',
+  })
+  async deleteCountryFeesOverride(@Query('countryId') countryId: string) {
+    if (!countryId) {
+      throw new BadRequestException('countryId is required');
+    }
+    return this.adminService.deleteCountryOverride(countryId);
   }
 
   // ===== Audit log =====
@@ -1509,6 +1708,7 @@ export class AdminController {
       password: string;
       businessName: string;
       country?: string;
+      countryCode?: string;
       businessType?: string;
       phoneNumber?: string;
     },

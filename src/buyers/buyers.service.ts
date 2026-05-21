@@ -16,6 +16,10 @@ import { ConversationsService } from '../messages/services/conversations.service
 import { NotificationsService } from '../notifications/notifications.service';
 import { EventsService } from '../events/events.service';
 import { EventTypes, AggregateTypes } from '../events/event-types';
+import { StripeService } from '../stripe/stripe.service';
+import { PaymentMethodsService } from '../payment-methods/payment-methods.service';
+import { RefundsService } from '../refunds/refunds.service';
+import { RefundMethod, RefundReasonCode } from '../refunds/dto/refund.dto';
 import {
   // Cart DTOs
   AddToCartDto,
@@ -55,6 +59,8 @@ import {
   OrderTimelineEventDto,
   OrderSummaryDto,
   UpdateOrderDto,
+  PaymentMethod,
+  FulfillmentMethod,
 
   // Profile DTOs
   CreateAddressDto,
@@ -102,6 +108,9 @@ export class BuyersService {
     private readonly notifications: NotificationsService,
     private readonly eventsService: EventsService,
     @Inject('REDIS') private readonly redis: IORedis,
+    private readonly stripeService: StripeService,
+    private readonly paymentMethodsService: PaymentMethodsService,
+    private readonly refundsService: RefundsService,
   ) {}
 
   // ── Cache helpers ──────────────────────────────────────────────────────────
@@ -142,6 +151,118 @@ export class BuyersService {
     } catch {
       // Non-fatal — cache failure must never break the API
     }
+  }
+
+  /**
+   * Charges the buyer's card via Stripe when payment_method=credit_card. Runs BEFORE any order
+   * INSERTs so a decline leaves zero state. Returns null for non-card payment methods.
+   *
+   * 3DS flow: when the SDK returns requires_action, throws a BadRequestException carrying
+   * { requires_action, client_secret, payment_intent_id }. The UI completes 3DS off-API and
+   * retries createOrder with stripe_payment_intent_id set; we then verify the intent succeeded.
+   */
+  private async chargeCardIfApplicable(
+    buyerOrgId: string,
+    buyerUserId: string,
+    amountCents: number,
+    createDto: CreateOrderDto,
+    checkoutGroupId: string,
+    sharedOrderNumber: string,
+    currency: string,
+  ): Promise<{ paymentIntentId: string; chargeId: string | null } | null> {
+    if (createDto.payment_method !== PaymentMethod.CREDIT_CARD) return null;
+
+    if (!createDto.stripe_payment_method_id && !createDto.stripe_payment_intent_id) {
+      throw new BadRequestException(
+        'stripe_payment_method_id is required when payment_method is credit_card',
+      );
+    }
+    if (amountCents <= 0) {
+      throw new BadRequestException('Cart total must be greater than zero to charge a card');
+    }
+
+    // 3DS retry path: caller already confirmed the PaymentIntent client-side after the
+    // requires_action response from a previous attempt. Verify it landed cleanly.
+    if (createDto.stripe_payment_intent_id) {
+      const pi = await this.stripeService.retrievePaymentIntent(
+        createDto.stripe_payment_intent_id,
+      );
+      if (pi.status !== 'succeeded') {
+        throw new BadRequestException(
+          `Payment intent is in status '${pi.status}', expected 'succeeded'`,
+        );
+      }
+      const chargeId =
+        typeof pi.latest_charge === 'string'
+          ? pi.latest_charge
+          : pi.latest_charge?.id ?? null;
+      return { paymentIntentId: pi.id, chargeId };
+    }
+
+    // Resolve the PaymentMethod for both flows:
+    //  - Saved card: must already belong to this org (prevents PM-stuffing).
+    //  - New card: just minted on the client; attach to this org's customer.
+    const ownership = await this.paymentMethodsService.resolveForCharge(
+      buyerOrgId,
+      createDto.stripe_payment_method_id!,
+    );
+
+    let pi;
+    try {
+      pi = await this.stripeService.createPaymentIntent({
+        amountCents,
+        currency: (currency || 'usd').toLowerCase(),
+        customerId: ownership.stripeCustomerId,
+        paymentMethodId: ownership.stripePaymentMethodId,
+        idempotencyKey: checkoutGroupId,
+        metadata: {
+          checkout_group_id: checkoutGroupId,
+          buyer_org_id: buyerOrgId,
+          order_number: sharedOrderNumber,
+        },
+        description: `Procur order ${sharedOrderNumber}`,
+        setupFutureUsage: createDto.save_payment_method ?? false,
+      });
+    } catch (err: unknown) {
+      const e = err as { message?: string; code?: string; decline_code?: string };
+      const reason = e?.code || e?.decline_code || 'card_error';
+      const message = e?.message || 'Card payment failed';
+      throw new BadRequestException(`Card declined (${reason}): ${message}`);
+    }
+
+    if (pi.status === 'requires_action' || pi.status === 'requires_source_action') {
+      throw new BadRequestException({
+        requires_action: true,
+        client_secret: pi.client_secret,
+        payment_intent_id: pi.id,
+      } as unknown as string);
+    }
+    if (pi.status !== 'succeeded') {
+      throw new BadRequestException(
+        `Payment did not succeed (status: ${pi.status})`,
+      );
+    }
+    // If the buyer used a brand-new card and asked to save it, persist a
+    // payment_methods row now that the charge succeeded.
+    if (ownership.isNew && createDto.save_payment_method) {
+      try {
+        await this.paymentMethodsService.persistAfterCharge({
+          organizationId: buyerOrgId,
+          userId: buyerUserId,
+          stripePaymentMethodId: ownership.stripePaymentMethodId,
+          stripeCustomerId: ownership.stripeCustomerId,
+        });
+      } catch (e) {
+        // Non-fatal: the order is already paid. Saving the card for next
+        // time is a nice-to-have, not a correctness requirement.
+        this.logger.warn(`Failed to save card after successful charge: ${e}`);
+      }
+    }
+    const chargeId =
+      typeof pi.latest_charge === 'string'
+        ? pi.latest_charge
+        : pi.latest_charge?.id ?? null;
+    return { paymentIntentId: pi.id, chargeId };
   }
 
   private async getVisibleMarketplaceSellerOrgIds(): Promise<string[]> {
@@ -1179,8 +1300,14 @@ export class BuyersService {
   /**
    * Load platform fee configuration used to estimate buyer-facing delivery fees.
    * Buyer apps should use `buyer_delivery_share` (not an implicit 50/50 split).
+   *
+   * When `countryId` is provided, per-country override values are merged over
+   * the global default row: any NULL column on the override row falls back to
+   * the default.
    */
-  private async getPlatformFeesConfig(): Promise<{
+  private async getPlatformFeesConfig(
+    countryId?: string | null,
+  ): Promise<{
     platformFeePercent: number;
     deliveryFlatFee: number;
     buyerDeliveryShare: number;
@@ -1190,7 +1317,8 @@ export class BuyersService {
     currency: string;
   }> {
     const client = this.supabase.getClient();
-    const { data, error } = await client
+
+    const defaultPromise = client
       .from('platform_fees_config')
       .select(
         'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
@@ -1199,7 +1327,34 @@ export class BuyersService {
       .limit(1)
       .maybeSingle();
 
-    if (error || !data) {
+    const overridePromise = countryId
+      ? client
+          .from('platform_fees_config_country_overrides')
+          .select(
+            'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
+          )
+          .eq('country_id', countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null } as any);
+
+    // Look up the country's native currency (TTD for Trinidad, JMD for
+    // Jamaica, ...) so that a per-country resolved currency defaults to
+    // the country's currency instead of the global default's currency.
+    const countryPromise = countryId
+      ? client
+          .from('countries')
+          .select('currency')
+          .eq('code', countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null } as any);
+
+    const [
+      { data: defaultData, error: defaultErr },
+      { data: overrideData },
+      { data: countryData },
+    ] = await Promise.all([defaultPromise, overridePromise, countryPromise]);
+
+    if (defaultErr || !defaultData) {
       // Fail-open: keep buyer flows working with sensible defaults.
       return {
         platformFeePercent: 5,
@@ -1212,7 +1367,7 @@ export class BuyersService {
       };
     }
 
-    const row = data as {
+    const def = defaultData as {
       platform_fee_percent: number | string | null;
       delivery_flat_fee: number | string | null;
       buyer_delivery_share: number | string | null;
@@ -1221,20 +1376,67 @@ export class BuyersService {
       min_order_total: number | string | null;
       currency: string | null;
     };
+    const ov = (overrideData ?? null) as {
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      min_order_per_seller: number | string | null;
+      min_order_total: number | string | null;
+      currency: string | null;
+    } | null;
+    const countryCurrency =
+      (countryData as { currency?: string | null } | null)?.currency ?? null;
+
+    const pickNum = (
+      overrideVal: number | string | null | undefined,
+      defaultVal: number | string | null,
+      fallback: number,
+    ): number => {
+      if (overrideVal != null) return Number(overrideVal) || 0;
+      if (defaultVal != null) return Number(defaultVal) || 0;
+      return fallback;
+    };
 
     return {
-      platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
-      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
-      buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
-      sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
-      minOrderPerSeller:
-        Number(row.min_order_per_seller ?? BuyersService.DEFAULT_MIN_ORDER_PER_SELLER) ||
+      platformFeePercent: pickNum(ov?.platform_fee_percent, def.platform_fee_percent, 0),
+      deliveryFlatFee: pickNum(ov?.delivery_flat_fee, def.delivery_flat_fee, 0),
+      buyerDeliveryShare: pickNum(ov?.buyer_delivery_share, def.buyer_delivery_share, 0),
+      sellerDeliveryShare: pickNum(ov?.seller_delivery_share, def.seller_delivery_share, 0),
+      minOrderPerSeller: pickNum(
+        ov?.min_order_per_seller,
+        def.min_order_per_seller,
         BuyersService.DEFAULT_MIN_ORDER_PER_SELLER,
-      minOrderTotal:
-        Number(row.min_order_total ?? BuyersService.DEFAULT_MIN_ORDER_TOTAL) ||
+      ),
+      minOrderTotal: pickNum(
+        ov?.min_order_total,
+        def.min_order_total,
         BuyersService.DEFAULT_MIN_ORDER_TOTAL,
-      currency: (row.currency as string | null) ?? 'XCD',
+      ),
+      // Currency falls back to the country's native currency (TTD/JMD/...)
+      // before the global default, so amounts shown in country-scoped
+      // contexts are labeled in the right currency.
+      currency:
+        (ov?.currency as string | null) ??
+        countryCurrency ??
+        (def.currency as string | null) ??
+        'XCD',
     };
+  }
+
+  /**
+   * Lightweight lookup of an organization's country_id. Returns null if the
+   * org has no country set (e.g. legacy data). Callers should treat null as
+   * "use global default" when resolving country-scoped settings.
+   */
+  private async getOrgCountryId(orgId: string): Promise<string | null> {
+    const { data } = await this.supabase
+      .getClient()
+      .from('organizations')
+      .select('country_id')
+      .eq('id', orgId)
+      .maybeSingle();
+    return (data as { country_id?: string | null } | null)?.country_id ?? null;
   }
 
   async getCart(
@@ -1261,7 +1463,7 @@ export class BuyersService {
         product:products(
           id, name, sku, base_price, sale_price, currency, stock_quantity, 
           unit_of_measurement, seller_org_id,
-          seller_organization:organizations!seller_org_id(id, name, is_hidden_from_marketplace),
+          seller_organization:organizations!seller_org_id(id, name, business_name, is_hidden_from_marketplace, pickup_address),
           product_images(image_url, is_primary)
         )
       `,
@@ -1317,7 +1519,8 @@ export class BuyersService {
       };
     }
 
-    const feesConfig = await this.getPlatformFeesConfig();
+    const buyerCountryId = await this.getOrgCountryId(buyerOrgId);
+    const feesConfig = await this.getPlatformFeesConfig(buyerCountryId);
     const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
@@ -1345,16 +1548,20 @@ export class BuyersService {
       subtotal += itemTotal;
 
       if (!sellerGroups.has(sellerId)) {
+        const sellerOrg = product.seller_organization as
+          | { name?: string; business_name?: string; pickup_address?: Record<string, string> | null }
+          | undefined;
         sellerGroups.set(sellerId, {
           seller_org_id: sellerId,
           seller_name:
-            (product.seller_organization as any)?.name || 'Unknown Seller',
+            sellerOrg?.business_name || sellerOrg?.name || 'Unknown Seller',
           items: [],
           subtotal: 0,
           // Buyer pays delivery ONCE per cart/order, not per seller.
           // Keep seller group shipping at 0 to avoid multiplying fees by number of sellers.
           estimated_shipping: 0,
           total: 0,
+          pickup_address: sellerOrg?.pickup_address ?? null,
         });
       }
 
@@ -2233,7 +2440,8 @@ export class BuyersService {
     const subtotal = unitPrice * acceptedQuantity;
     const taxAmount = 0; // Tax disabled
     // Buyer-facing delivery fee should come from platform fees config (buyer_delivery_share).
-    const feesConfig = await this.getPlatformFeesConfig();
+    const acceptQuoteBuyerCountryId = await this.getOrgCountryId(buyerOrgId);
+    const feesConfig = await this.getPlatformFeesConfig(acceptQuoteBuyerCountryId);
     const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
     const configuredBuyerShare = Number(feesConfig.buyerDeliveryShare ?? 0);
     const configuredSellerShare = Number(feesConfig.sellerDeliveryShare ?? 0);
@@ -2427,34 +2635,57 @@ export class BuyersService {
       })();
     };
 
-    // Validate shipping address
-    const { data: shippingAddress } = await this.supabase
-      .getClient()
-      .from('buyer_addresses')
-      .select('*')
-      .eq('id', createDto.shipping_address_id)
-      .eq('buyer_org_id', buyerOrgId)
-      .single();
+    // Resolve fulfillment mode up-front so address/route checks can branch on it.
+    const fulfillmentMethod =
+      createDto.fulfillment_method ?? FulfillmentMethod.DELIVERY;
+    const isPickup = fulfillmentMethod === FulfillmentMethod.PICKUP;
 
-    if (!shippingAddress) {
-      throw new NotFoundException('Shipping address not found');
+    // Pickup is card-only: the buyer pre-pays so the seller doesn't bear collection risk at handoff.
+    if (isPickup && createDto.payment_method !== PaymentMethod.CREDIT_CARD) {
+      throw new BadRequestException(
+        'Pickup orders must be paid by credit or debit card.',
+      );
     }
 
-    // Get billing address if specified
-    let billingAddress = shippingAddress;
-    if (createDto.billing_address_id) {
-      const { data: billing } = await this.supabase
+    // Validate shipping address (delivery only)
+    let shippingAddress: any = null;
+    let billingAddress: any = null;
+
+    if (!isPickup) {
+      if (!createDto.shipping_address_id) {
+        throw new BadRequestException(
+          'shipping_address_id is required for delivery orders.',
+        );
+      }
+
+      const { data: addr } = await this.supabase
         .getClient()
         .from('buyer_addresses')
         .select('*')
-        .eq('id', createDto.billing_address_id)
+        .eq('id', createDto.shipping_address_id)
         .eq('buyer_org_id', buyerOrgId)
         .single();
 
-      if (!billing) {
-        throw new NotFoundException('Billing address not found');
+      if (!addr) {
+        throw new NotFoundException('Shipping address not found');
       }
-      billingAddress = billing;
+      shippingAddress = addr;
+      billingAddress = addr;
+
+      if (createDto.billing_address_id) {
+        const { data: billing } = await this.supabase
+          .getClient()
+          .from('buyer_addresses')
+          .select('*')
+          .eq('id', createDto.billing_address_id)
+          .eq('buyer_org_id', buyerOrgId)
+          .single();
+
+        if (!billing) {
+          throw new NotFoundException('Billing address not found');
+        }
+        billingAddress = billing;
+      }
     }
 
     // Validate products and calculate totals
@@ -2525,13 +2756,16 @@ export class BuyersService {
 
     // ----------------------------------------------------------------
     // Enforce minimum order thresholds (per seller + overall).
-    // Values come from platform_fees_config (admin-configurable).
-    // Mirrors the cart UI guards in procur-ui/src/app/(shop)/cart.
+    // Values come from platform_fees_config (admin-configurable), scoped to
+    // the buyer's country so a country override (e.g. higher Trinidad
+    // threshold) is honored. Mirrors the cart UI guards.
     // ----------------------------------------------------------------
-    const feesConfigForMins = await this.getPlatformFeesConfig();
+    const buyerCountryIdForMins = await this.getOrgCountryId(buyerOrgId);
+    const feesConfigForMins = await this.getPlatformFeesConfig(buyerCountryIdForMins);
     {
       const minPerSeller = feesConfigForMins.minOrderPerSeller;
       const minTotal = feesConfigForMins.minOrderTotal;
+      const cur = feesConfigForMins.currency || 'XCD';
 
       const underMinSellers: Array<{ sellerOrgId: string; subtotal: number }> = [];
       for (const [sellerOrgId, items] of sellerGroups.entries()) {
@@ -2548,7 +2782,7 @@ export class BuyersService {
         const details = underMinSellers
           .map(
             (s) =>
-              `seller ${s.sellerOrgId} subtotal XCD ${s.subtotal.toFixed(2)} (min XCD ${minPerSeller.toFixed(2)})`,
+              `seller ${s.sellerOrgId} subtotal ${cur} ${s.subtotal.toFixed(2)} (min ${cur} ${minPerSeller.toFixed(2)})`,
           )
           .join('; ');
         throw new BadRequestException(
@@ -2558,7 +2792,7 @@ export class BuyersService {
 
       if (subtotal < minTotal) {
         throw new BadRequestException(
-          `Order subtotal XCD ${subtotal.toFixed(2)} is below the minimum checkout amount of XCD ${minTotal.toFixed(2)}`,
+          `Order subtotal ${cur} ${subtotal.toFixed(2)} is below the minimum checkout amount of ${cur} ${minTotal.toFixed(2)}`,
         );
       }
     }
@@ -2569,6 +2803,23 @@ export class BuyersService {
     // ----------------------------------------------------------------
     const createdOrders: any[] = [];
     const checkoutGroupId = randomUUID();
+
+    // Resolve buyer's currency from their country once, fall back to XCD for legacy buyer orgs
+    // without a country_id (Caribbean default). Stripe accepts any ISO-4217 code we have on the
+    // countries table (XCD, COP, USD, etc.) — settlement currency conversion is handled by Stripe.
+    let buyerCurrency = 'XCD';
+    try {
+      const { data: buyerOrgRow } = await this.supabase
+        .getClient()
+        .from('organizations')
+        .select('country_id, countries:country_id (currency)')
+        .eq('id', buyerOrgId)
+        .single();
+      const cur = (buyerOrgRow as unknown as { countries?: { currency?: string } })?.countries?.currency;
+      if (typeof cur === 'string' && cur.length === 3) buyerCurrency = cur.toUpperCase();
+    } catch {
+      // Non-fatal: stick with XCD default
+    }
 
     const feesConfig = feesConfigForMins;
     const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
@@ -2585,6 +2836,12 @@ export class BuyersService {
     );
 
     const isMultiSeller = sellerEntries.length > 1;
+
+    if (isPickup && isMultiSeller) {
+      throw new BadRequestException(
+        'Pickup is only available for single-seller orders. Remove items so the cart contains a single seller, or switch to delivery.',
+      );
+    }
 
     // ----------------------------------------------------------------
     // Resolve credits once (used by parent or first seller row)
@@ -2634,29 +2891,47 @@ export class BuyersService {
       const aggregateTotal =
         aggregateTotalBeforeCredits - creditsAppliedCents / 100;
 
+      // Charge the card BEFORE inserting any orders so a decline leaves zero state.
+      const cardCharge = await this.chargeCardIfApplicable(
+        buyerOrgId,
+        buyerUserId,
+        Math.round(aggregateTotal * 100),
+        createDto,
+        checkoutGroupId,
+        sharedOrderNumber,
+        buyerCurrency,
+      );
+
       const { data: pOrder, error: pError } = await this.supabase
         .getClient()
         .from('orders')
         .insert({
           order_number: sharedOrderNumber,
+          invoice_number: sharedOrderNumber,
           buyer_org_id: buyerOrgId,
           seller_org_id: null, // parent has no single seller
           buyer_user_id: buyerUserId,
           checkout_group_id: checkoutGroupId,
           parent_order_id: null,
           status: 'pending',
-          payment_status: 'pending',
+          payment_status: cardCharge ? 'paid' : 'pending',
+          paid_at: cardCharge ? new Date().toISOString() : null,
+          stripe_payment_intent_id: cardCharge?.paymentIntentId ?? null,
+          stripe_charge_id: cardCharge?.chargeId ?? null,
           subtotal: aggregateSubtotal,
           tax_amount: 0,
           shipping_amount: buyerDeliveryForOrder,
           discount_amount: 0,
           credits_applied_cents: creditsAppliedCents,
           total_amount: aggregateTotal,
-          currency: 'XCD',
+          currency: buyerCurrency,
           shipping_address: shippingAddress,
           billing_address: billingAddress,
           buyer_notes: createDto.buyer_notes,
           payment_method: createDto.payment_method || 'bank_transfer',
+          // Multi-seller path is always delivery (pickup is gated to single-seller above),
+          // but we set this explicitly for schema-invariance clarity.
+          fulfillment_method: fulfillmentMethod,
           estimated_delivery_date: createDto.preferred_delivery_date,
         })
         .select()
@@ -2702,11 +2977,11 @@ export class BuyersService {
         ((orderSubtotal * platformFeePercent) / 100).toFixed(2),
       );
 
-      // --- Cross-island detection ---
+      // --- Cross-island detection + pickup capability check ---
       const { data: sellerOrg } = await this.supabase
         .getClient()
         .from('organizations')
-        .select('country_id')
+        .select('country_id, pickup_address')
         .eq('id', sellerOrgId)
         .single();
 
@@ -2717,11 +2992,21 @@ export class BuyersService {
         .eq('id', buyerOrgId)
         .single();
 
+      // For pickup, the buyer collects from the seller's location — buyer/seller country are
+      // effectively the same (the pickup_address's country), so we never resolve a shipping route.
       const sellerIsland = sellerOrg?.country_id || 'gda';
-      const buyerIsland = buyerOrg?.country_id || 'gda';
-      const isCrossIsland = sellerIsland !== buyerIsland;
+      const buyerIsland = isPickup
+        ? sellerIsland
+        : buyerOrg?.country_id || 'gda';
+      const isCrossIsland = !isPickup && sellerIsland !== buyerIsland;
       let shippingRouteId: string | null = null;
       let crossIslandShippingFee = 0;
+
+      if (isPickup && !sellerOrg?.pickup_address) {
+        throw new BadRequestException(
+          'This seller is not currently offering pickup. Please choose delivery.',
+        );
+      }
 
       if (isCrossIsland) {
         // Look up seller's shipping route to buyer's island
@@ -2751,10 +3036,12 @@ export class BuyersService {
       let totalAmountBeforeCredits: number;
 
       if (!isMultiSeller) {
-        // Use cross-island shipping fee if applicable, otherwise flat fee
-        shippingAmount = isCrossIsland
-          ? crossIslandShippingFee
-          : buyerDeliveryForOrder;
+        // Pickup orders carry zero shipping. Otherwise use cross-island fee or flat fee.
+        shippingAmount = isPickup
+          ? 0
+          : isCrossIsland
+            ? crossIslandShippingFee
+            : buyerDeliveryForOrder;
         totalAmountBeforeCredits =
           orderSubtotal + shippingAmount + taxAmount + platformFeeAmount;
         const maxCreditsCents = Math.round(totalAmountBeforeCredits * 100);
@@ -2774,29 +3061,68 @@ export class BuyersService {
         ? sharedOrderNumber
         : sharedOrderNumber;
 
+      // Single-seller path charges the card here; multi-seller path inherits the
+      // PaymentIntent already created on the parent above.
+      const standaloneCharge =
+        !isMultiSeller
+          ? await this.chargeCardIfApplicable(
+              buyerOrgId,
+              buyerUserId,
+              Math.round(totalAmount * 100),
+              createDto,
+              checkoutGroupId,
+              orderNumber,
+              buyerCurrency,
+            )
+          : null;
+
+      const inheritedPaymentIntentId =
+        isMultiSeller
+          ? (parentOrder as { stripe_payment_intent_id?: string | null })
+              ?.stripe_payment_intent_id ?? null
+          : standaloneCharge?.paymentIntentId ?? null;
+      const inheritedChargeId =
+        isMultiSeller
+          ? (parentOrder as { stripe_charge_id?: string | null })
+              ?.stripe_charge_id ?? null
+          : standaloneCharge?.chargeId ?? null;
+      const inheritedPaymentStatus =
+        isMultiSeller
+          ? (parentOrder as { payment_status?: string }).payment_status === 'paid'
+            ? 'paid'
+            : 'pending'
+          : standaloneCharge
+            ? 'paid'
+            : 'pending';
+
       const { data: order, error } = await this.supabase
         .getClient()
         .from('orders')
         .insert({
           order_number: orderNumber,
+          invoice_number: orderNumber,
           buyer_org_id: buyerOrgId,
           seller_org_id: sellerOrgId,
           buyer_user_id: buyerUserId,
           checkout_group_id: checkoutGroupId,
           parent_order_id: isMultiSeller ? parentOrder.id : null,
           status: 'pending',
-          payment_status: 'pending',
+          payment_status: inheritedPaymentStatus,
+          paid_at: inheritedPaymentStatus === 'paid' ? new Date().toISOString() : null,
+          stripe_payment_intent_id: inheritedPaymentIntentId,
+          stripe_charge_id: inheritedChargeId,
           subtotal: orderSubtotal,
           tax_amount: taxAmount,
           shipping_amount: shippingAmount,
           discount_amount: 0,
           credits_applied_cents: orderCreditsAppliedCents,
           total_amount: totalAmount,
-          currency: 'XCD',
+          currency: buyerCurrency,
           shipping_address: shippingAddress,
           billing_address: billingAddress,
           buyer_notes: createDto.buyer_notes,
           payment_method: createDto.payment_method || 'bank_transfer',
+          fulfillment_method: fulfillmentMethod,
           estimated_delivery_date: createDto.preferred_delivery_date,
           origin_country_id: sellerIsland,
           dest_country_id: buyerIsland,
@@ -3311,7 +3637,7 @@ Manage this order: ${link}`;
       .select(
         `
         *,
-        seller_organization:organizations!seller_org_id(name),
+        seller_organization:organizations!seller_org_id(name, business_name, pickup_address),
         order_timeline(*)
       `,
       )
@@ -3725,8 +4051,11 @@ Manage this order: ${link}`;
         0,
       );
 
-      // Recalculate total with existing shipping/tax/discount
-      const feesConfig = await this.getPlatformFeesConfig();
+      // Recalculate total with existing shipping/tax/discount. Use the
+      // order's destination country so per-country overrides apply.
+      const feesConfig = await this.getPlatformFeesConfig(
+        (order as any)?.dest_country_id ?? null,
+      );
       const platformFeePercent = Number(feesConfig.platformFeePercent ?? 0) || 0;
       const platformFeeAmount = Number(
         ((newSubtotal * platformFeePercent) / 100).toFixed(2),
@@ -5224,7 +5553,9 @@ Manage this order: ${link}`;
     const { data: order } = await this.supabase
       .getClient()
       .from('orders')
-      .select('id, status')
+      .select(
+        'id, status, payment_method, payment_status, total_amount, parent_order_id, refunded_amount_cents, buyer_user_id',
+      )
       .eq('id', orderId)
       .eq('buyer_org_id', buyerOrgId)
       .single();
@@ -5283,6 +5614,36 @@ Manage this order: ${link}`;
       description: reason,
       created_by: buyerOrgId,
     });
+
+    // Auto-refund the buyer's card when the cancelled order was paid by credit_card.
+    // Failures here do NOT roll back the cancellation; a 'failed' refund row is left
+    // for an admin to retry via /admin/orders/:id/refunds/:refundId/retry.
+    if (
+      order.payment_method === 'credit_card' &&
+      (order.payment_status === 'paid' ||
+        order.payment_status === 'partially_refunded')
+    ) {
+      try {
+        const orderTotalCents = Math.round(Number(order.total_amount) * 100);
+        const remainingCents =
+          orderTotalCents - (order.refunded_amount_cents ?? 0);
+        if (remainingCents > 0) {
+          await this.refundsService.issueRefund({
+            orderId,
+            amountCents: remainingCents,
+            reason,
+            reasonCode: RefundReasonCode.ORDER_CANCELLED,
+            refundMethod: RefundMethod.CARD,
+            initiatedBy: { userId: order.buyer_user_id, role: 'buyer' },
+            notifyBuyer: true,
+          });
+        }
+      } catch (err) {
+        this.logger.error(
+          `Auto-refund on cancel failed for order ${orderId}; left for admin retry: ${err}`,
+        );
+      }
+    }
 
     // Emit order cancelled event
     await this.eventsService.emit({
@@ -5610,6 +5971,26 @@ Manage this order: ${link}`;
         metadata: event.metadata,
       })) || [];
 
+    // Pickup orders carry the seller's pickup_address on the response so the buyer's
+    // order-confirmation page can render it instead of the (null) shipping_address.
+    const pickupAddr =
+      order?.seller_organization?.pickup_address ??
+      order?.seller_org?.pickup_address ??
+      null;
+    const pickupLocation =
+      order.fulfillment_method === 'pickup' &&
+      order.seller_org_id &&
+      pickupAddr
+        ? {
+            seller_org_id: order.seller_org_id as string,
+            seller_name:
+              order?.seller_organization?.business_name ||
+              order?.seller_organization?.name ||
+              'Seller',
+            address: pickupAddr,
+          }
+        : null;
+
     return {
       id: order.id,
       checkout_group_id: order.checkout_group_id || null,
@@ -5680,6 +6061,8 @@ Manage this order: ${link}`;
       // timeline, // Remove timeline as it's not in the DTO
       created_at: order.created_at,
       updated_at: order.updated_at,
+      fulfillment_method: order.fulfillment_method || 'delivery',
+      pickup_location: pickupLocation,
     };
   }
 

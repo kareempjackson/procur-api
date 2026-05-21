@@ -4126,4 +4126,99 @@ export class SellersService {
       .eq('product_id', productId)
       .eq('country_id', countryId);
   }
+
+  // ==================== PICKUP ADDRESS ====================
+
+  /**
+   * Read the seller org's pickup address. enabled=false when the JSONB column is NULL —
+   * which is the signal that the seller is not offering pickup.
+   */
+  async getPickupAddress(sellerOrgId: string): Promise<{
+    enabled: boolean;
+    street_address?: string;
+    address_line2?: string;
+    city?: string;
+    state?: string;
+    postal_code?: string;
+    country?: string;
+    contact_name?: string;
+    contact_phone?: string;
+    instructions?: string;
+    hours?: string;
+  }> {
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .from('organizations')
+      .select('pickup_address')
+      .eq('id', sellerOrgId)
+      .single();
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+    const addr = (data as { pickup_address?: Record<string, string> } | null)
+      ?.pickup_address;
+    if (!addr) return { enabled: false };
+    return { enabled: true, ...addr };
+  }
+
+  async updatePickupAddress(
+    sellerOrgId: string,
+    dto: {
+      disabled?: boolean;
+      street_address?: string;
+      address_line2?: string;
+      city?: string;
+      state?: string;
+      postal_code?: string;
+      country?: string;
+      contact_name?: string;
+      contact_phone?: string;
+      instructions?: string;
+      hours?: string;
+    },
+  ): Promise<void> {
+    const client = this.supabaseService.getClient();
+
+    if (dto.disabled) {
+      const { error } = await client
+        .from('organizations')
+        .update({ pickup_address: null })
+        .eq('id', sellerOrgId);
+      if (error) throw new BadRequestException(error.message);
+      return;
+    }
+
+    // Minimum viable address — street, city, country must all be present so buyers can find it.
+    if (!dto.street_address?.trim() || !dto.city?.trim() || !dto.country?.trim()) {
+      throw new BadRequestException(
+        'street_address, city, and country are required to save a pickup location. To stop offering pickup, send { disabled: true }.',
+      );
+    }
+
+    // Pack only defined fields so the JSONB stays clean (no nulls for fields the seller skipped).
+    const payload: Record<string, string> = {};
+    for (const key of [
+      'street_address',
+      'address_line2',
+      'city',
+      'state',
+      'postal_code',
+      'country',
+      'contact_name',
+      'contact_phone',
+      'instructions',
+      'hours',
+    ] as const) {
+      const val = (dto as Record<string, string | undefined>)[key];
+      if (typeof val === 'string' && val.trim().length > 0) {
+        payload[key] = val.trim();
+      }
+    }
+
+    const { error } = await client
+      .from('organizations')
+      .update({ pickup_address: payload })
+      .eq('id', sellerOrgId);
+    if (error) throw new BadRequestException(error.message);
+  }
 }

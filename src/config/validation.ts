@@ -107,6 +107,19 @@ export class EnvironmentVariables {
   )
   @IsOptional()
   SENTRY_PROFILES_SAMPLE_RATE?: number;
+
+  // Stripe (optional in dev/test, validated at service-init time when used)
+  @IsString()
+  @IsOptional()
+  STRIPE_SECRET_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  STRIPE_PUBLISHABLE_KEY?: string;
+
+  @IsString()
+  @IsOptional()
+  STRIPE_WEBHOOK_SECRET?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

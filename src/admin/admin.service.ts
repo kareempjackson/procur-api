@@ -62,6 +62,14 @@ import { SellersService } from '../sellers/sellers.service';
 import { AdminCreateOfflineOrderDto } from './dto/admin-offline-order.dto';
 import { EventsService } from '../events/events.service';
 import { EventTypes, AggregateTypes, ActorTypes } from '../events/event-types';
+import { RefundsService } from '../refunds/refunds.service';
+import { CreditNoteService } from '../refunds/credit-note.service';
+import {
+  IssueRefundDto,
+  RefundResponse,
+} from '../refunds/dto/refund.dto';
+import { DisputesService } from '../disputes/disputes.service';
+import { DisputeResponse } from '../disputes/dto/dispute.dto';
 
 export interface AdminOrganizationSummary {
   id: string;
@@ -112,6 +120,12 @@ export interface AdminOrderSummary {
   orderNumber: string;
   status: string;
   paymentStatus: string;
+  /** 'credit_card' | 'bank_transfer' | 'cash_on_delivery' | 'cheque_on_delivery'. Drives whether card refund is selectable in the admin RefundModal. */
+  paymentMethod: string | null;
+  /** 'delivery' | 'pickup'. Pickup orders show pickup_address instead of shipping_address. */
+  fulfillmentMethod: string | null;
+  /** Running total of refunds issued in cents — RefundModal uses this to compute remaining refundable. */
+  refundedAmountCents: number;
   totalAmount: number;
   currency: string;
   createdAt: string;
@@ -171,6 +185,26 @@ export interface PlatformFeesSettings {
   minOrderPerSeller: number;
   minOrderTotal: number;
   currency: string;
+  // Country scoping (null = global default). inheritedFields lists the
+  // override fields that fell back to the default when resolving.
+  countryId?: string | null;
+  countryCode?: string | null;
+  countryName?: string | null;
+  inheritedFields?: string[];
+}
+
+export interface PlatformFeesSummaryEntry {
+  countryId: string;
+  countryCode: string;
+  countryName: string;
+  hasOverride: boolean;
+  overriddenFields: string[];
+  resolved: PlatformFeesSettings;
+}
+
+export interface PlatformFeesSummary {
+  default: PlatformFeesSettings;
+  countries: PlatformFeesSummaryEntry[];
 }
 
 export interface AdminEventItem {
@@ -206,6 +240,9 @@ export class AdminService {
     private readonly eventsService: EventsService,
     private readonly buyersService: BuyersService,
     private readonly countriesService: CountriesService,
+    private readonly refundsService: RefundsService,
+    private readonly creditNoteService: CreditNoteService,
+    private readonly disputesService: DisputesService,
   ) {}
 
   private get privateBucket(): string {
@@ -315,7 +352,152 @@ export class AdminService {
     };
   }
 
-  async getPlatformFeesSettings(): Promise<PlatformFeesSettings> {
+  /**
+   * Load the (optional) per-country override row. NULL columns mean
+   * "inherit from default". Returns null when no override row exists.
+   */
+  private async loadCountryOverrideRow(countryId: string): Promise<{
+    id: string;
+    country_id: string;
+    platform_fee_percent: number | null;
+    delivery_flat_fee: number | null;
+    buyer_delivery_share: number | null;
+    seller_delivery_share: number | null;
+    min_order_per_seller: number | null;
+    min_order_total: number | null;
+    currency: string | null;
+  } | null> {
+    const client = this.supabase.getClient();
+    const { data, error } = await client
+      .from('platform_fees_config_country_overrides')
+      .select(
+        'id, country_id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
+      )
+      .eq('country_id', countryId)
+      .maybeSingle();
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to load platform fees override: ${error.message}`,
+      );
+    }
+    if (!data) return null;
+
+    const row = data as {
+      id: string;
+      country_id: string;
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      min_order_per_seller: number | string | null;
+      min_order_total: number | string | null;
+      currency: string | null;
+    };
+
+    const toNum = (v: number | string | null) =>
+      v == null ? null : Number(v);
+
+    return {
+      id: row.id,
+      country_id: row.country_id,
+      platform_fee_percent: toNum(row.platform_fee_percent),
+      delivery_flat_fee: toNum(row.delivery_flat_fee),
+      buyer_delivery_share: toNum(row.buyer_delivery_share),
+      seller_delivery_share: toNum(row.seller_delivery_share),
+      min_order_per_seller: toNum(row.min_order_per_seller),
+      min_order_total: toNum(row.min_order_total),
+      currency: row.currency,
+    };
+  }
+
+  /**
+   * Merge a (possibly missing) country override over the global default
+   * row. Returns the resolved settings plus the list of fields that were
+   * inherited from the default.
+   */
+  private async resolveFeesForCountry(
+    countryId: string,
+  ): Promise<PlatformFeesSettings> {
+    const [defaultRow, overrideRow, country] = await Promise.all([
+      this.loadPlatformFeesRow(),
+      this.loadCountryOverrideRow(countryId),
+      this.countriesService.getCountryByCode(countryId).catch(() => null),
+    ]);
+    // countryId throughout this module is the country *code* (e.g. 'gda'),
+    // matching the convention used by organizations.country_id, etc.
+
+    const inheritedFields: string[] = [];
+    const pick = <T>(
+      fieldName: string,
+      override: T | null | undefined,
+      fallback: T,
+    ): T => {
+      if (override == null) {
+        inheritedFields.push(fieldName);
+        return fallback;
+      }
+      return override;
+    };
+
+    return {
+      platformFeePercent: pick(
+        'platformFeePercent',
+        overrideRow?.platform_fee_percent,
+        Number(defaultRow.platform_fee_percent ?? 0),
+      ),
+      deliveryFlatFee: pick(
+        'deliveryFlatFee',
+        overrideRow?.delivery_flat_fee,
+        Number(defaultRow.delivery_flat_fee ?? 0),
+      ),
+      buyerDeliveryShare: pick(
+        'buyerDeliveryShare',
+        overrideRow?.buyer_delivery_share,
+        defaultRow.buyer_delivery_share != null
+          ? Number(defaultRow.buyer_delivery_share)
+          : 0,
+      ),
+      sellerDeliveryShare: pick(
+        'sellerDeliveryShare',
+        overrideRow?.seller_delivery_share,
+        defaultRow.seller_delivery_share != null
+          ? Number(defaultRow.seller_delivery_share)
+          : 0,
+      ),
+      minOrderPerSeller: pick(
+        'minOrderPerSeller',
+        overrideRow?.min_order_per_seller,
+        Number(defaultRow.min_order_per_seller ?? 75),
+      ),
+      minOrderTotal: pick(
+        'minOrderTotal',
+        overrideRow?.min_order_total,
+        Number(defaultRow.min_order_total ?? 100),
+      ),
+      // Currency falls back to the *country's* currency (TTD for Trinidad,
+      // JMD for Jamaica, etc.) before the global default. Admins can still
+      // explicitly override it on the country row if a market is run in a
+      // different currency.
+      currency: pick(
+        'currency',
+        overrideRow?.currency,
+        country?.currency || defaultRow.currency || 'XCD',
+      ),
+      countryId,
+      countryCode: country?.code ?? null,
+      countryName: country?.name ?? null,
+      inheritedFields,
+    };
+  }
+
+  async getPlatformFeesSettings(
+    countryId?: string | null,
+  ): Promise<PlatformFeesSettings> {
+    if (countryId) {
+      return this.resolveFeesForCountry(countryId);
+    }
+
     const row = await this.loadPlatformFeesRow();
     const baseDelivery = Number(row.delivery_flat_fee ?? 0);
     const buyerShare =
@@ -331,107 +513,362 @@ export class AdminService {
       minOrderPerSeller: Number(row.min_order_per_seller ?? 75),
       minOrderTotal: Number(row.min_order_total ?? 100),
       currency: row.currency || 'XCD',
+      countryId: null,
+      countryCode: null,
+      countryName: null,
+      inheritedFields: [],
     };
   }
 
-  async updatePlatformFeesSettings(input: {
-    platformFeePercent?: number;
-    deliveryFlatFee?: number;
-    buyerDeliveryShare?: number;
-    sellerDeliveryShare?: number;
-    minOrderPerSeller?: number;
-    minOrderTotal?: number;
-    currency?: string;
-  }): Promise<PlatformFeesSettings> {
-    const client = this.supabase.getClient();
-    const row = await this.loadPlatformFeesRow();
+  async getPlatformFeesSummary(): Promise<PlatformFeesSummary> {
+    const [defaultSettings, countries, overrideRows] = await Promise.all([
+      this.getPlatformFeesSettings(),
+      this.countriesService.getActiveCountries(),
+      this.supabase
+        .getClient()
+        .from('platform_fees_config_country_overrides')
+        .select(
+          'country_id, platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, min_order_per_seller, min_order_total, currency',
+        ),
+    ]);
 
-    const patch: Record<string, unknown> = {};
-
-    if (typeof input.platformFeePercent === 'number') {
-      if (input.platformFeePercent < 0) {
-        throw new BadRequestException('Platform fee percent must be >= 0');
-      }
-      patch.platform_fee_percent = input.platformFeePercent;
+    if (overrideRows.error) {
+      throw new BadRequestException(
+        `Failed to load platform fees overrides: ${overrideRows.error.message}`,
+      );
     }
 
-    if (typeof input.deliveryFlatFee === 'number') {
-      if (input.deliveryFlatFee < 0) {
-        throw new BadRequestException('Delivery fee must be >= 0');
-      }
-      patch.delivery_flat_fee = input.deliveryFlatFee;
+    const overrideByCountry = new Map<
+      string,
+      Record<string, number | string | null>
+    >();
+    for (const row of (overrideRows.data ?? []) as Array<{
+      country_id: string;
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      min_order_per_seller: number | string | null;
+      min_order_total: number | string | null;
+      currency: string | null;
+    }>) {
+      overrideByCountry.set(row.country_id, {
+        platformFeePercent: row.platform_fee_percent,
+        deliveryFlatFee: row.delivery_flat_fee,
+        buyerDeliveryShare: row.buyer_delivery_share,
+        sellerDeliveryShare: row.seller_delivery_share,
+        minOrderPerSeller: row.min_order_per_seller,
+        minOrderTotal: row.min_order_total,
+        currency: row.currency,
+      });
     }
 
-    if (typeof input.buyerDeliveryShare === 'number') {
-      if (input.buyerDeliveryShare < 0) {
-        throw new BadRequestException(
-          'Buyer delivery share must be greater than or equal to zero',
-        );
-      }
-      patch.buyer_delivery_share = input.buyerDeliveryShare;
+    const entries: PlatformFeesSummaryEntry[] = [];
+    for (const country of countries) {
+      const overrideValues = overrideByCountry.get(country.code);
+      const overriddenFields = overrideValues
+        ? Object.entries(overrideValues)
+            .filter(([, value]) => value != null)
+            .map(([key]) => key)
+        : [];
+
+      // Cheap merge to avoid N+1 reads; reuse default + per-field override
+      const merged: PlatformFeesSettings = overrideValues
+        ? {
+            platformFeePercent:
+              overrideValues.platformFeePercent != null
+                ? Number(overrideValues.platformFeePercent)
+                : defaultSettings.platformFeePercent,
+            deliveryFlatFee:
+              overrideValues.deliveryFlatFee != null
+                ? Number(overrideValues.deliveryFlatFee)
+                : defaultSettings.deliveryFlatFee,
+            buyerDeliveryShare:
+              overrideValues.buyerDeliveryShare != null
+                ? Number(overrideValues.buyerDeliveryShare)
+                : defaultSettings.buyerDeliveryShare,
+            sellerDeliveryShare:
+              overrideValues.sellerDeliveryShare != null
+                ? Number(overrideValues.sellerDeliveryShare)
+                : defaultSettings.sellerDeliveryShare,
+            minOrderPerSeller:
+              overrideValues.minOrderPerSeller != null
+                ? Number(overrideValues.minOrderPerSeller)
+                : defaultSettings.minOrderPerSeller,
+            minOrderTotal:
+              overrideValues.minOrderTotal != null
+                ? Number(overrideValues.minOrderTotal)
+                : defaultSettings.minOrderTotal,
+            currency:
+              (overrideValues.currency as string | null) ??
+              country.currency ??
+              defaultSettings.currency,
+            countryId: country.code,
+            countryCode: country.code,
+            countryName: country.name,
+            inheritedFields: [
+              'platformFeePercent',
+              'deliveryFlatFee',
+              'buyerDeliveryShare',
+              'sellerDeliveryShare',
+              'minOrderPerSeller',
+              'minOrderTotal',
+              'currency',
+            ].filter((f) => !overriddenFields.includes(f)),
+          }
+        : {
+            ...defaultSettings,
+            currency: country.currency || defaultSettings.currency,
+            countryId: country.code,
+            countryCode: country.code,
+            countryName: country.name,
+            inheritedFields: [
+              'platformFeePercent',
+              'deliveryFlatFee',
+              'buyerDeliveryShare',
+              'sellerDeliveryShare',
+              'minOrderPerSeller',
+              'minOrderTotal',
+              'currency',
+            ],
+          };
+
+      entries.push({
+        countryId: country.code,
+        countryCode: country.code,
+        countryName: country.name,
+        hasOverride: !!overrideValues,
+        overriddenFields,
+        resolved: merged,
+      });
     }
 
-    if (typeof input.sellerDeliveryShare === 'number') {
-      if (input.sellerDeliveryShare < 0) {
-        throw new BadRequestException(
-          'Seller delivery share must be greater than or equal to zero',
-        );
+    return { default: defaultSettings, countries: entries };
+  }
+
+  async updatePlatformFeesSettings(
+    input: {
+      // `number` sets the value, `null` clears the country override
+      // (falls back to default), `undefined` leaves it unchanged.
+      platformFeePercent?: number | null;
+      deliveryFlatFee?: number | null;
+      buyerDeliveryShare?: number | null;
+      sellerDeliveryShare?: number | null;
+      minOrderPerSeller?: number | null;
+      minOrderTotal?: number | null;
+      currency?: string | null;
+    },
+    countryId?: string | null,
+  ): Promise<PlatformFeesSettings> {
+    // For per-country overrides, NULL means "inherit". For the global default,
+    // a NULL value is meaningless (default row is the source of truth), so we
+    // ignore explicit clears at the default level.
+    const isCountryScope = !!countryId;
+
+    const dbPatch: Record<string, unknown> = {};
+    const trackedFields: string[] = [];
+
+    const assignNumber = (
+      dbCol: string,
+      apiField: string,
+      value: number | null | undefined,
+      label: string,
+    ) => {
+      if (value === undefined) return;
+      if (value === null) {
+        if (isCountryScope) {
+          dbPatch[dbCol] = null;
+          trackedFields.push(apiField);
+        }
+        return;
       }
-      patch.seller_delivery_share = input.sellerDeliveryShare;
+      if (value < 0) {
+        throw new BadRequestException(`${label} must be greater than or equal to zero`);
+      }
+      dbPatch[dbCol] = value;
+      trackedFields.push(apiField);
+    };
+
+    assignNumber('platform_fee_percent', 'platformFeePercent', input.platformFeePercent, 'Platform fee percent');
+    assignNumber('delivery_flat_fee', 'deliveryFlatFee', input.deliveryFlatFee, 'Delivery fee');
+    assignNumber('buyer_delivery_share', 'buyerDeliveryShare', input.buyerDeliveryShare, 'Buyer delivery share');
+    assignNumber('seller_delivery_share', 'sellerDeliveryShare', input.sellerDeliveryShare, 'Seller delivery share');
+    assignNumber('min_order_per_seller', 'minOrderPerSeller', input.minOrderPerSeller, 'Minimum order per seller');
+    assignNumber('min_order_total', 'minOrderTotal', input.minOrderTotal, 'Minimum order total');
+
+    if (input.currency !== undefined) {
+      if (input.currency === null) {
+        if (isCountryScope) {
+          dbPatch.currency = null;
+          trackedFields.push('currency');
+        }
+      } else if (typeof input.currency === 'string' && input.currency.trim()) {
+        dbPatch.currency = input.currency.trim().toUpperCase();
+        trackedFields.push('currency');
+      }
     }
 
-    if (typeof input.minOrderPerSeller === 'number') {
-      if (input.minOrderPerSeller < 0) {
-        throw new BadRequestException(
-          'Minimum order per seller must be greater than or equal to zero',
-        );
-      }
-      patch.min_order_per_seller = input.minOrderPerSeller;
-    }
-
-    if (typeof input.minOrderTotal === 'number') {
-      if (input.minOrderTotal < 0) {
-        throw new BadRequestException(
-          'Minimum order total must be greater than or equal to zero',
-        );
-      }
-      if (
-        typeof input.minOrderPerSeller === 'number' &&
-        input.minOrderTotal < input.minOrderPerSeller
-      ) {
+    // Cross-field validation runs against the resolved (post-patch) values
+    // so that a partial country override (e.g. only minOrderTotal set) is
+    // still validated against the inherited default minOrderPerSeller.
+    if (
+      input.minOrderTotal !== undefined ||
+      input.minOrderPerSeller !== undefined
+    ) {
+      const projected = await this.projectResolvedSettings(input, countryId);
+      if (projected.minOrderTotal < projected.minOrderPerSeller) {
         throw new BadRequestException(
           'Minimum order total cannot be less than the per-seller minimum',
         );
       }
-      patch.min_order_total = input.minOrderTotal;
     }
 
-    if (typeof input.currency === 'string' && input.currency.trim()) {
-      patch.currency = input.currency.trim().toUpperCase();
+    if (Object.keys(dbPatch).length === 0) {
+      return this.getPlatformFeesSettings(countryId ?? null);
     }
 
-    if (Object.keys(patch).length > 0) {
+    const client = this.supabase.getClient();
+
+    if (isCountryScope) {
+      // Confirm country exists (will throw NotFound if missing)
+      await this.countriesService.getCountryByCode(countryId!);
+
+      const { error } = await client
+        .from('platform_fees_config_country_overrides')
+        .upsert(
+          { country_id: countryId, ...dbPatch },
+          { onConflict: 'country_id' },
+        );
+      if (error) {
+        throw new BadRequestException(
+          `Failed to update country fees override: ${error.message}`,
+        );
+      }
+    } else {
+      const row = await this.loadPlatformFeesRow();
       const { error } = await client
         .from('platform_fees_config')
-        .update(patch)
+        .update(dbPatch)
         .eq('id', row.id);
-
       if (error) {
         throw new BadRequestException(
           `Failed to update platform fees configuration: ${error.message}`,
         );
       }
-
-      // Emit platform fees updated event
-      await this.eventsService.emit({
-        type: EventTypes.Admin.PLATFORM_FEES_UPDATED,
-        aggregateType: AggregateTypes.SETTINGS,
-        actorType: ActorTypes.USER,
-        payload: { changedFields: Object.keys(patch), ...input },
-      });
     }
 
-    return this.getPlatformFeesSettings();
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PLATFORM_FEES_UPDATED,
+      aggregateType: AggregateTypes.SETTINGS,
+      actorType: ActorTypes.USER,
+      payload: {
+        scope: isCountryScope ? 'country' : 'default',
+        countryId: countryId ?? null,
+        changedFields: trackedFields,
+        ...input,
+      },
+    });
+
+    return this.getPlatformFeesSettings(countryId ?? null);
+  }
+
+  /**
+   * Compute what the resolved settings would look like after applying `input`,
+   * without persisting anything. Used for cross-field validation that has to
+   * consider inherited default values.
+   */
+  private async projectResolvedSettings(
+    input: {
+      platformFeePercent?: number | null;
+      deliveryFlatFee?: number | null;
+      buyerDeliveryShare?: number | null;
+      sellerDeliveryShare?: number | null;
+      minOrderPerSeller?: number | null;
+      minOrderTotal?: number | null;
+      currency?: string | null;
+    },
+    countryId?: string | null,
+  ): Promise<PlatformFeesSettings> {
+    const current = countryId
+      ? await this.resolveFeesForCountry(countryId)
+      : await this.getPlatformFeesSettings();
+
+    const defaults = await this.getPlatformFeesSettings();
+
+    const applyNumeric = (
+      field: keyof PlatformFeesSettings,
+      value: number | null | undefined,
+      fallback: number,
+    ): number => {
+      if (value === undefined) return current[field] as number;
+      if (value === null) return fallback;
+      return value;
+    };
+
+    return {
+      ...current,
+      platformFeePercent: applyNumeric(
+        'platformFeePercent',
+        input.platformFeePercent,
+        defaults.platformFeePercent,
+      ),
+      deliveryFlatFee: applyNumeric(
+        'deliveryFlatFee',
+        input.deliveryFlatFee,
+        defaults.deliveryFlatFee,
+      ),
+      buyerDeliveryShare: applyNumeric(
+        'buyerDeliveryShare',
+        input.buyerDeliveryShare,
+        defaults.buyerDeliveryShare,
+      ),
+      sellerDeliveryShare: applyNumeric(
+        'sellerDeliveryShare',
+        input.sellerDeliveryShare,
+        defaults.sellerDeliveryShare,
+      ),
+      minOrderPerSeller: applyNumeric(
+        'minOrderPerSeller',
+        input.minOrderPerSeller,
+        defaults.minOrderPerSeller,
+      ),
+      minOrderTotal: applyNumeric(
+        'minOrderTotal',
+        input.minOrderTotal,
+        defaults.minOrderTotal,
+      ),
+    };
+  }
+
+  async deleteCountryOverride(
+    countryId: string,
+  ): Promise<PlatformFeesSettings> {
+    await this.countriesService.getCountryByCode(countryId);
+
+    const { error } = await this.supabase
+      .getClient()
+      .from('platform_fees_config_country_overrides')
+      .delete()
+      .eq('country_id', countryId);
+
+    if (error) {
+      throw new BadRequestException(
+        `Failed to clear country fees override: ${error.message}`,
+      );
+    }
+
+    await this.eventsService.emit({
+      type: EventTypes.Admin.PLATFORM_FEES_UPDATED,
+      aggregateType: AggregateTypes.SETTINGS,
+      actorType: ActorTypes.USER,
+      payload: {
+        scope: 'country',
+        countryId,
+        changedFields: ['*reset*'],
+      },
+    });
+
+    return this.getPlatformFeesSettings(countryId);
   }
 
   private async getOrganizationAdminContact(orgId: string): Promise<{
@@ -1949,7 +2386,7 @@ export class AdminService {
     const { data: orders, error: ordersError } = await client
       .from('orders')
       .select(
-        'id, order_number, status, payment_status, total_amount, currency, created_at',
+        'id, order_number, status, payment_status, payment_method, fulfillment_method, refunded_amount_cents, total_amount, currency, created_at',
       )
       .eq('buyer_org_id', orgId)
       .order('created_at', { ascending: false })
@@ -1967,6 +2404,9 @@ export class AdminService {
         orderNumber: String(o.order_number ?? o.id),
         status: o.status as string,
         paymentStatus: o.payment_status as string,
+        paymentMethod: (o.payment_method as string) ?? null,
+        fulfillmentMethod: (o.fulfillment_method as string) ?? null,
+        refundedAmountCents: Number(o.refunded_amount_cents ?? 0),
         totalAmount: Number(o.total_amount ?? 0),
         currency: (o.currency as string) ?? 'XCD',
         createdAt: o.created_at as string,
@@ -2167,7 +2607,7 @@ export class AdminService {
     const { data: orders, error: ordersError } = await client
       .from('orders')
       .select(
-        'id, order_number, status, payment_status, total_amount, currency, created_at',
+        'id, order_number, status, payment_status, payment_method, fulfillment_method, refunded_amount_cents, total_amount, currency, created_at',
       )
       .eq('seller_org_id', orgId)
       .order('created_at', { ascending: false })
@@ -2185,6 +2625,9 @@ export class AdminService {
         orderNumber: String(o.order_number ?? o.id),
         status: o.status as string,
         paymentStatus: o.payment_status as string,
+        paymentMethod: (o.payment_method as string) ?? null,
+        fulfillmentMethod: (o.fulfillment_method as string) ?? null,
+        refundedAmountCents: Number(o.refunded_amount_cents ?? 0),
         totalAmount: Number(o.total_amount ?? 0),
         currency: (o.currency as string) ?? 'XCD',
         createdAt: o.created_at as string,
@@ -2512,7 +2955,7 @@ export class AdminService {
     let builder = client
       .from('orders')
       .select(
-        'id, order_number, status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, buyer_org_id, seller_org_id, parent_order_id, created_at, driver_user_id, assigned_driver_at',
+        'id, order_number, status, payment_status, payment_method, refunded_amount_cents, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, buyer_org_id, seller_org_id, parent_order_id, created_at, driver_user_id, assigned_driver_at',
         { count: 'exact' },
       )
       // Only show top-level orders in the admin list.
@@ -2608,6 +3051,9 @@ export class AdminService {
         orderNumber: String(o.order_number ?? o.id),
         status: o.status as string,
         paymentStatus: o.payment_status as string,
+        paymentMethod: (o.payment_method as string) ?? null,
+        fulfillmentMethod: (o.fulfillment_method as string) ?? null,
+        refundedAmountCents: Number(o.refunded_amount_cents ?? 0),
         totalAmount: displayTotal,
         currency: (o.currency as string) ?? 'XCD',
         createdAt: o.created_at as string,
@@ -3197,6 +3643,22 @@ export class AdminService {
       shippingMethod?: string | null;
       isAggregate?: boolean;
     };
+    pickupLocation?: {
+      sellerOrgId: string;
+      sellerName: string;
+      address: {
+        street_address?: string;
+        address_line2?: string;
+        city?: string;
+        state?: string;
+        postal_code?: string;
+        country?: string;
+        contact_name?: string;
+        contact_phone?: string;
+        instructions?: string;
+        hours?: string;
+      };
+    } | null;
     buyerOrganization: AdminOrganizationSummary | null;
     sellerOrganization: AdminOrganizationSummary | null;
     items: DatabaseOrderItem[];
@@ -3296,6 +3758,9 @@ export class AdminService {
       orderNumber: String(order.order_number ?? order.id),
       status: order.status as string,
       paymentStatus: order.payment_status as string,
+      paymentMethod: (order.payment_method as string) ?? null,
+      fulfillmentMethod: (order.fulfillment_method as string) ?? null,
+      refundedAmountCents: Number(order.refunded_amount_cents ?? 0),
       totalAmount: Number(order.total_amount ?? 0),
       currency: (order.currency as string) ?? 'XCD',
       createdAt: order.created_at as string,
@@ -3384,8 +3849,38 @@ export class AdminService {
       }
     }
 
+    // For pickup orders, enrich the response with the seller's pickup_address so the admin UI
+    // can render it in place of the buyer's shipping address. Single-seller only (enforced in
+    // createOrder), so we look up the lone seller.
+    let pickupLocation: {
+      sellerOrgId: string;
+      sellerName: string;
+      address: Record<string, string | undefined>;
+    } | null = null;
+    if (order.fulfillment_method === 'pickup' && sellerOrgId) {
+      const { data: sellerOrgRow } = await client
+        .from('organizations')
+        .select('id, name, business_name, pickup_address')
+        .eq('id', sellerOrgId)
+        .single();
+      const addr = (sellerOrgRow as { pickup_address?: Record<string, string> } | null)
+        ?.pickup_address;
+      if (addr && typeof addr === 'object') {
+        pickupLocation = {
+          sellerOrgId,
+          sellerName:
+            (sellerOrgRow as { business_name?: string; name?: string } | null)
+              ?.business_name ||
+            (sellerOrgRow as { name?: string } | null)?.name ||
+            'Seller',
+          address: addr,
+        };
+      }
+    }
+
     return {
       order: orderSummary,
+      pickupLocation,
       buyerOrganization,
       sellerOrganization,
       items: (items || []) as DatabaseOrderItem[],
@@ -3794,6 +4289,175 @@ export class AdminService {
     });
 
     return { success: true };
+  }
+
+  // ==================== ADMIN REFUNDS (Stripe + buyer credit) ====================
+
+  async listOrderRefunds(orderId: string): Promise<RefundResponse[]> {
+    return this.refundsService.listForOrder(orderId);
+  }
+
+  async issueOrderRefund(
+    orderId: string,
+    dto: IssueRefundDto,
+    adminUserId: string,
+  ): Promise<RefundResponse> {
+    return this.refundsService.issueRefund({
+      orderId,
+      amountCents: dto.amount_cents,
+      reason: dto.reason,
+      reasonCode: dto.reason_code,
+      refundMethod: dto.refund_method,
+      initiatedBy: { userId: adminUserId, role: 'admin' },
+      notifyBuyer: dto.notify_buyer ?? true,
+    });
+  }
+
+  async retryOrderRefund(
+    orderId: string,
+    refundId: string,
+  ): Promise<RefundResponse> {
+    const refund = await this.refundsService.getRefund(orderId, refundId);
+    return this.refundsService.retryFailedCardRefund(refund.id);
+  }
+
+  async resendRefundEmail(
+    orderId: string,
+    refundId: string,
+    email?: string,
+  ): Promise<{ success: boolean }> {
+    await this.refundsService.getRefund(orderId, refundId); // ownership check
+    await this.refundsService.resendEmail(refundId, email);
+    return { success: true };
+  }
+
+  async streamCreditNotePdf(
+    orderId: string,
+    refundId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const refund = await this.refundsService.getRefund(orderId, refundId);
+    return this.creditNoteService.generate(refund.order_id, {
+      refundNumber: refund.refund_number,
+      creditNoteNumber: refund.credit_note_number,
+      amountCents: refund.amount_cents,
+      reason: refund.reason,
+      reasonCode: refund.reason_code,
+      refundMethod: refund.refund_method,
+      processedAt: refund.succeeded_at
+        ? new Date(refund.succeeded_at)
+        : new Date(refund.created_at),
+    });
+  }
+
+  // ==================== ADMIN DISPUTES (Stripe chargebacks) ====================
+
+  async listOrderDisputes(orderId: string): Promise<DisputeResponse[]> {
+    return this.disputesService.listForOrder(orderId);
+  }
+
+  async getOrderDispute(orderId: string, disputeId: string): Promise<DisputeResponse> {
+    return this.disputesService.get(orderId, disputeId);
+  }
+
+  // ==================== ADMIN GLOBAL REFUNDS LIST ====================
+
+  async listRefundsGlobal(query: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    method?: 'card' | 'buyer_credit';
+    initiated_by?: 'admin' | 'buyer' | 'system';
+    from?: string;
+    to?: string;
+    search?: string;
+  }): Promise<{
+    items: Array<{
+      id: string;
+      refund_number: string;
+      credit_note_number: string;
+      order_id: string;
+      order_number: string | null;
+      buyer_org_id: string | null;
+      buyer_org_name: string | null;
+      amount_cents: number;
+      currency: string;
+      status: string;
+      refund_method: 'card' | 'buyer_credit';
+      reason_code: string;
+      initiated_by_role: 'admin' | 'buyer' | 'system';
+      created_at: string;
+      succeeded_at: string | null;
+      failed_at: string | null;
+    }>;
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const page = Math.max(1, Math.floor(Number(query.page ?? 1)));
+    const limit = Math.min(100, Math.max(1, Math.floor(Number(query.limit ?? 25))));
+    const offset = (page - 1) * limit;
+
+    const client = this.supabase.getClient();
+    let queryBuilder = client
+      .from('refunds')
+      .select(
+        `
+        id, refund_number, credit_note_number, order_id, amount_cents, currency, status,
+        refund_method, reason_code, initiated_by_role, created_at, succeeded_at, failed_at,
+        orders:order_id ( id, order_number, buyer_org_id, organizations:buyer_org_id ( id, name, business_name ) )
+        `,
+        { count: 'exact' },
+      )
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (query.status) queryBuilder = queryBuilder.eq('status', query.status);
+    if (query.method) queryBuilder = queryBuilder.eq('refund_method', query.method);
+    if (query.initiated_by) queryBuilder = queryBuilder.eq('initiated_by_role', query.initiated_by);
+    if (query.from) queryBuilder = queryBuilder.gte('created_at', query.from);
+    if (query.to) queryBuilder = queryBuilder.lte('created_at', query.to);
+    if (query.search && query.search.trim().length > 0) {
+      const term = query.search.trim();
+      // Match refund number, credit-note number, or stripe refund id; case-insensitive prefix.
+      queryBuilder = queryBuilder.or(
+        `refund_number.ilike.%${term}%,credit_note_number.ilike.%${term}%,stripe_refund_id.ilike.%${term}%`,
+      );
+    }
+
+    const { data, error, count } = await queryBuilder;
+    if (error) throw new BadRequestException(error.message);
+
+    const items = (data || []).map((row: Record<string, unknown>) => {
+      const orderJoin = (row.orders as
+        | {
+            id?: string;
+            order_number?: string;
+            buyer_org_id?: string;
+            organizations?: { name?: string; business_name?: string };
+          }
+        | null) ?? null;
+      return {
+        id: String(row.id),
+        refund_number: String(row.refund_number),
+        credit_note_number: String(row.credit_note_number),
+        order_id: String(row.order_id),
+        order_number: orderJoin?.order_number ?? null,
+        buyer_org_id: orderJoin?.buyer_org_id ?? null,
+        buyer_org_name:
+          orderJoin?.organizations?.business_name ?? orderJoin?.organizations?.name ?? null,
+        amount_cents: Number(row.amount_cents),
+        currency: String(row.currency),
+        status: String(row.status),
+        refund_method: row.refund_method as 'card' | 'buyer_credit',
+        reason_code: String(row.reason_code),
+        initiated_by_role: row.initiated_by_role as 'admin' | 'buyer' | 'system',
+        created_at: String(row.created_at),
+        succeeded_at: (row.succeeded_at as string | null) ?? null,
+        failed_at: (row.failed_at as string | null) ?? null,
+      };
+    });
+
+    return { items, total: count ?? items.length, page, limit };
   }
 
   async updateOrderPaymentStatus(
@@ -5510,10 +6174,30 @@ export class AdminService {
     password: string;
     businessName: string;
     country?: string;
+    countryCode?: string;
     businessType?: string;
     phoneNumber?: string;
   }): Promise<{ organizationId: string; userId: string }> {
     const client = this.supabase.getClient();
+
+    // Country is load-bearing: it drives shipping-route lookup, currency,
+    // and per-country platform fee resolution at checkout. If the caller
+    // omits it the org would silently inherit the DB default ('gda'),
+    // which then surfaces as confusing errors like "Seller does not ship
+    // to gda" for a buyer who is clearly elsewhere. Fail fast instead.
+    if (!input.countryCode) {
+      throw new BadRequestException(
+        'Country is required when creating a buyer organization.',
+      );
+    }
+    const country = await this.countriesService
+      .getCountryByCode(input.countryCode)
+      .catch(() => null);
+    if (!country) {
+      throw new BadRequestException(
+        `Country code '${input.countryCode}' is not a registered country.`,
+      );
+    }
 
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(input.password, saltRounds);
@@ -5526,7 +6210,8 @@ export class AdminService {
         fullname: input.adminFullname,
         individual_account_type: 'buyer',
         phone_number: input.phoneNumber ?? null,
-        country: input.country ?? null,
+        country: input.country ?? country.name,
+        default_country_id: input.countryCode,
         email_verified: true,
         is_active: true,
       })
@@ -5548,7 +6233,8 @@ export class AdminService {
         business_name: input.businessName,
         account_type: 'buyer',
         business_type: input.businessType || 'general',
-        country: input.country ?? null,
+        country: input.country ?? country.name,
+        country_id: input.countryCode,
         phone_number: input.phoneNumber ?? null,
         status: 'pending_verification',
       })

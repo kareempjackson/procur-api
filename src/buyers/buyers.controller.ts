@@ -26,6 +26,8 @@ import {
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { BuyersService } from './buyers.service';
+import { RefundsService } from '../refunds/refunds.service';
+import { CreditNoteService } from '../refunds/credit-note.service';
 import { Logger } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
@@ -105,7 +107,11 @@ import {
 @AccountTypes(AccountType.BUYER)
 export class BuyersController {
   private readonly logger = new Logger(BuyersController.name);
-  constructor(private readonly buyersService: BuyersService) {}
+  constructor(
+    private readonly buyersService: BuyersService,
+    private readonly refundsService: RefundsService,
+    private readonly creditNoteService: CreditNoteService,
+  ) {}
 
   // ==================== MARKETPLACE ENDPOINTS ====================
 
@@ -733,6 +739,53 @@ export class BuyersController {
       );
 
     const filename = `procur-invoice-${invoiceNumber}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', buffer.length.toString());
+    res.end(buffer);
+  }
+
+  @Get('orders/:id/refunds')
+  @RequirePermissions('view_buyer_orders')
+  @ApiOperation({
+    summary: 'List refunds for one of my orders',
+  })
+  @ApiResponse({ status: 200 })
+  async listOrderRefunds(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+  ) {
+    await this.buyersService.getOrderById(user.organizationId!, orderId);
+    return this.refundsService.listForOrder(orderId);
+  }
+
+  @Get('orders/:id/refunds/:refundId/credit-note')
+  @RequirePermissions('view_buyer_orders')
+  @ApiOperation({
+    summary: 'Download credit-note PDF for a refund on one of my orders',
+  })
+  async downloadCreditNote(
+    @CurrentUser() user: UserContext,
+    @Param('id', ParseUUIDPipe) orderId: string,
+    @Param('refundId', ParseUUIDPipe) refundId: string,
+    @Res() res: Response,
+  ): Promise<void> {
+    await this.buyersService.getOrderById(user.organizationId!, orderId);
+    const refund = await this.refundsService.getRefund(orderId, refundId);
+    const { buffer, filename } = await this.creditNoteService.generate(
+      refund.order_id,
+      {
+        refundNumber: refund.refund_number,
+        creditNoteNumber: refund.credit_note_number,
+        amountCents: refund.amount_cents,
+        reason: refund.reason,
+        reasonCode: refund.reason_code,
+        refundMethod: refund.refund_method,
+        processedAt: refund.succeeded_at
+          ? new Date(refund.succeeded_at)
+          : new Date(refund.created_at),
+      },
+    );
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length.toString());

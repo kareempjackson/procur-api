@@ -18,25 +18,58 @@ export class OrderClearingService {
   private async computeSellerDeliveryFee(input: {
     hasShippingAddress: boolean;
     buyerDeliveryStored: number;
+    // Order's origin country (the seller's market). When provided, any
+    // per-country override of the delivery fields is merged over the
+    // global default before computing the seller's share.
+    countryId?: string | null;
   }): Promise<number> {
     if (!input.hasShippingAddress) return 0;
 
     const client = this.supabase.getClient();
-    const { data } = await client
+    const defaultPromise = client
       .from('platform_fees_config')
       .select('delivery_flat_fee, buyer_delivery_share, seller_delivery_share')
       .limit(1)
       .maybeSingle();
+
+    const overridePromise = input.countryId
+      ? client
+          .from('platform_fees_config_country_overrides')
+          .select(
+            'delivery_flat_fee, buyer_delivery_share, seller_delivery_share',
+          )
+          .eq('country_id', input.countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null } as any);
+
+    const [{ data }, { data: overrideData }] = await Promise.all([
+      defaultPromise,
+      overridePromise,
+    ]);
 
     const row = (data || {}) as {
       delivery_flat_fee?: number | string | null;
       buyer_delivery_share?: number | string | null;
       seller_delivery_share?: number | string | null;
     };
+    const ov = (overrideData || null) as {
+      delivery_flat_fee?: number | string | null;
+      buyer_delivery_share?: number | string | null;
+      seller_delivery_share?: number | string | null;
+    } | null;
 
-    const configuredFlat = Number(row.delivery_flat_fee ?? 0) || 0;
-    const configuredBuyer = Number(row.buyer_delivery_share ?? 0) || 0;
-    const configuredSeller = Number(row.seller_delivery_share ?? 0) || 0;
+    const pickNum = (
+      overrideVal: number | string | null | undefined,
+      defaultVal: number | string | null | undefined,
+    ): number => {
+      if (overrideVal != null) return Number(overrideVal) || 0;
+      if (defaultVal != null) return Number(defaultVal) || 0;
+      return 0;
+    };
+
+    const configuredFlat = pickNum(ov?.delivery_flat_fee, row.delivery_flat_fee);
+    const configuredBuyer = pickNum(ov?.buyer_delivery_share, row.buyer_delivery_share);
+    const configuredSeller = pickNum(ov?.seller_delivery_share, row.seller_delivery_share);
 
     // Prefer explicit admin-configured seller share when present.
     if (configuredSeller > 0) return Number(configuredSeller.toFixed(2));
@@ -399,6 +432,7 @@ export class OrderClearingService {
     const sellerDeliveryFee = await this.computeSellerDeliveryFee({
       hasShippingAddress,
       buyerDeliveryStored,
+      countryId: (order as any)?.origin_country_id ?? null,
     });
 
     await this.email.sendSellerCompletionReceipt({
@@ -1320,6 +1354,7 @@ export class OrderClearingService {
               const sellerDeliveryFee = await this.computeSellerDeliveryFee({
                 hasShippingAddress,
                 buyerDeliveryStored,
+                countryId: (order as any)?.origin_country_id ?? null,
               });
 
               await this.email.sendSellerCompletionReceipt({

@@ -5,6 +5,9 @@ import { DatabaseModule } from '../database/database.module';
 import { MessagesModule } from '../messages/messages.module';
 import { WhatsappModule } from '../whatsapp/whatsapp.module';
 import { EmailModule } from '../email/email.module';
+import { StripeModule } from '../stripe/stripe.module';
+import { PaymentMethodsModule } from '../payment-methods/payment-methods.module';
+import { RefundsModule } from '../refunds/refunds.module';
 
 @Module({
   imports: [
@@ -12,6 +15,9 @@ import { EmailModule } from '../email/email.module';
     MessagesModule,
     forwardRef(() => WhatsappModule),
     EmailModule,
+    StripeModule,
+    PaymentMethodsModule,
+    RefundsModule,
   ],
   controllers: [BuyersController],
   providers: [BuyersService],

@@ -907,6 +907,126 @@ export class EmailService {
     );
   }
 
+  /**
+   * Sends a refund confirmation to the buyer with the credit-note PDF attached.
+   * Strict-mode delivery: throws on failure so admin-triggered refund flows surface errors.
+   */
+  async sendRefundConfirmationEmail(params: {
+    to: string;
+    buyerName: string;
+    orderNumber: string;
+    invoiceNumber: string;
+    refundNumber: string;
+    creditNoteNumber: string;
+    amountCents: number;
+    currency: string;
+    refundMethod: 'card' | 'buyer_credit';
+    cardBrand?: string | null;
+    cardLast4?: string | null;
+    creditNotePdf?: Buffer;
+    creditNotePdfFilename?: string;
+  }): Promise<void> {
+    const safeText = (value: unknown): string => {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    };
+
+    const formatMoney = (cents: number) =>
+      `${params.currency.toUpperCase()} ${(cents / 100).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })}`;
+
+    const methodCopy =
+      params.refundMethod === 'card'
+        ? `Refunded to your card${
+            params.cardBrand && params.cardLast4
+              ? ` (${params.cardBrand.toUpperCase()} ending in ${params.cardLast4})`
+              : ''
+          }`
+        : 'Issued as Procur credit on your account';
+    const clearanceCopy =
+      params.refundMethod === 'card'
+        ? 'Card refunds typically appear on your statement within 5-10 business days.'
+        : 'The credit balance is available immediately and will apply to your next eligible Procur order.';
+
+    const innerHtml = `
+        <h2>Hi ${safeText(params.buyerName)},</h2>
+        <p>We've issued a refund against your Procur order ${safeText(params.orderNumber)}.</p>
+        <table cellpadding="0" cellspacing="0" border="0" width="100%" style="margin: 16px 0; border-collapse: collapse;">
+          <tr>
+            <td style="padding: 6px 0; color: #6C715D;">Order</td>
+            <td style="padding: 6px 0; text-align: right;">${safeText(params.orderNumber)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6C715D;">Original invoice</td>
+            <td style="padding: 6px 0; text-align: right;">${safeText(params.invoiceNumber)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6C715D;">Refund reference</td>
+            <td style="padding: 6px 0; text-align: right;">${safeText(params.refundNumber)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6C715D;">Credit note</td>
+            <td style="padding: 6px 0; text-align: right;">${safeText(params.creditNoteNumber)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 6px 0; color: #6C715D;">Method</td>
+            <td style="padding: 6px 0; text-align: right;">${safeText(methodCopy)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 12px 0; border-top: 1px solid #E5E7EB; font-weight: 600;">Amount refunded</td>
+            <td style="padding: 12px 0; border-top: 1px solid #E5E7EB; text-align: right; font-weight: 600; color: #B14315;">- ${safeText(formatMoney(params.amountCents))}</td>
+          </tr>
+        </table>
+        <p>${safeText(clearanceCopy)}</p>
+        <p class="muted">A formal credit note (PDF) is attached for your records.</p>
+        <p class="muted">Questions? Reply to this email and our team will help.</p>
+    `;
+
+    const textBody = [
+      `Refund issued for order ${params.orderNumber}`,
+      ``,
+      `Order: ${params.orderNumber}`,
+      `Original invoice: ${params.invoiceNumber}`,
+      `Refund reference: ${params.refundNumber}`,
+      `Credit note: ${params.creditNoteNumber}`,
+      `Method: ${methodCopy}`,
+      `Amount refunded: -${formatMoney(params.amountCents)}`,
+      ``,
+      clearanceCopy,
+    ].join('\n');
+
+    const subject = `Refund issued for your Procur order ${params.orderNumber}`;
+    const htmlBody = this.buildBrandedBody('Refund issued', innerHtml);
+
+    const attachments =
+      params.creditNotePdf && params.creditNotePdfFilename
+        ? [
+            {
+              Name: params.creditNotePdfFilename,
+              Content: params.creditNotePdf.toString('base64'),
+              ContentType: 'application/pdf',
+            },
+          ]
+        : undefined;
+
+    await this.sendPostmarkEmail({
+      From: this.fromEmail,
+      To: params.to,
+      Subject: subject,
+      HtmlBody: htmlBody,
+      TextBody: textBody,
+      MessageStream: 'outbound',
+      Attachments: attachments,
+    } as postmark.Models.Message);
+  }
+
   async sendPayoutReceiptEmail(params: {
     email: string;
     sellerName: string;

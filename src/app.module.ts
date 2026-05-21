@@ -37,6 +37,11 @@ import { CountryPulseModule } from './country-pulse/country-pulse.module';
 import { ShippingModule } from './shipping/shipping.module';
 import { CurrencyModule } from './currency/currency.module';
 import { TradeModule } from './trade/trade.module';
+import { StripeModule } from './stripe/stripe.module';
+import { StripeWebhookModule } from './stripe/stripe-webhook.module';
+import { PaymentMethodsModule } from './payment-methods/payment-methods.module';
+import { RefundsModule } from './refunds/refunds.module';
+import { DisputesModule } from './disputes/disputes.module';
 import { CountryMiddleware } from './common/middleware/country.middleware';
 import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.filter';
 
@@ -80,6 +85,11 @@ import { SentryAllExceptionsFilter } from './common/filters/sentry-exception.fil
     ShippingModule,
     CurrencyModule,
     TradeModule,
+    StripeModule,
+    StripeWebhookModule,
+    PaymentMethodsModule,
+    RefundsModule,
+    DisputesModule,
   ],
   controllers: [AppController, HealthController],
   providers: [

@@ -79,6 +79,8 @@ import {
   FarmVisitRequestDto,
   SellerCatalogProductDto,
   BuyerReviewDto,
+  UpdateSellerPickupAddressDto,
+  SellerPickupAddressResponse,
 } from './dto';
 import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 
@@ -1390,6 +1392,33 @@ export class SellersController {
     @Param('countryId') countryId: string,
   ) {
     await this.sellersService.removeProductAvailability(productId, user.organizationId!, countryId);
+    return { success: true };
+  }
+
+  // ==================== PICKUP ADDRESS ====================
+
+  @Get('pickup-address')
+  @ApiOperation({
+    summary: 'Read this seller org\'s pickup address (or {enabled:false} if not offering pickup).',
+  })
+  @ApiResponse({ status: 200, type: SellerPickupAddressResponse })
+  async getPickupAddress(
+    @CurrentUser() user: UserContext,
+  ): Promise<SellerPickupAddressResponse> {
+    return this.sellersService.getPickupAddress(user.organizationId!);
+  }
+
+  @Patch('pickup-address')
+  @ApiOperation({
+    summary:
+      'Update this seller org\'s pickup address. Send { disabled: true } to stop offering pickup.',
+  })
+  @ApiResponse({ status: 200 })
+  async updatePickupAddress(
+    @CurrentUser() user: UserContext,
+    @Body() dto: UpdateSellerPickupAddressDto,
+  ): Promise<{ success: boolean }> {
+    await this.sellersService.updatePickupAddress(user.organizationId!, dto);
     return { success: true };
   }
 }

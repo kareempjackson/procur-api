@@ -46,6 +46,7 @@ export enum SystemPermission {
   VIEW_FINANCIAL_REPORTS = 'view_financial_reports',
   APPROVE_INVOICES = 'approve_invoices',
   MANAGE_BUDGETS = 'manage_budgets',
+  PROCESS_REFUNDS = 'process_refunds',
 
   // Government-specific permissions
   MANAGE_GOVERNMENT_TABLES = 'manage_government_tables',

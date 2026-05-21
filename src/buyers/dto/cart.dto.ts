@@ -96,6 +96,23 @@ export class CartSellerGroupDto {
 
   @ApiProperty({ description: 'Total for this seller including shipping' })
   total: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Seller pickup location, populated when the seller offers pickup. Drives whether the Delivery/Pickup picker is shown at checkout.',
+  })
+  pickup_address?: {
+    street_address?: string;
+    address_line2?: string;
+    city?: string;
+    state?: string;
+    postal_code?: string;
+    country?: string;
+    contact_name?: string;
+    contact_phone?: string;
+    instructions?: string;
+    hours?: string;
+  } | null;
 }
 
 export class CartResponseDto {

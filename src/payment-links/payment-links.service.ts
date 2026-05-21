@@ -33,10 +33,13 @@ export class PaymentLinksService {
   ) {}
 
   /**
-   * Load the current platform fee % and delivery flat fee from the shared config table.
-   * This is used to compute default fees for offline payment links.
+   * Load the current platform fee % and delivery flat fee from the shared
+   * config table. When `countryId` is provided, per-country overrides are
+   * merged over the global default.
    */
-  private async getPlatformFeesConfig(): Promise<{
+  private async getPlatformFeesConfig(
+    countryId?: string | null,
+  ): Promise<{
     platformFeePercent: number;
     deliveryFlatFee: number;
     buyerDeliveryShare: number;
@@ -45,7 +48,7 @@ export class PaymentLinksService {
   }> {
     const client = this.supabase.getClient();
 
-    const { data, error } = await client
+    const defaultPromise = client
       .from('platform_fees_config')
       .select(
         'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
@@ -53,22 +56,37 @@ export class PaymentLinksService {
       .limit(1)
       .maybeSingle();
 
-    if (error) {
-      this.logger.error(
-        'Failed to load platform fees configuration for payment links',
-        error,
-      );
-      // Fall back to defaults so seller flows still work even if config is misconfigured
-      return {
-        platformFeePercent: 5,
-        deliveryFlatFee: 20,
-        buyerDeliveryShare: 0,
-        sellerDeliveryShare: 0,
-        currency: 'XCD',
-      };
-    }
+    const overridePromise = countryId
+      ? client
+          .from('platform_fees_config_country_overrides')
+          .select(
+            'platform_fee_percent, delivery_flat_fee, buyer_delivery_share, seller_delivery_share, currency',
+          )
+          .eq('country_id', countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null } as any);
 
-    if (!data) {
+    // Look up the country's native currency so the resolved currency
+    // defaults to TTD/JMD/etc. rather than the global default's XCD.
+    const countryPromise = countryId
+      ? client
+          .from('countries')
+          .select('currency')
+          .eq('code', countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null } as any);
+
+    const [{ data, error }, { data: overrideData }, { data: countryData }] =
+      await Promise.all([defaultPromise, overridePromise, countryPromise]);
+
+    if (error || !data) {
+      if (error) {
+        this.logger.error(
+          'Failed to load platform fees configuration for payment links',
+          error,
+        );
+      }
+      // Fall back to defaults so seller flows still work even if config is misconfigured
       return {
         platformFeePercent: 5,
         deliveryFlatFee: 20,
@@ -85,14 +103,46 @@ export class PaymentLinksService {
       seller_delivery_share: number | null;
       currency: string | null;
     };
+    const ov = (overrideData ?? null) as {
+      platform_fee_percent: number | string | null;
+      delivery_flat_fee: number | string | null;
+      buyer_delivery_share: number | string | null;
+      seller_delivery_share: number | string | null;
+      currency: string | null;
+    } | null;
+    const countryCurrency =
+      (countryData as { currency?: string | null } | null)?.currency ?? null;
+
+    const pickNum = (
+      overrideVal: number | string | null | undefined,
+      defaultVal: number | string | null,
+    ): number => {
+      if (overrideVal != null) return Number(overrideVal) || 0;
+      if (defaultVal != null) return Number(defaultVal) || 0;
+      return 0;
+    };
 
     return {
-      platformFeePercent: Number(row.platform_fee_percent ?? 0) || 0,
-      deliveryFlatFee: Number(row.delivery_flat_fee ?? 0) || 0,
-      buyerDeliveryShare: Number(row.buyer_delivery_share ?? 0) || 0,
-      sellerDeliveryShare: Number(row.seller_delivery_share ?? 0) || 0,
-      currency: (row.currency as string | null) ?? 'XCD',
+      platformFeePercent: pickNum(ov?.platform_fee_percent, row.platform_fee_percent),
+      deliveryFlatFee: pickNum(ov?.delivery_flat_fee, row.delivery_flat_fee),
+      buyerDeliveryShare: pickNum(ov?.buyer_delivery_share, row.buyer_delivery_share),
+      sellerDeliveryShare: pickNum(ov?.seller_delivery_share, row.seller_delivery_share),
+      currency:
+        (ov?.currency as string | null) ??
+        countryCurrency ??
+        (row.currency as string | null) ??
+        'XCD',
     };
+  }
+
+  private async getOrgCountryId(orgId: string): Promise<string | null> {
+    const { data } = await this.supabase
+      .getClient()
+      .from('organizations')
+      .select('country_id')
+      .eq('id', orgId)
+      .maybeSingle();
+    return (data as { country_id?: string | null } | null)?.country_id ?? null;
   }
 
   /**
@@ -416,7 +466,8 @@ export class PaymentLinksService {
       .substr(2, 4)
       .toUpperCase()}`;
 
-    const feesConfig = await this.getPlatformFeesConfig();
+    const sellerCountryIdForCreate = await this.getOrgCountryId(input.sellerOrgId);
+    const feesConfig = await this.getPlatformFeesConfig(sellerCountryIdForCreate);
     const taxAmount = 0;
 
     // Delivery splits are now configurable. Use the configured buyer/seller
@@ -692,7 +743,8 @@ export class PaymentLinksService {
       'XCD'
     ).toUpperCase();
 
-    const feesConfig = await this.getPlatformFeesConfig();
+    const sellerCountryIdForReissue = await this.getOrgCountryId(input.sellerOrgId);
+    const feesConfig = await this.getPlatformFeesConfig(sellerCountryIdForReissue);
 
     // Delivery fee: keep the existing buyer-facing delivery amount if present,
     // otherwise use configured buyer/seller shares (no implicit 50/50 split).

@@ -4,6 +4,7 @@ import {
   IsOptional,
   IsUUID,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsObject,
   ValidateNested,
@@ -18,6 +19,12 @@ export enum PaymentMethod {
   BANK_TRANSFER = 'bank_transfer',
   CASH_ON_DELIVERY = 'cash_on_delivery',
   CHEQUE_ON_DELIVERY = 'cheque_on_delivery',
+  CREDIT_CARD = 'credit_card',
+}
+
+export enum FulfillmentMethod {
+  DELIVERY = 'delivery',
+  PICKUP = 'pickup',
 }
 
 export enum BuyerOrderStatus {
@@ -57,9 +64,13 @@ export class CreateOrderDto {
   @Type(() => OrderItemDto)
   items: OrderItemDto[];
 
-  @ApiProperty({ description: 'Shipping address ID' })
+  @ApiPropertyOptional({
+    description:
+      'Shipping address ID. Required when fulfillment_method is "delivery" (the default). Ignored when "pickup".',
+  })
+  @IsOptional()
   @IsUUID()
-  shipping_address_id: string;
+  shipping_address_id?: string;
 
   @ApiPropertyOptional({
     description: 'Billing address ID (defaults to shipping)',
@@ -93,6 +104,40 @@ export class CreateOrderDto {
   @IsOptional()
   @IsEnum(PaymentMethod)
   payment_method?: PaymentMethod;
+
+  @ApiPropertyOptional({
+    description:
+      'How the order should be fulfilled. delivery = ship to shipping_address (default). pickup = collect from the seller (single-seller carts only, card payment required).',
+    enum: FulfillmentMethod,
+    default: FulfillmentMethod.DELIVERY,
+  })
+  @IsOptional()
+  @IsEnum(FulfillmentMethod)
+  fulfillment_method?: FulfillmentMethod;
+
+  @ApiPropertyOptional({
+    description:
+      'Stripe PaymentMethod id (pm_...) when paying by credit_card. Required if payment_method is credit_card.',
+  })
+  @IsOptional()
+  @IsString()
+  stripe_payment_method_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Stripe PaymentIntent id (pi_...) for retrying after a 3DS challenge. Server reuses an already-confirmed intent rather than creating a new one.',
+  })
+  @IsOptional()
+  @IsString()
+  stripe_payment_intent_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Save the card to the buyer wallet for future orders. Ignored unless payment_method is credit_card.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  save_payment_method?: boolean;
 }
 
 export class BuyerOrderQueryDto {
@@ -298,6 +343,35 @@ export class BuyerOrderResponseDto {
     enum: PaymentMethod,
   })
   payment_method?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'How the order is fulfilled. delivery = courier to shipping_address (default). pickup = collected from the seller (shipping_address is null in that case).',
+    enum: FulfillmentMethod,
+    default: FulfillmentMethod.DELIVERY,
+  })
+  fulfillment_method?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Seller pickup location, populated only for pickup orders. Mirrors organizations.pickup_address.',
+  })
+  pickup_location?: {
+    seller_org_id: string;
+    seller_name: string;
+    address: {
+      street_address?: string;
+      address_line2?: string;
+      city?: string;
+      state?: string;
+      postal_code?: string;
+      country?: string;
+      contact_name?: string;
+      contact_phone?: string;
+      instructions?: string;
+      hours?: string;
+    };
+  } | null;
 
   @ApiProperty({ description: 'Order items' })
   @ValidateNested({ each: true })
