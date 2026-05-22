@@ -36,6 +36,12 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { SendService as WaSendService } from '../whatsapp/send/send.service';
 import { TemplateService as WaTemplateService } from '../whatsapp/templates/template.service';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
+import {
+  ListOrganizationsResponseDto,
+  OrganizationMembershipDto,
+  SwitchOrganizationDto,
+} from './dto/switch-organization.dto';
+import { OnboardBecomeRoleDto } from './dto/onboarding.dto';
 import { CaptchaService } from '../common/utils/captcha.service';
 import { UserRole } from '../common/enums/user-role.enum';
 import type { UserContext } from '../common/interfaces/jwt-payload.interface';
@@ -896,12 +902,21 @@ export class AuthService {
     let organizationRole: string | undefined;
     let accountType: AccountType | undefined = user.individual_account_type;
 
-    if (userWithOrg?.organization_users?.[0]) {
-      const orgUser = userWithOrg.organization_users[0];
-      organizationId = orgUser.organization_id;
-      organizationName = orgUser.organizations.name;
-      organizationRole = orgUser.organization_roles.name;
-      accountType = orgUser.organizations.account_type;
+    const memberships = userWithOrg?.organization_users || [];
+    // Prefer the org the user last switched into. Falls back to the first membership for
+    // legacy users (active_organization_id null) — that preserves single-org behavior.
+    const preferred =
+      (user.active_organization_id
+        ? memberships.find(
+            (m) => m.organization_id === user.active_organization_id,
+          )
+        : undefined) || memberships[0];
+
+    if (preferred) {
+      organizationId = preferred.organization_id;
+      organizationName = preferred.organizations.name;
+      organizationRole = preferred.organization_roles.name;
+      accountType = preferred.organizations.account_type;
     }
 
     return { organizationId, organizationName, organizationRole, accountType };
@@ -1152,5 +1167,212 @@ export class AuthService {
         organizationRole,
       },
     };
+  }
+
+  // ================================================================
+  // Multi-org / role-toggle methods (Airbnb-style "Switch to Selling")
+  // ================================================================
+
+  /**
+   * Return every org the user is a member of, marking which one is currently active.
+   * Used by the frontend to render the mode-switcher pill and decide whether to show
+   * "Switch to selling" (already a member of a seller org) vs "Start selling" (open the
+   * become-a-seller modal).
+   */
+  async listUserOrganizations(
+    userId: string,
+  ): Promise<ListOrganizationsResponseDto> {
+    const user = await this.supabaseService.findUserById(userId);
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const userWithOrg =
+      await this.supabaseService.getUserWithOrganization(userId);
+    const memberships = userWithOrg?.organization_users || [];
+
+    // Mirror extractOrganizationInfo: prefer active_organization_id, fall back to first.
+    const activeId =
+      (user.active_organization_id &&
+        memberships.find((m) => m.organization_id === user.active_organization_id)
+          ?.organization_id) ||
+      memberships[0]?.organization_id ||
+      null;
+
+    const organizations: OrganizationMembershipDto[] = memberships.map((m) => ({
+      id: m.organization_id,
+      name: m.organizations.name,
+      accountType: m.organizations.account_type,
+      role: m.organization_roles.name,
+      isActive: m.organization_id === activeId,
+    }));
+
+    return { organizations };
+  }
+
+  /**
+   * Switch the user's active organization. Validates that the user actually belongs to
+   * the target org (otherwise this would be a privilege-escalation vector), persists the
+   * choice on users.active_organization_id, and mints a fresh access+refresh token pair
+   * scoped to the new org. The old refresh token is *not* invalidated here — the client
+   * just replaces it. (Revoking is the caller's responsibility on signout.)
+   */
+  async switchOrganization(
+    userId: string,
+    dto: SwitchOrganizationDto,
+  ): Promise<AuthResponseDto> {
+    const targetOrgId = dto.organizationId;
+
+    const user = await this.supabaseService.findUserById(userId);
+    if (!user || !user.is_active) {
+      throw new UnauthorizedException('User not found or inactive');
+    }
+
+    const userWithOrg =
+      await this.supabaseService.getUserWithOrganization(userId);
+    const memberships = userWithOrg?.organization_users || [];
+    const target = memberships.find((m) => m.organization_id === targetOrgId);
+    if (!target) {
+      throw new UnauthorizedException(
+        'You are not a member of that organization',
+      );
+    }
+
+    // Persist the switch so subsequent /auth/refresh and re-logins land in the same mode.
+    await this.supabaseService.updateUser(userId, {
+      active_organization_id: targetOrgId,
+    });
+
+    // Re-fetch user so the JWT reflects active_organization_id we just wrote.
+    const updatedUser = (await this.supabaseService.findUserById(userId)) || user;
+
+    const { organizationId, organizationName, organizationRole, accountType } =
+      this.extractOrganizationInfo(updatedUser, userWithOrg);
+
+    const payload: JwtPayload = {
+      sub: updatedUser.id,
+      email: updatedUser.email,
+      role: updatedUser.role,
+      accountType,
+      organizationId,
+      organizationRole,
+      emailVerified: updatedUser.email_verified,
+    };
+
+    const accessToken = this.jwtService.sign(payload);
+    const expiresIn = this.getTokenExpirationSeconds();
+    const refreshToken = await this.generateRefreshToken(updatedUser.id);
+
+    this.logger.log(
+      `User ${updatedUser.email} switched active org to ${targetOrgId}`,
+    );
+
+    return {
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn,
+      refreshToken,
+      user: {
+        id: updatedUser.id,
+        email: updatedUser.email,
+        fullname: updatedUser.fullname,
+        role: updatedUser.role,
+        accountType,
+        emailVerified: updatedUser.email_verified,
+        organizationId,
+        organizationName,
+        organizationRole,
+      },
+    };
+  }
+
+  /**
+   * Create a new organization (`accountType`) for the authenticated user and switch into it.
+   * This is the "Become a seller" / "Start buying" path for users who already have one
+   * role. Idempotent: if the user already has an org of the requested type, we just switch
+   * to that existing org instead of creating a duplicate.
+   */
+  async becomeRole(
+    userId: string,
+    desiredType: AccountType,
+    dto: OnboardBecomeRoleDto,
+  ): Promise<AuthResponseDto> {
+    if (
+      desiredType !== AccountType.BUYER &&
+      desiredType !== AccountType.SELLER
+    ) {
+      throw new BadRequestException(
+        'Only buyer and seller roles can be added via become-role',
+      );
+    }
+
+    const user = await this.supabaseService.findUserById(userId);
+    if (!user || !user.is_active) {
+      throw new UnauthorizedException('User not found or inactive');
+    }
+
+    // If they already have an org of this type, just switch — never create a duplicate.
+    const existing = await this.supabaseService.getUserWithOrganization(userId);
+    const existingOfType = (existing?.organization_users || []).find(
+      (m) => m.organizations.account_type === desiredType,
+    );
+    if (existingOfType) {
+      return this.switchOrganization(userId, {
+        organizationId: existingOfType.organization_id,
+      });
+    }
+
+    // Resolve country: explicit > user's home country > raw fallback.
+    let countryName: string | undefined;
+    let countryId = dto.countryId || user.default_country_id || user.country;
+    if (countryId) {
+      const { data: countryRecord } = await this.supabaseService
+        .getClient()
+        .from('countries')
+        .select('code, name')
+        .eq('code', countryId)
+        .maybeSingle();
+      if (countryRecord) {
+        countryId = countryRecord.code;
+        countryName = countryRecord.name;
+      } else {
+        countryName = user.country;
+      }
+    }
+
+    const organization = await this.supabaseService.createOrganization({
+      name: dto.businessName,
+      business_name: dto.businessName,
+      account_type: desiredType,
+      business_type: (dto.businessType || 'general') as any,
+      country: countryName,
+      country_id: countryId,
+    });
+
+    await this.supabaseService.ensureCreatorIsOrganizationAdmin(
+      userId,
+      organization.id,
+    );
+
+    this.logger.log(
+      `User ${user.email} added ${desiredType} role via org ${organization.id}`,
+    );
+
+    await this.eventsService.emit({
+      type: EventTypes.Auth.SIGNUP_COMPLETED,
+      aggregateType: AggregateTypes.USER,
+      aggregateId: userId,
+      actorId: userId,
+      organizationId: organization.id,
+      payload: {
+        email: user.email,
+        accountType: desiredType,
+        businessType: dto.businessType,
+        flow: 'become-role',
+      },
+    });
+
+    // Switch into the newly created org so the response carries the right context.
+    return this.switchOrganization(userId, {
+      organizationId: organization.id,
+    });
   }
 }

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
@@ -37,6 +38,12 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { AcceptInvitationDto } from './dto/accept-invitation.dto';
 import { Roles } from './decorators/roles.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
+import { AccountType } from '../common/enums/account-type.enum';
+import {
+  ListOrganizationsResponseDto,
+  SwitchOrganizationDto,
+} from './dto/switch-organization.dto';
+import { OnboardBecomeRoleDto } from './dto/onboarding.dto';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -340,5 +347,74 @@ export class AuthController {
     @Body(ValidationPipe) dto: ChangePasswordDto,
   ): Promise<{ message: string }> {
     return this.authService.changePassword(user, dto);
+  }
+
+  // ================================================================
+  // Multi-org / role-toggle (Airbnb-style "Switch to Selling")
+  // ================================================================
+
+  @Get('organizations')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'List the authenticated user\'s organization memberships',
+    description:
+      'Returns every org the user belongs to with its account type (buyer/seller/government). The frontend uses this to render the role-switcher pill and decide whether the user can switch directly into an existing role or needs to go through the become-a-seller / become-a-buyer onboarding flow.',
+  })
+  @ApiResponse({ status: 200, type: ListOrganizationsResponseDto })
+  async listOrganizations(
+    @CurrentUser() user: UserContext,
+  ): Promise<ListOrganizationsResponseDto> {
+    return this.authService.listUserOrganizations(user.id);
+  }
+
+  @Post('switch-organization')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Switch the active organization for the current session',
+    description:
+      'Persist a new active org on the user and re-mint access + refresh tokens scoped to it. The frontend should replace its stored tokens with the response before navigating, since downstream APIs depend on the JWT\'s organizationId / accountType claims.',
+  })
+  @ApiBody({ type: SwitchOrganizationDto })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiUnauthorizedResponse({
+    description: 'User is not a member of the requested organization',
+  })
+  async switchOrganization(
+    @CurrentUser() user: UserContext,
+    @Body(ValidationPipe) dto: SwitchOrganizationDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.switchOrganization(user.id, dto);
+  }
+
+  @Post('onboarding/become-seller')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Add a seller role to the current user (Airbnb-style "Start selling")',
+    description:
+      'Creates a seller organization for an existing buyer user and switches into it. Idempotent: if the user already has a seller org, switches to that one without creating a duplicate. Returns new tokens scoped to the seller context.',
+  })
+  @ApiBody({ type: OnboardBecomeRoleDto })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  async becomeSeller(
+    @CurrentUser() user: UserContext,
+    @Body(ValidationPipe) dto: OnboardBecomeRoleDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.becomeRole(user.id, AccountType.SELLER, dto);
+  }
+
+  @Post('onboarding/become-buyer')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Add a buyer role to the current user',
+    description:
+      'Creates a buyer organization for an existing seller user and switches into it. Same idempotency and token-rotation semantics as become-seller.',
+  })
+  @ApiBody({ type: OnboardBecomeRoleDto })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  async becomeBuyer(
+    @CurrentUser() user: UserContext,
+    @Body(ValidationPipe) dto: OnboardBecomeRoleDto,
+  ): Promise<AuthResponseDto> {
+    return this.authService.becomeRole(user.id, AccountType.BUYER, dto);
   }
 }

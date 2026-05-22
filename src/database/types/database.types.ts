@@ -20,6 +20,7 @@ export interface DatabaseUser {
   default_country_id?: string;
   role: UserRole;
   individual_account_type?: AccountType;
+  active_organization_id?: string | null;
   email_verified: boolean;
   email_verification_token?: string;
   email_verification_expires?: string;
@@ -111,6 +112,7 @@ export interface UpdateUserData {
   email_verification_expires?: string | null;
   email_verified?: boolean;
   last_login?: string;
+  active_organization_id?: string | null;
 }
 
 export interface CreateOrganizationData {

@@ -30,6 +30,7 @@ import {
   UpdateAdminUserDto,
 } from './dto/admin-user.dto';
 import { UserRole } from '../common/enums/user-role.enum';
+import { convertToUsd } from '../common/utils/fx';
 import {
   AdminProductResponseDto,
   AdminProductQueryDto,
@@ -141,19 +142,40 @@ export interface AdminOrderSummary {
   inspectionStatus?: string | null;
 }
 
+/**
+ * Per-source-country rollup used by the admin dashboard. Grouping by country
+ * (not by currency) is important because currencies like XCD are shared across
+ * the entire Eastern Caribbean — Grenada and Anguilla both use XCD and would
+ * otherwise collapse into one ambiguous row. Each row keeps native-currency totals.
+ */
+export interface AdminDashboardCurrencyBreakdown {
+  /** ISO/internal country code (e.g. 'gda', 'col'). Null only if we can't trace it. */
+  countryCode: string | null;
+  countryName: string | null;
+  currency: string;
+  totalVolume: number;
+  totalPlatformFees: number;
+  totalShippingFees: number;
+  orderCount: number;
+}
+
 export interface AdminDashboardSummary {
   totalBuyers: number;
   totalSellers: number;
   completedOrders: number;
   currentOrders: number;
+  /** Headline totals — always normalized to USD using common/utils/fx rates. */
   totalVolume: number;
   totalPlatformFees: number;
   totalShippingFees: number;
   currency: string;
+  /** Per-currency breakdown in each currency's native units (no conversion). */
+  byCurrency: AdminDashboardCurrencyBreakdown[];
 }
 
 export interface AdminDashboardCharts {
   transactionsOverTime: { date: string; count: number }[];
+  /** Revenue points are USD-normalized so the line chart is meaningful across currencies. */
   revenueOverTime: { date: string; amount: number }[];
   popularItems: { name: string; quantity: number; totalAmount: number }[];
   currency: string;
@@ -1146,20 +1168,38 @@ export class AdminService {
       );
     }
 
-    // Orders stats (includes online + offline flows)
+    // Orders stats (includes online + offline flows). We pull `currency` and
+    // `origin_country_id` so we can (a) FX-normalize totals into USD and (b) emit
+    // a per-source-country breakdown. Falling back to dest_country_id if origin
+    // is missing (older offline orders); falling back further to seller org's
+    // country via the embedded `seller_org` relation if both order columns are null.
     const { data: orderStatsRaw, error: ordersError } = await client
       .from('orders')
       .select(
-        'status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount',
+        `status, payment_status, total_amount, subtotal, shipping_amount, tax_amount, discount_amount, currency, origin_country_id, dest_country_id, seller_org_id, seller_org:organizations!seller_org_id(country_id)`,
       );
 
     const orderStats = ordersError || !orderStatsRaw ? [] : orderStatsRaw;
 
     let completedOrders = 0;
     let currentOrders = 0;
-    let totalVolume = 0;
-    let derivedPlatformFees = 0;
-    let totalShippingFees = 0;
+    let totalVolumeUsd = 0;
+    let totalPlatformFeesUsd = 0;
+    let totalShippingFeesUsd = 0;
+
+    // Per-source-country rollup. We group by country (not currency) because XCD is
+    // shared across the Eastern Caribbean — without this, Grenada and Anguilla orders
+    // would collapse into one row labeled with whichever country happened to be first
+    // in the countries table.
+    type CountryBucket = {
+      countryCode: string | null;
+      currency: string;
+      totalVolume: number;
+      totalPlatformFees: number;
+      totalShippingFees: number;
+      orderCount: number;
+    };
+    const byCountry = new Map<string, CountryBucket>();
 
     (orderStats || []).forEach((o: any) => {
       const status = (o.status as string) ?? '';
@@ -1169,6 +1209,13 @@ export class AdminService {
       const shipping = Number(o.shipping_amount ?? 0);
       const tax = Number(o.tax_amount ?? 0);
       const discount = Number(o.discount_amount ?? 0);
+      const currency = ((o.currency as string) || 'USD').toUpperCase();
+      // Source-country resolution: prefer the order's explicit origin, then the order's
+      // destination (covers some offline flows), then the seller org's country.
+      const countryCode: string | null =
+        (o.origin_country_id as string | null) ||
+        (o.dest_country_id as string | null) ||
+        ((o.seller_org?.country_id as string | undefined) ?? null);
 
       if (
         (status === 'delivered' || status === 'completed') &&
@@ -1216,23 +1263,76 @@ export class AdminService {
           shippingContribution = shipping;
         }
 
-        totalVolume += volumeContribution;
-        derivedPlatformFees += feeContribution;
-        totalShippingFees += shippingContribution;
+        // USD-normalized headline totals.
+        totalVolumeUsd += convertToUsd(volumeContribution, currency);
+        totalPlatformFeesUsd += convertToUsd(feeContribution, currency);
+        totalShippingFeesUsd += convertToUsd(shippingContribution, currency);
+
+        // Native-unit per-country bucket for the breakdown card. The bucket key
+        // combines country + currency so an unusual case like a Grenada seller billing
+        // in USD still gets a sensible row instead of being merged with another.
+        const bucketKey = `${countryCode ?? 'unknown'}::${currency}`;
+        const bucket = byCountry.get(bucketKey) || {
+          countryCode,
+          currency,
+          totalVolume: 0,
+          totalPlatformFees: 0,
+          totalShippingFees: 0,
+          orderCount: 0,
+        };
+        bucket.totalVolume += volumeContribution;
+        bucket.totalPlatformFees += feeContribution;
+        bucket.totalShippingFees += shippingContribution;
+        bucket.orderCount += 1;
+        byCountry.set(bucketKey, bucket);
       }
     });
 
-    const totalPlatformFees = derivedPlatformFees;
+    // Resolve country names by code (deterministic — no more first-match ambiguity).
+    const codesNeedingName = Array.from(
+      new Set(
+        Array.from(byCountry.values())
+          .map((b) => b.countryCode)
+          .filter((c): c is string => Boolean(c)),
+      ),
+    );
+    const countryNameByCode: Record<string, string> = {};
+    if (codesNeedingName.length > 0) {
+      const { data: countryRows } = await client
+        .from('countries')
+        .select('code, name')
+        .in('code', codesNeedingName);
+      for (const row of countryRows || []) {
+        countryNameByCode[(row as any).code as string] = (row as any).name as string;
+      }
+    }
+
+    const byCurrencyArr: AdminDashboardCurrencyBreakdown[] = Array.from(
+      byCountry.values(),
+    )
+      .map((b) => ({
+        countryCode: b.countryCode,
+        countryName: b.countryCode
+          ? countryNameByCode[b.countryCode] ?? null
+          : null,
+        currency: b.currency,
+        totalVolume: b.totalVolume,
+        totalPlatformFees: b.totalPlatformFees,
+        totalShippingFees: b.totalShippingFees,
+        orderCount: b.orderCount,
+      }))
+      .sort((a, b) => b.totalVolume - a.totalVolume);
 
     return {
       totalBuyers: buyersCount || 0,
       totalSellers: sellersCount || 0,
       completedOrders,
       currentOrders,
-      totalVolume,
-      totalPlatformFees,
-      totalShippingFees,
-      currency: 'XCD',
+      totalVolume: totalVolumeUsd,
+      totalPlatformFees: totalPlatformFeesUsd,
+      totalShippingFees: totalShippingFeesUsd,
+      currency: 'USD',
+      byCurrency: byCurrencyArr,
     };
   }
 
@@ -1275,9 +1375,13 @@ export class AdminService {
       // Count all transactions for the volume chart
       current.count += 1;
 
-      // Only completed sales contribute to revenue
+      // Only completed sales contribute to revenue — and we normalize to USD so the
+      // line chart aggregates across currencies meaningfully.
       if (status === 'completed' && type === 'sale') {
-        current.amount += Number(t.amount ?? 0);
+        current.amount += convertToUsd(
+          Number(t.amount ?? 0),
+          (t.currency as string | null) || undefined,
+        );
       }
 
       current.currency =
@@ -1297,14 +1401,15 @@ export class AdminService {
       amount: txByDate.get(date)!.amount,
     }));
 
-    const currency =
-      (transactions?.[0]?.currency as string | undefined)?.toUpperCase() ||
-      'XCD';
+    // Reporting currency for the charts is always USD now — the per-currency breakdown
+    // lives on the summary endpoint where it can be rendered as a separate card.
+    const currency = 'USD';
 
-    // Popular items from order_items
+    // Popular items from order_items — join to orders so we can FX-normalize each line's
+    // total to USD. Without the join we'd be summing pesos and dollars as plain numbers.
     const { data: items, error: itemsError } = await client
       .from('order_items')
-      .select('product_name, quantity, total_price, created_at')
+      .select('product_name, quantity, total_price, created_at, orders!inner(currency)')
       .gte('created_at', sinceIso);
 
     if (itemsError) {
@@ -1321,8 +1426,12 @@ export class AdminService {
     (items || []).forEach((it: any) => {
       const name = (it.product_name as string) || 'Unknown item';
       const current = byProduct.get(name) ?? { quantity: 0, totalAmount: 0 };
+      const itemCurrency = (it.orders?.currency as string | null) || 'USD';
       current.quantity += Number(it.quantity ?? 0);
-      current.totalAmount += Number(it.total_price ?? 0);
+      current.totalAmount += convertToUsd(
+        Number(it.total_price ?? 0),
+        itemCurrency,
+      );
       byProduct.set(name, current);
     });
 
