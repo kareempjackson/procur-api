@@ -1439,6 +1439,67 @@ export class BuyersService {
     return (data as { country_id?: string | null } | null)?.country_id ?? null;
   }
 
+  /**
+   * Mark every pending transaction tied to the given orders as `cancelled`.
+   *
+   * - Touches only `status='pending'` rows. Already-completed transactions
+   *   represent real money movements; their reversal (if needed) is the
+   *   refund flow's job, not ours.
+   * - Cascading the cancel to the `transactions` row keeps the admin
+   *   finance views accurate and prevents the seller balance from showing
+   *   in-flight payouts that will never arrive.
+   */
+  private async markPendingTransactionsCancelled(
+    orderIds: string[],
+    reason: string,
+    cancelledAtIso: string,
+  ): Promise<void> {
+    if (orderIds.length === 0) return;
+    const client = this.supabase.getClient();
+
+    const { data: pendingTxs, error: fetchErr } = await client
+      .from('transactions')
+      .select('id, metadata')
+      .in('order_id', orderIds)
+      .eq('status', 'pending');
+
+    if (fetchErr) {
+      this.logger.warn(
+        `Failed to load pending transactions for cancellation: ${fetchErr.message}`,
+      );
+      return;
+    }
+    if (!pendingTxs || pendingTxs.length === 0) return;
+
+    // Update in a tight loop so we can preserve each row's metadata.
+    // Volume is bounded by orderIds.length × 2 (sale + payout legs) so this
+    // is cheap; no need to batch into a single statement.
+    for (const tx of pendingTxs as Array<{
+      id: string;
+      metadata: Record<string, unknown> | null;
+    }>) {
+      const nextMetadata = {
+        ...(tx.metadata || {}),
+        phase: 'cancelled',
+        cancelled_reason: reason,
+        cancelled_at: cancelledAtIso,
+      };
+      const { error: updateErr } = await client
+        .from('transactions')
+        .update({
+          status: 'cancelled',
+          metadata: nextMetadata,
+          updated_at: cancelledAtIso,
+        })
+        .eq('id', tx.id);
+      if (updateErr) {
+        this.logger.warn(
+          `Failed to cancel transaction ${tx.id}: ${updateErr.message}`,
+        );
+      }
+    }
+  }
+
   async getCart(
     buyerOrgId: string,
     buyerUserId: string,
@@ -5582,6 +5643,11 @@ Manage this order: ${link}`;
     }
 
     const reason = cancelDto?.reason || 'Cancelled by buyer';
+    const cancelledAtIso = new Date().toISOString();
+
+    // Collect every order_id touched by this cancel (parent + children) so we
+    // can cascade transaction cancellation to all of them.
+    const cancelledOrderIds: string[] = [orderId];
 
     // If this is a parent aggregate order, also cancel all its child orders
     const { data: children } = await this.supabase
@@ -5595,8 +5661,10 @@ Manage this order: ${link}`;
         await this.supabase
           .getClient()
           .from('orders')
-          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .update({ status: 'cancelled', cancelled_at: cancelledAtIso })
           .eq('id', child.id);
+
+        cancelledOrderIds.push(child.id);
 
         await this.supabase.getClient().from('order_timeline').insert({
           order_id: child.id,
@@ -5606,6 +5674,17 @@ Manage this order: ${link}`;
         });
       }
     }
+
+    // Void any in-flight transactions tied to these orders so they aren't
+    // shown as still-pending money movements. We do NOT touch transactions
+    // already in a settled state ('completed', 'failed', 'cancelled',
+    // 'disputed') — those represent real movements and any reversal is
+    // handled by the refund flow below.
+    await this.markPendingTransactionsCancelled(
+      cancelledOrderIds,
+      reason,
+      cancelledAtIso,
+    );
 
     // Create timeline entry
     await this.supabase.getClient().from('order_timeline').insert({
