@@ -171,6 +171,21 @@ export class CartResponseDto {
 
   @ApiProperty({ description: 'Last updated timestamp' })
   updated_at: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Eligibility for the seller-self-delivery option at checkout. `available=true` means the buyer can pick "seller delivers it"; `reason` explains why not when false. Only set for single-seller carts where the seller has opted in.',
+  })
+  seller_delivery_option?: {
+    available: boolean;
+    reason?:
+      | 'multi_seller'
+      | 'cross_country'
+      | 'out_of_zone'
+      | 'seller_disabled';
+    localities?: string[];
+    notes?: string | null;
+  };
 }
 
 export class CartCalculationDto {

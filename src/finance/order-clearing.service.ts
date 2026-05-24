@@ -22,8 +22,14 @@ export class OrderClearingService {
     // per-country override of the delivery fields is merged over the
     // global default before computing the seller's share.
     countryId?: string | null;
+    // The order's fulfillment method. For 'seller_delivery' the platform
+    // didn't pay a courier — the seller did the driving — so no fee is
+    // deducted from their payout. See computeSellerSelfDeliveryCredit for
+    // the offsetting credit.
+    fulfillmentMethod?: string | null;
   }): Promise<number> {
     if (!input.hasShippingAddress) return 0;
+    if (input.fulfillmentMethod === 'seller_delivery') return 0;
 
     const client = this.supabase.getClient();
     const defaultPromise = client
@@ -89,6 +95,76 @@ export class OrderClearingService {
 
     const sellerShare = Math.max(0, fullDeliveryFee - buyerShare);
     return Number(sellerShare.toFixed(2));
+  }
+
+  /**
+   * For orders with fulfillment_method='seller_delivery', compute the amount
+   * to *credit* the seller at clearing time (added to their payout). Returns
+   * 0 for any other fulfillment method.
+   *
+   * Fee model:
+   *   buyer pays         = buyer_delivery_share          (unchanged)
+   *   seller receives    = seller_delivery_share         (no courier was paid)
+   *                      + buyer_delivery_share / 2      (half of buyer's payment)
+   *   platform retains   = buyer_delivery_share / 2      (the other half)
+   *
+   * Compared with platform delivery (where the seller's payout has
+   * seller_delivery_share deducted to cover courier costs), the seller
+   * gains seller_delivery_share + buyer_delivery_share/2 by doing the
+   * driving themselves.
+   */
+  private async computeSellerSelfDeliveryCredit(input: {
+    fulfillmentMethod?: string | null;
+    countryId?: string | null;
+  }): Promise<number> {
+    if (input.fulfillmentMethod !== 'seller_delivery') return 0;
+
+    const client = this.supabase.getClient();
+    const defaultPromise = client
+      .from('platform_fees_config')
+      .select('buyer_delivery_share, seller_delivery_share')
+      .limit(1)
+      .maybeSingle();
+    const overridePromise = input.countryId
+      ? client
+          .from('platform_fees_config_country_overrides')
+          .select('buyer_delivery_share, seller_delivery_share')
+          .eq('country_id', input.countryId)
+          .maybeSingle()
+      : Promise.resolve({ data: null } as any);
+
+    const [{ data }, { data: overrideData }] = await Promise.all([
+      defaultPromise,
+      overridePromise,
+    ]);
+    const row = (data || {}) as {
+      buyer_delivery_share?: number | string | null;
+      seller_delivery_share?: number | string | null;
+    };
+    const ov = (overrideData || null) as {
+      buyer_delivery_share?: number | string | null;
+      seller_delivery_share?: number | string | null;
+    } | null;
+
+    const pickNum = (
+      overrideVal: number | string | null | undefined,
+      defaultVal: number | string | null | undefined,
+    ): number => {
+      if (overrideVal != null) return Number(overrideVal) || 0;
+      if (defaultVal != null) return Number(defaultVal) || 0;
+      return 0;
+    };
+
+    const buyerShare = pickNum(
+      ov?.buyer_delivery_share,
+      row.buyer_delivery_share,
+    );
+    const sellerShare = pickNum(
+      ov?.seller_delivery_share,
+      row.seller_delivery_share,
+    );
+
+    return Number((sellerShare + buyerShare / 2).toFixed(2));
   }
 
   private mapPaymentLinkMetaToReceiptItems(meta: any): {
@@ -429,11 +505,20 @@ export class OrderClearingService {
           shippingAddr.street ||
           shippingAddr.street_address),
     );
+    const orderFulfillment =
+      ((order as any)?.fulfillment_method as string | null) ?? 'delivery';
     const sellerDeliveryFee = await this.computeSellerDeliveryFee({
       hasShippingAddress,
       buyerDeliveryStored,
       countryId: (order as any)?.origin_country_id ?? null,
+      fulfillmentMethod: orderFulfillment,
     });
+    const sellerSelfDeliveryCredit = await this.computeSellerSelfDeliveryCredit(
+      {
+        fulfillmentMethod: orderFulfillment,
+        countryId: (order as any)?.origin_country_id ?? null,
+      },
+    );
 
     await this.email.sendSellerCompletionReceipt({
       email,
@@ -450,11 +535,19 @@ export class OrderClearingService {
       paymentStatus,
       items,
       subtotal: subtotalAmount,
+      // For seller_delivery this is 0 (no deduction) and the credit
+      // appears as a positive add-back below.
       delivery: sellerDeliveryFee,
       platformFee: 0,
       taxAmount: 0,
       discount: 0,
-      totalPaid: Number((subtotalAmount - sellerDeliveryFee).toFixed(2)),
+      totalPaid: Number(
+        (
+          subtotalAmount -
+          sellerDeliveryFee +
+          sellerSelfDeliveryCredit
+        ).toFixed(2),
+      ),
       currency: String(order.currency || 'XCD'),
     });
 
@@ -576,6 +669,22 @@ export class OrderClearingService {
     // Only include bank_token if using bank transfer
     if (bankToken) {
       farmerPayoutMetadata.bank_token = bankToken;
+    }
+
+    // For seller-delivered orders, record the credit so admin/seller finance
+    // views can show the self-delivery line and so we keep a clear audit
+    // trail of which payouts include a self-delivery bonus.
+    const clearingFulfillment =
+      ((order as any)?.fulfillment_method as string | null) ?? 'delivery';
+    if (clearingFulfillment === 'seller_delivery') {
+      const selfDeliveryCredit = await this.computeSellerSelfDeliveryCredit({
+        fulfillmentMethod: clearingFulfillment,
+        countryId: (order as any)?.origin_country_id ?? null,
+      });
+      farmerPayoutMetadata.fulfillment_method = 'seller_delivery';
+      farmerPayoutMetadata.self_delivery_credit_cents = Math.round(
+        selfDeliveryCredit * 100,
+      );
     }
 
     // Format payout method for description
@@ -1351,11 +1460,20 @@ export class OrderClearingService {
                     shippingAddr.street ||
                     shippingAddr.street_address),
               );
+              const orderFulfillmentForPayout =
+                ((order as any)?.fulfillment_method as string | null) ??
+                'delivery';
               const sellerDeliveryFee = await this.computeSellerDeliveryFee({
                 hasShippingAddress,
                 buyerDeliveryStored,
                 countryId: (order as any)?.origin_country_id ?? null,
+                fulfillmentMethod: orderFulfillmentForPayout,
               });
+              const sellerSelfDeliveryCredit =
+                await this.computeSellerSelfDeliveryCredit({
+                  fulfillmentMethod: orderFulfillmentForPayout,
+                  countryId: (order as any)?.origin_country_id ?? null,
+                });
 
               await this.email.sendSellerCompletionReceipt({
                 email: sellerUser.email,
@@ -1375,12 +1493,18 @@ export class OrderClearingService {
                 paymentStatus: 'completed',
                 items,
                 subtotal: Number(order.subtotal ?? 0),
+                // For seller_delivery this is 0 (no deduction); the credit
+                // appears as a positive add-back in totalPaid.
                 delivery: sellerDeliveryFee,
                 platformFee: 0,
                 taxAmount: 0,
                 discount: 0,
                 totalPaid: Number(
-                  (Number(order.subtotal ?? 0) - sellerDeliveryFee).toFixed(2),
+                  (
+                    Number(order.subtotal ?? 0) -
+                    sellerDeliveryFee +
+                    sellerSelfDeliveryCredit
+                  ).toFixed(2),
                 ),
                 currency: String(amountCurrency),
               });

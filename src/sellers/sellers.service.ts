@@ -4221,4 +4221,119 @@ export class SellersService {
       .eq('id', sellerOrgId);
     if (error) throw new BadRequestException(error.message);
   }
+
+  // ==================== SELF-DELIVERY ====================
+
+  /**
+   * Read the seller org's self-delivery settings. enabled=false means the
+   * seller hasn't opted in; the buyer checkout should not surface the
+   * "seller delivers it" option.
+   */
+  async getSelfDeliverySettings(sellerOrgId: string): Promise<{
+    enabled: boolean;
+    localities: string[];
+    notes: string | null;
+  }> {
+    const { data, error } = await this.supabaseService
+      .getClient()
+      .from('organizations')
+      .select(
+        'offers_self_delivery, self_delivery_zone, self_delivery_notes',
+      )
+      .eq('id', sellerOrgId)
+      .single();
+    if (error) {
+      throw new BadRequestException(error.message);
+    }
+    const row = data as {
+      offers_self_delivery?: boolean | null;
+      self_delivery_zone?: { localities?: string[] } | null;
+      self_delivery_notes?: string | null;
+    } | null;
+    return {
+      enabled: !!row?.offers_self_delivery,
+      localities: Array.isArray(row?.self_delivery_zone?.localities)
+        ? (row!.self_delivery_zone!.localities as string[])
+        : [],
+      notes: row?.self_delivery_notes ?? null,
+    };
+  }
+
+  async updateSelfDeliverySettings(
+    sellerOrgId: string,
+    dto: {
+      enabled: boolean;
+      localities?: string[];
+      notes?: string | null;
+    },
+  ): Promise<void> {
+    const client = this.supabaseService.getClient();
+
+    // Normalise the locality list: trim, drop empties, dedupe case-insensitively
+    // while preserving the seller's original casing for display.
+    const seen = new Set<string>();
+    const normalisedLocalities: string[] = [];
+    for (const raw of dto.localities ?? []) {
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalisedLocalities.push(trimmed);
+    }
+
+    if (dto.enabled && normalisedLocalities.length === 0) {
+      throw new BadRequestException(
+        'At least one delivery locality is required when self-delivery is enabled.',
+      );
+    }
+
+    const update: Record<string, unknown> = {
+      offers_self_delivery: !!dto.enabled,
+      self_delivery_zone: dto.enabled
+        ? { localities: normalisedLocalities }
+        : null,
+    };
+    if (dto.notes !== undefined) {
+      const trimmedNotes =
+        typeof dto.notes === 'string' ? dto.notes.trim() : '';
+      update.self_delivery_notes = trimmedNotes.length > 0 ? trimmedNotes : null;
+    }
+
+    const { error } = await client
+      .from('organizations')
+      .update(update)
+      .eq('id', sellerOrgId);
+    if (error) throw new BadRequestException(error.message);
+  }
+
+  /**
+   * Case-insensitive match: returns true when the shipping address's city
+   * (or, as a fallback, state/parish) is in the seller's self-delivery zone.
+   * Returns false when the seller hasn't opted in.
+   *
+   * Callers should also verify the buyer's country matches the seller's
+   * country and that the cart is single-seller before relying on this.
+   */
+  async isAddressInSelfDeliveryZone(
+    sellerOrgId: string,
+    shippingAddress: {
+      city?: string | null;
+      state?: string | null;
+    } | null | undefined,
+  ): Promise<boolean> {
+    if (!shippingAddress) return false;
+    const settings = await this.getSelfDeliverySettings(sellerOrgId);
+    if (!settings.enabled || settings.localities.length === 0) return false;
+
+    const haystack = new Set(
+      settings.localities.map((l) => l.toLowerCase()),
+    );
+    const candidates = [shippingAddress.city, shippingAddress.state]
+      .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      .map((v) => v.trim().toLowerCase());
+
+    return candidates.some((c) => haystack.has(c));
+  }
 }

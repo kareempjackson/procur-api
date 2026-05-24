@@ -25,6 +25,7 @@ export enum PaymentMethod {
 export enum FulfillmentMethod {
   DELIVERY = 'delivery',
   PICKUP = 'pickup',
+  SELLER_DELIVERY = 'seller_delivery',
 }
 
 export enum BuyerOrderStatus {

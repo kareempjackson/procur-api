@@ -24,3 +24,5 @@ export * from './product-request.dto';
 export * from './insight.dto';
 // Pickup address
 export * from './pickup-address.dto';
+// Self-delivery
+export * from './self-delivery.dto';

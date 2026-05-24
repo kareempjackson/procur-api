@@ -81,6 +81,8 @@ import {
   BuyerReviewDto,
   UpdateSellerPickupAddressDto,
   SellerPickupAddressResponse,
+  UpdateSellerSelfDeliverySettingsDto,
+  SellerSelfDeliverySettingsResponse,
 } from './dto';
 import { SellerStatusUpdateRequestDto } from './dto/order-status-request.dto';
 
@@ -1419,6 +1421,37 @@ export class SellersController {
     @Body() dto: UpdateSellerPickupAddressDto,
   ): Promise<{ success: boolean }> {
     await this.sellersService.updatePickupAddress(user.organizationId!, dto);
+    return { success: true };
+  }
+
+  // ==================== SELF-DELIVERY SETTINGS ====================
+
+  @Get('self-delivery-settings')
+  @ApiOperation({
+    summary:
+      'Read this seller org\'s self-delivery settings. enabled=false means the seller has not opted in.',
+  })
+  @ApiResponse({ status: 200, type: SellerSelfDeliverySettingsResponse })
+  async getSelfDeliverySettings(
+    @CurrentUser() user: UserContext,
+  ): Promise<SellerSelfDeliverySettingsResponse> {
+    return this.sellersService.getSelfDeliverySettings(user.organizationId!);
+  }
+
+  @Patch('self-delivery-settings')
+  @ApiOperation({
+    summary:
+      'Update this seller org\'s self-delivery settings. Send { enabled: false } to opt out.',
+  })
+  @ApiResponse({ status: 200 })
+  async updateSelfDeliverySettings(
+    @CurrentUser() user: UserContext,
+    @Body() dto: UpdateSellerSelfDeliverySettingsDto,
+  ): Promise<{ success: boolean }> {
+    await this.sellersService.updateSelfDeliverySettings(
+      user.organizationId!,
+      dto,
+    );
     return { success: true };
   }
 }

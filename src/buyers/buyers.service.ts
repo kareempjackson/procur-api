@@ -1440,6 +1440,85 @@ export class BuyersService {
   }
 
   /**
+   * Resolve the seller-self-delivery option for a cart. The option is only
+   * available when the cart is single-seller, the seller has opted in, and
+   * both parties share a country. The city/parish-in-zone check is deferred
+   * to order creation — the buyer hasn't picked an address yet at this point.
+   */
+  private async resolveSellerDeliveryOption(
+    buyerOrgId: string,
+    sellerGroups: Array<{ seller_org_id: string }>,
+  ): Promise<
+    | {
+        available: boolean;
+        reason?:
+          | 'multi_seller'
+          | 'cross_country'
+          | 'out_of_zone'
+          | 'seller_disabled';
+        localities?: string[];
+        notes?: string | null;
+      }
+    | undefined
+  > {
+    if (!sellerGroups || sellerGroups.length === 0) return undefined;
+    if (sellerGroups.length > 1) {
+      return { available: false, reason: 'multi_seller' };
+    }
+    const sellerOrgId = sellerGroups[0].seller_org_id;
+    if (!sellerOrgId) return undefined;
+
+    // Query the seller's settings + country directly. Going through
+    // SellersService would create an injection cycle (sellers -> buyers).
+    const [{ data: sellerRow }, buyerCountryId] = await Promise.all([
+      this.supabase
+        .getClient()
+        .from('organizations')
+        .select(
+          'country_id, offers_self_delivery, self_delivery_zone, self_delivery_notes',
+        )
+        .eq('id', sellerOrgId)
+        .maybeSingle(),
+      this.getOrgCountryId(buyerOrgId),
+    ]);
+
+    const row = sellerRow as {
+      country_id?: string | null;
+      offers_self_delivery?: boolean | null;
+      self_delivery_zone?: { localities?: string[] } | null;
+      self_delivery_notes?: string | null;
+    } | null;
+
+    const localities = Array.isArray(row?.self_delivery_zone?.localities)
+      ? (row!.self_delivery_zone!.localities as string[])
+      : [];
+    const notes = row?.self_delivery_notes ?? null;
+    const enabled = !!row?.offers_self_delivery && localities.length > 0;
+
+    if (!enabled) {
+      return { available: false, reason: 'seller_disabled' };
+    }
+    const sellerCountryId = row?.country_id ?? null;
+    if (
+      buyerCountryId &&
+      sellerCountryId &&
+      buyerCountryId !== sellerCountryId
+    ) {
+      return {
+        available: false,
+        reason: 'cross_country',
+        localities,
+        notes,
+      };
+    }
+    return {
+      available: true,
+      localities,
+      notes,
+    };
+  }
+
+  /**
    * Mark every pending transaction tied to the given orders as `cancelled`.
    *
    * - Touches only `status='pending'` rows. Already-completed transactions
@@ -1657,6 +1736,15 @@ export class BuyersService {
       ((subtotal * platformFeePercent) / 100).toFixed(2),
     );
 
+    // Seller-self-delivery eligibility. We only surface the option for
+    // single-seller carts where the seller has opted in and is in the same
+    // country as the buyer; the city/parish check happens at order creation
+    // time when an address is actually chosen.
+    const sellerDeliveryOption = await this.resolveSellerDeliveryOption(
+      buyerOrgId,
+      Array.from(sellerGroups.values()),
+    );
+
     return {
       id: cartId,
       seller_groups: Array.from(sellerGroups.values()),
@@ -1667,6 +1755,7 @@ export class BuyersService {
       platform_fee_amount: platformFeeAmount,
       estimated_shipping: estimatedShipping,
       estimated_tax: estimatedTax,
+      seller_delivery_option: sellerDeliveryOption,
       total: subtotal + estimatedShipping + platformFeeAmount,
       currency: 'USD',
       min_order_per_seller: feesConfig.minOrderPerSeller,
@@ -2700,15 +2789,21 @@ export class BuyersService {
     const fulfillmentMethod =
       createDto.fulfillment_method ?? FulfillmentMethod.DELIVERY;
     const isPickup = fulfillmentMethod === FulfillmentMethod.PICKUP;
+    const isSellerDelivery =
+      fulfillmentMethod === FulfillmentMethod.SELLER_DELIVERY;
 
-    // Pickup is card-only: the buyer pre-pays so the seller doesn't bear collection risk at handoff.
-    if (isPickup && createDto.payment_method !== PaymentMethod.CREDIT_CARD) {
+    // Pickup AND seller-delivery are card-only: the buyer pre-pays so the
+    // seller doesn't bear collection risk at handoff.
+    if (
+      (isPickup || isSellerDelivery) &&
+      createDto.payment_method !== PaymentMethod.CREDIT_CARD
+    ) {
       throw new BadRequestException(
-        'Pickup orders must be paid by credit or debit card.',
+        `${isPickup ? 'Pickup' : 'Seller-delivery'} orders must be paid by credit or debit card.`,
       );
     }
 
-    // Validate shipping address (delivery only)
+    // Validate shipping address (delivery + seller-delivery; pickup skips it)
     let shippingAddress: any = null;
     let billingAddress: any = null;
 
@@ -2904,6 +2999,70 @@ export class BuyersService {
       );
     }
 
+    // Seller-delivery validation: single-seller, same country, address inside zone.
+    if (isSellerDelivery) {
+      if (isMultiSeller) {
+        throw new BadRequestException(
+          'Seller delivery is only available for single-seller orders. Remove items so the cart contains a single seller, or switch to delivery.',
+        );
+      }
+      const sellerOrgId = sellerEntries[0][0];
+      const { data: sdSellerOrg } = await this.supabase
+        .getClient()
+        .from('organizations')
+        .select(
+          'country_id, offers_self_delivery, self_delivery_zone',
+        )
+        .eq('id', sellerOrgId)
+        .maybeSingle();
+
+      const sdRow = sdSellerOrg as {
+        country_id?: string | null;
+        offers_self_delivery?: boolean | null;
+        self_delivery_zone?: { localities?: string[] } | null;
+      } | null;
+
+      if (!sdRow?.offers_self_delivery) {
+        throw new BadRequestException(
+          'This seller is not currently offering self-delivery. Please choose delivery.',
+        );
+      }
+      const sellerCountry = sdRow.country_id ?? null;
+      const buyerCountry = await this.getOrgCountryId(buyerOrgId);
+      if (sellerCountry && buyerCountry && sellerCountry !== buyerCountry) {
+        throw new BadRequestException(
+          'Seller delivery is only available when the buyer and seller are in the same country.',
+        );
+      }
+      const sdLocalities: string[] = Array.isArray(
+        sdRow.self_delivery_zone?.localities,
+      )
+        ? (sdRow.self_delivery_zone!.localities as string[])
+        : [];
+      if (sdLocalities.length === 0) {
+        throw new BadRequestException(
+          'This seller has not declared any self-delivery localities.',
+        );
+      }
+      const haystack = new Set(sdLocalities.map((l) => l.toLowerCase()));
+      const candidates = [
+        (shippingAddress as { city?: string | null })?.city,
+        (shippingAddress as { state?: string | null })?.state,
+      ]
+        .filter(
+          (v): v is string => typeof v === 'string' && v.trim().length > 0,
+        )
+        .map((v) => v.trim().toLowerCase());
+      const inZone = candidates.some((c) => haystack.has(c));
+      if (!inZone) {
+        const cityLabel =
+          (shippingAddress as { city?: string | null })?.city || 'that area';
+        throw new BadRequestException(
+          `Seller does not deliver to ${cityLabel}. Pick a different address or switch to delivery.`,
+        );
+      }
+    }
+
     // ----------------------------------------------------------------
     // Resolve credits once (used by parent or first seller row)
     // ----------------------------------------------------------------
@@ -3055,11 +3214,15 @@ export class BuyersService {
 
       // For pickup, the buyer collects from the seller's location — buyer/seller country are
       // effectively the same (the pickup_address's country), so we never resolve a shipping route.
+      // For seller_delivery, we already validated buyer/seller share a country above, so the
+      // route lookup is skipped just like pickup.
       const sellerIsland = sellerOrg?.country_id || 'gda';
-      const buyerIsland = isPickup
-        ? sellerIsland
-        : buyerOrg?.country_id || 'gda';
-      const isCrossIsland = !isPickup && sellerIsland !== buyerIsland;
+      const buyerIsland =
+        isPickup || isSellerDelivery
+          ? sellerIsland
+          : buyerOrg?.country_id || 'gda';
+      const isCrossIsland =
+        !isPickup && !isSellerDelivery && sellerIsland !== buyerIsland;
       let shippingRouteId: string | null = null;
       let crossIslandShippingFee = 0;
 
