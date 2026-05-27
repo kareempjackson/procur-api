@@ -51,7 +51,43 @@ export class PaymentMethodsService {
     if (orgErr || !org) {
       throw new NotFoundException(`Organization ${organizationId} not found`);
     }
-    if (org.stripe_customer_id) return org.stripe_customer_id;
+    if (org.stripe_customer_id) {
+      // Self-heal: a cached customer id from a previous Stripe key/account/mode
+      // will surface as `resource_missing` here. Drop the stale reference and
+      // fall through to the create-new branch so the next setup-intent works
+      // without manual DB cleanup. Any other Stripe error (network, auth, rate
+      // limit) is genuinely fatal and re-thrown.
+      try {
+        const existing = await this.stripe.retrieveCustomer(
+          org.stripe_customer_id,
+        );
+        // A deleted customer (deleted on the Stripe side, still has an ID we
+        // can fetch but `deleted: true`) is also unusable — treat the same as
+        // missing.
+        if ((existing as { deleted?: boolean })?.deleted !== true) {
+          return org.stripe_customer_id;
+        }
+        this.logger.warn(
+          `Stripe customer ${org.stripe_customer_id} on org ${organizationId} is deleted; recreating`,
+        );
+      } catch (err: unknown) {
+        const code = (err as { code?: string })?.code;
+        if (code === 'resource_missing') {
+          this.logger.warn(
+            `Stripe customer ${org.stripe_customer_id} on org ${organizationId} missing under current key; recreating`,
+          );
+        } else {
+          throw err;
+        }
+      }
+
+      // Null out the stale id so the UPDATE ... WHERE stripe_customer_id IS NULL
+      // race-guard below still works for a recreated customer.
+      await client
+        .from('organizations')
+        .update({ stripe_customer_id: null })
+        .eq('id', organizationId);
+    }
 
     // Pick a representative email: the first admin/owner of the org.
     const { data: orgUser } = await client
@@ -277,13 +313,38 @@ export class PaymentMethodsService {
     const { data: existing, error } = await this.supabase
       .getClient()
       .from('payment_methods')
-      .select('stripe_customer_id, stripe_payment_method_id')
+      .select('id, stripe_customer_id, stripe_payment_method_id')
       .eq('organization_id', organizationId)
       .eq('stripe_payment_method_id', stripePaymentMethodId)
       .is('detached_at', null)
       .maybeSingle();
     if (error) throw new BadRequestException(error.message);
     if (existing) {
+      // Self-heal: a Stripe key rotation (or account switch) will leave saved
+      // payment_methods rows pointing at PM ids that no longer exist on
+      // Stripe's side. Without this check, the order flow would later raise
+      // `Card declined (resource_missing): No such PaymentMethod` deep inside
+      // createPaymentIntent. Catch it here, soft-detach the orphaned row, and
+      // surface a friendly "please re-add" error to the buyer instead.
+      try {
+        await this.stripe.retrievePaymentMethod(stripePaymentMethodId);
+      } catch (err: unknown) {
+        const code = (err as { code?: string })?.code;
+        if (code === 'resource_missing') {
+          this.logger.warn(
+            `Stripe PM ${stripePaymentMethodId} on org ${organizationId} missing under current key; soft-detaching local row`,
+          );
+          await this.supabase
+            .getClient()
+            .from('payment_methods')
+            .update({ detached_at: new Date().toISOString() })
+            .eq('id', existing.id);
+          throw new BadRequestException(
+            'This saved card is no longer valid. Please re-add the card and try again.',
+          );
+        }
+        throw err;
+      }
       return {
         stripeCustomerId: existing.stripe_customer_id,
         stripePaymentMethodId: existing.stripe_payment_method_id,

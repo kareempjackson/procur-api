@@ -93,10 +93,33 @@ export class SentryAllExceptionsFilter implements ExceptionFilter {
       return response.status(status).json(responseBody);
     }
 
+    // Always log the underlying exception so it surfaces in the API server output —
+    // even before Sentry is configured locally, this gives `npm run start:dev` a
+    // visible signal instead of a silent 500.
+    // eslint-disable-next-line no-console
+    console.error('[unhandled exception]', exception);
+
+    // In non-production we include the message / name / code / stack on the
+    // response body so the frontend dev tools and curl can see what failed
+    // without round-tripping through Sentry. Production stays opaque so we
+    // never leak third-party error text (e.g. Stripe internals) to real users.
+    const isDev = process.env.NODE_ENV !== 'production';
+    const err = exception as Error & { code?: string | number };
     return response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
       timestamp: new Date().toISOString(),
       path: request?.url,
+      ...(isDev && {
+        message: err?.message,
+        name: err?.name,
+        code: err?.code,
+        // Trim stack to the first ~8 frames so the payload stays scannable
+        // in browser devtools / curl.
+        stack:
+          typeof err?.stack === 'string'
+            ? err.stack.split('\n').slice(0, 8)
+            : undefined,
+      }),
     });
   }
 
